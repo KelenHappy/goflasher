@@ -30,6 +30,17 @@ go run -tags fyne ./cmd/usbwriter
 Without the `fyne` tag, the command builds a dependency-free informational
 launcher so headless core CI does not require graphical system libraries.
 
+The interface follows the process locale and currently supports English and
+Traditional Chinese. Set `GOFLASHER_LANG` to override the desktop locale for a
+single launch, for example:
+
+```sh
+GOFLASHER_LANG=zh-TW go run -tags fyne ./cmd/usbwriter
+GOFLASHER_LANG=en go run -tags fyne ./cmd/usbwriter
+```
+
+If the requested language is unsupported, GoFlasher falls back to English.
+
 ## Explicit real-device smoke test
 
 Listing candidates is non-destructive:
