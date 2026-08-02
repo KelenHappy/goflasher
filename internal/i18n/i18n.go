@@ -93,6 +93,7 @@ var catalogs = map[Locale]map[string]string{
 		"card.device": "USB device", "card.image": "Image file", "card.image_info": "Image information",
 		"card.options": "Write options", "card.progress": "Status and progress", "log.launched": "GoFlasher started (no telemetry)",
 		"filter.images": "USB images", "error.cancelled": "operation cancelled", "bool.true": "yes", "bool.false": "no",
+		"picker.image.title": "Choose an image file", "picker.image.accept": "Choose",
 	},
 	TraditionalChinese: {
 		"launcher":     "GoFlasher 圖形介面需使用 'fyne' 建置標籤。安裝 Fyne 建置相依套件後，執行：go run -tags fyne ./cmd/usbwriter",
@@ -119,5 +120,6 @@ var catalogs = map[Locale]map[string]string{
 		"card.device": "USB 裝置", "card.image": "映像檔案", "card.image_info": "映像資訊",
 		"card.options": "寫入選項", "card.progress": "狀態與進度", "log.launched": "GoFlasher 啟動（無遙測）",
 		"filter.images": "USB 映像", "error.cancelled": "操作已取消", "bool.true": "是", "bool.false": "否",
+		"picker.image.title": "選擇映像檔案", "picker.image.accept": "選擇",
 	},
 }
