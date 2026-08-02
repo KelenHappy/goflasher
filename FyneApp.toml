@@ -1,0 +1,7 @@
+
+[Details]
+  ID = "org.goflasher.usbwriter"
+  Name = "USB Writer"
+
+[Migrations]
+  fyneDo = true

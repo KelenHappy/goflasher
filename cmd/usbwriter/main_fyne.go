@@ -56,31 +56,39 @@ func main() {
 	copyError := widget.NewButton(tr.T("action.copy_error"), func() { w.Clipboard().SetContent(logs.Text) })
 	copyError.Hide()
 	copyLog := widget.NewButton(tr.T("action.copy_log"), func() { w.Clipboard().SetContent(logs.Text) })
+	var logLines []string
+	const maxLogLines = 500
 	appendLog := func(message string) {
 		line := time.Now().Format("15:04:05 ") + message
-		if logs.Text != "" {
-			logs.SetText(logs.Text + "\n" + line)
-		} else {
-			logs.SetText(line)
-		}
+		fyne.Do(func() {
+			logLines = append(logLines, line)
+			if len(logLines) > maxLogLines {
+				logLines = logLines[len(logLines)-maxLogLines:]
+			}
+			logs.SetText(strings.Join(logLines, "\n"))
+		})
 	}
 	formatDevice := func(d device.Device) string {
 		return fmt.Sprintf("%s %s · %.1f GB · %s", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path)
 	}
 	refresh := func() {
-		list, err := backend.ListAllowedDevices(context.Background())
-		if err != nil {
-			status.SetText(tr.T("error.devices", err))
-			return
-		}
-		devices = list
-		options := make([]string, len(list))
-		for i, d := range list {
-			options[i] = formatDevice(d)
-		}
-		deviceSelect.Options = options
-		deviceSelect.Refresh()
-		appendLog(tr.T("log.devices", len(list)))
+		go func() {
+			list, err := backend.ListAllowedDevices(context.Background())
+			if err != nil {
+				fyne.Do(func() { status.SetText(tr.T("error.devices", err)) })
+				return
+			}
+			fyne.Do(func() {
+				devices = list
+				options := make([]string, len(list))
+				for i, d := range list {
+					options[i] = formatDevice(d)
+				}
+				deviceSelect.Options = options
+				deviceSelect.Refresh()
+			})
+			appendLog(tr.T("log.devices", len(list)))
+		}()
 	}
 	refreshButton := widget.NewButton(tr.T("action.rescan"), refresh)
 	deviceSelect.OnChanged = func(value string) {
