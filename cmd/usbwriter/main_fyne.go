@@ -17,6 +17,7 @@ import (
 
 	core "github.com/goflasher/goflasher/internal/app"
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/filepicker"
 	"github.com/goflasher/goflasher/internal/i18n"
 	"github.com/goflasher/goflasher/internal/image"
 	linuxbackend "github.com/goflasher/goflasher/internal/linux"
@@ -107,36 +108,38 @@ func main() {
 			}
 		}
 	}
-	choose := widget.NewButton(tr.T("action.choose"), func() {
-		fd := dialog.NewFileOpen(func(r fyne.URIReadCloser, err error) {
+	var choose *widget.Button
+	choose = widget.NewButton(tr.T("action.choose"), func() {
+		choose.Disable()
+		go func() {
+			defer fyne.Do(choose.Enable)
+			path, err := filepicker.OpenImage(tr.T("picker.image.title"), tr.T("picker.image.accept"), tr.T("filter.images"))
 			if err != nil {
-				status.SetText(err.Error())
+				fyne.Do(func() { dialog.ShowError(err, w) })
 				return
 			}
-			if r == nil {
+			if path == "" {
 				return
 			}
-			path := r.URI().Path()
-			_ = r.Close()
 			detected, err := image.Detect(path)
 			if err != nil {
-				dialog.ShowError(err, w)
+				fyne.Do(func() { dialog.ShowError(err, w) })
 				return
 			}
-			info = detected
-			imagePath.SetText(path)
-			imageInfo.SetText(tr.T("image.details", info.Format, info.Compression, float64(info.CompressedSize)/(1<<20)))
-			if selected.Path != "" {
-				if machine.State() == core.DeviceSelected {
-					_ = machine.Transition(core.Ready)
+			fyne.Do(func() {
+				info = detected
+				imagePath.SetText(path)
+				imageInfo.SetText(tr.T("image.details", info.Format, info.Compression, float64(info.CompressedSize)/(1<<20)))
+				if selected.Path != "" {
+					if machine.State() == core.DeviceSelected {
+						_ = machine.Transition(core.Ready)
+					}
+				} else if machine.State() == core.Idle {
+					_ = machine.Transition(core.ImageSelected)
 				}
-			} else if machine.State() == core.Idle {
-				_ = machine.Transition(core.ImageSelected)
-			}
+			})
 			appendLog(tr.T("log.image", filepath.Base(path)))
-		}, w)
-		fd.SetFilter(imageFilter{tr: tr})
-		fd.Show()
+		}()
 	})
 	lock := func(v bool) {
 		if v {
@@ -237,18 +240,6 @@ func main() {
 	w.ShowAndRun()
 }
 
-type imageFilter struct{ tr i18n.Localizer }
-
-func (imageFilter) Matches(uri fyne.URI) bool {
-	n := strings.ToLower(uri.Name())
-	for _, s := range []string{".iso", ".img", ".raw", ".img.gz", ".iso.gz", ".img.xz", ".iso.xz"} {
-		if strings.HasSuffix(n, s) {
-			return true
-		}
-	}
-	return false
-}
-func (f imageFilter) Name() string { return f.tr.T("filter.images") }
 func userError(tr i18n.Localizer, err error) string {
 	if err == context.Canceled {
 		return tr.T("error.cancelled")
