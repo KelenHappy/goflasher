@@ -38,6 +38,25 @@ are not a substitute for reviewing the GitHub release and repository history.
 
 ## Privilege boundary
 
-The GUI must not be run as root. The current Linux backend delegates unmount
-and power-off operations to `udisksctl`. A dedicated privileged helper has not
-yet been implemented. See the README for the current architecture boundary.
+The GUI must not be run as root and is never granted a raw-device descriptor.
+Unmount and power-off remain delegated to `udisksctl`. Write, read-back, and
+flush are performed by the root-owned `/usr/libexec/goflasher-helper`, launched
+by `pkexec` under the packaged polkit policy.
+
+The IPC request schema intentionally contains no arbitrary file path. It
+contains only the already revalidated hardware identity, serial/WWN when
+available, expected major/minor, exact capacity, and one of `write`,
+`read-back`, or `flush`. Before opening anything, the helper independently
+resolves `/sys/dev/block/<major>:<minor>`, compares sysfs identity and capacity,
+checks the derived `/dev` node's block type and device number, rejects mounted
+devices and system/swap disks, and derives the device-node path itself. A
+replacement, missing proc/sysfs safety metadata, malformed request, unknown
+field, unsupported mode, or canceled authorization fails closed.
+
+The helper accepts one request and one bounded operation per process. It does
+not parse images, enumerate caller-selected paths, mount filesystems, or expose
+a general-purpose root service. Polkit uses `auth_admin` without retained
+authorization, so users should expect an authentication prompt for each raw
+write/read-back/flush phase. Package ownership of both the helper and policy is
+part of the trust boundary; AppImage users must install the bundled, auditable
+copies into fixed root-owned locations before raw access can work.

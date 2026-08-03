@@ -13,6 +13,7 @@ macOS uses `diskutil` for removable-USB discovery, unmount, and eject operations
 - A C compiler and the Linux development libraries required by Fyne.
 - `xz` at runtime when opening XZ-compressed images.
 - `udisksctl` at runtime for unmount and device power-off operations.
+- polkit/`pkexec` at runtime for narrowly scoped raw-device operations.
 - XDG Desktop Portal and a desktop-specific portal backend for native image
   selection.
 
@@ -39,6 +40,10 @@ Build the Linux GUI:
 
 ```sh
 go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
+go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
+sudo install -m 0755 dist/goflasher-helper /usr/libexec/goflasher-helper
+sudo install -m 0644 packaging/org.goflasher.usbwriter.policy \
+  /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy
 ```
 
 Or run it directly during development:
@@ -88,6 +93,10 @@ so its declared runtime dependencies are resolved:
 sudo apt install ./dist/goflasher_1.0.0_amd64.deb
 ```
 
+The Debian package installs the helper at `/usr/libexec/goflasher-helper` and
+its polkit action. The helper is a separate non-GUI executable; never make the
+GUI setuid and never run it with `sudo`.
+
 ## AppImage
 
 The AppImage script requires executable copies of `linuxdeploy` and
@@ -102,6 +111,11 @@ packaging/make-appimage.sh \
 The current release workflow produces an x86-64 AppImage. The script uses
 `linuxdeploy` to populate the AppDir and `appimagetool` to create the final
 image.
+
+The AppImage contains the helper and policy under `usr/share/goflasher`, but
+cannot safely install them from its transient mount. Extract the AppImage and
+install those files to the fixed system paths shown in the README, after
+auditing them. Raw access fails closed until that integration is installed.
 
 ## Checksums
 

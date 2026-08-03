@@ -15,6 +15,9 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
 install -Dm755 "$binary" "$stage/usr/bin/goflasher"
+go build -trimpath -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
+install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \
+  "$stage/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.desktop" \
   "$stage/usr/share/applications/org.goflasher.usbwriter.desktop"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.svg" \
@@ -27,7 +30,7 @@ Version: $version
 Section: utils
 Priority: optional
 Architecture: $arch
-Depends: udisks2, xdg-desktop-portal, libc6, libgl1, libx11-6
+Depends: policykit-1, udisks2, xdg-desktop-portal, libc6, libgl1, libx11-6
 Maintainer: GoFlasher contributors
 Description: Safety-first USB image writer
  GoFlasher writes raw and compressed disk images to positively identified

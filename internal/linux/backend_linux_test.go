@@ -6,11 +6,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type fakePrivilegedHelper struct {
+	requests []privilegedRequest
+	err      error
+	writes   strings.Builder
+	readData string
+}
+
+func (f *fakePrivilegedHelper) OpenWriter(_ context.Context, r privilegedRequest) (io.WriteCloser, error) {
+	f.requests = append(f.requests, r)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return nopWriteCloser{&f.writes}, nil
+}
+func (f *fakePrivilegedHelper) OpenReader(_ context.Context, r privilegedRequest) (io.ReadCloser, error) {
+	f.requests = append(f.requests, r)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return io.NopCloser(strings.NewReader(f.readData)), nil
+}
+func (f *fakePrivilegedHelper) Flush(_ context.Context, r privilegedRequest) error {
+	f.requests = append(f.requests, r)
+	return f.err
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 type fakeRunner struct {
 	properties  map[string]string
@@ -85,6 +116,79 @@ func TestRevalidationDetectsReplacement(t *testing.T) {
 	run.properties[selected.Path] = strings.ReplaceAll(run.properties[selected.Path], "FLASH123", "REPLACED")
 	if _, err := b.Revalidate(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRawOperationsUseIdentityOnlyHelper(t *testing.T) {
+	b, _ := fixture(t)
+	fake := &fakePrivilegedHelper{readData: "verified"}
+	b.helper = fake
+	selected, err := b.RefreshDevice(context.Background(), "CARD123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := b.OpenWriter(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(w, "image")
+	_ = w.Close()
+	r, err := b.OpenReader(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(r)
+	_ = r.Close()
+	if err := b.Flush(context.Background(), selected); err != nil {
+		t.Fatal(err)
+	}
+	if fake.writes.String() != "image" || string(data) != "verified" || len(fake.requests) != 3 {
+		t.Fatalf("helper calls = %+v, write=%q read=%q", fake.requests, fake.writes.String(), data)
+	}
+	for i, mode := range []operationMode{modeWrite, modeRead, modeFlush} {
+		req := fake.requests[i]
+		if req.Identity != selected.ID || req.Major != selected.Major || req.Minor != selected.Minor || req.Capacity != selected.Size || req.Mode != mode {
+			t.Fatalf("request %d = %+v", i, req)
+		}
+	}
+}
+
+func TestHelperFailureReplacementAndAuthorizationCancellation(t *testing.T) {
+	b, run := fixture(t)
+	selected, _ := b.RefreshDevice(context.Background(), "CARD123")
+	fake := &fakePrivilegedHelper{err: errors.New("helper failed")}
+	b.helper = fake
+	if _, err := b.OpenWriter(context.Background(), selected); err == nil {
+		t.Fatal("helper failure was ignored")
+	}
+	fake.err = ErrDeviceChanged
+	if _, err := b.OpenReader(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("replacement error = %v", err)
+	}
+	fake.err = ErrAuthorizationCanceled
+	if err := b.Flush(context.Background(), selected); !errors.Is(err, ErrAuthorizationCanceled) {
+		t.Fatalf("authorization error = %v", err)
+	}
+	// A replacement caught by the unprivileged refresh must never reach the helper.
+	before := len(fake.requests)
+	run.properties[selected.Path] = strings.ReplaceAll(run.properties[selected.Path], "CARD123", "NEWCARD")
+	if _, err := b.OpenWriter(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("pre-helper replacement = %v", err)
+	}
+	if len(fake.requests) != before {
+		t.Fatal("helper called after failed revalidation")
+	}
+}
+
+func TestPrivilegedProtocolRejectsPathsAndUnknownModes(t *testing.T) {
+	env := helperEnvironment{SysDevBlock: t.TempDir(), SysClassBlock: t.TempDir(), MountInfo: filepath.Join(t.TempDir(), "mountinfo"), Swaps: filepath.Join(t.TempDir(), "swaps"), DevRoot: t.TempDir()}
+	for _, request := range []string{
+		`{"identity":"CARD123","major":8,"minor":32,"capacity":33554432,"mode":"write","path":"/dev/sda"}`,
+		`{"identity":"CARD123","major":8,"minor":32,"capacity":33554432,"mode":"erase"}`,
+	} {
+		if err := runPrivilegedHelper(strings.NewReader(request), io.Discard, io.Discard, env); err == nil {
+			t.Fatalf("unsafe request accepted: %s", request)
+		}
 	}
 }
 

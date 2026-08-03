@@ -41,12 +41,13 @@ type Backend struct {
 	Swaps         string
 	DevRoot       string
 	runner        commandRunner
+	helper        privilegedHelper
 }
 
 var _ device.Backend = (*Backend)(nil)
 
 func NewBackend() *Backend {
-	return &Backend{SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev", runner: osRunner{}}
+	return &Backend{SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev", runner: osRunner{}, helper: newCommandHelper()}
 }
 
 func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
@@ -194,26 +195,34 @@ func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteClos
 	if fresh.Mounted {
 		return nil, ErrUnmountFailed
 	}
-	return os.OpenFile(fresh.Path, os.O_WRONLY, 0)
+	return b.privileged().OpenWriter(ctx, helperRequest(fresh, modeWrite))
 }
 func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadCloser, error) {
 	fresh, err := b.Revalidate(ctx, d)
 	if err != nil {
 		return nil, err
 	}
-	return os.Open(fresh.Path)
+	if fresh.Mounted {
+		return nil, ErrUnmountFailed
+	}
+	return b.privileged().OpenReader(ctx, helperRequest(fresh, modeRead))
 }
 func (b *Backend) Flush(ctx context.Context, d device.Device) error {
 	fresh, err := b.Revalidate(ctx, d)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(fresh.Path, os.O_WRONLY, 0)
-	if err != nil {
-		return err
+	if fresh.Mounted {
+		return ErrUnmountFailed
 	}
-	defer f.Close()
-	return f.Sync()
+	return b.privileged().Flush(ctx, helperRequest(fresh, modeFlush))
+}
+
+func (b *Backend) privileged() privilegedHelper {
+	if b.helper == nil {
+		b.helper = newCommandHelper()
+	}
+	return b.helper
 }
 func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	fresh, err := b.Revalidate(ctx, d)
