@@ -2,10 +2,10 @@
 
 ## Supported build targets
 
-The raw-device backend and Fyne GUI currently build and run on Linux. Core
-packages are kept platform-neutral and are tested by GitHub Actions on Linux
-and Windows, but the repository does not yet contain a Windows raw-device
-backend or a Windows GUI entry point.
+The raw-device backend and Fyne GUI build on Linux, Windows, and macOS. Windows uses
+PowerShell storage cmdlets for conservative removable-USB discovery and taking
+the target disk offline; run the Windows GUI as Administrator for raw access.
+macOS uses `diskutil` for removable-USB discovery, unmount, and eject operations.
 
 ## Requirements
 
@@ -48,6 +48,30 @@ go run -tags fyne ./cmd/usbwriter
 ```
 
 Do not build or run the GUI as root.
+
+On Windows, install Go and the C compiler required by Fyne, then build the same
+GUI entry point from an Administrator PowerShell session:
+
+```powershell
+go test ./...
+go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
+```
+
+Run `dist\goflasher.exe` as Administrator so that Windows permits the selected
+removable disk to be taken offline and opened for raw writing. GoFlasher still
+revalidates the disk identity immediately before destructive access.
+
+On macOS, install Go and the Fyne prerequisites, then build the GUI:
+
+```sh
+go test ./...
+go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
+```
+
+Raw `/dev/rdiskN` access requires elevated rights. Until a dedicated privileged
+helper is available, launch the locally built binary with `sudo`; GoFlasher
+only lists external physical disks positively classified as removable USB
+media and revalidates their physical device-tree identity before access.
 
 ## Debian package
 
@@ -111,15 +135,15 @@ release.
 
 ## Windows work remaining
 
-A Windows release needs all of the following before it can be advertised as
-supported:
+The Windows GUI, native Explorer chooser, removable-device discovery, repeated
+identity checks, offline operation, raw writing, and read-back verification are
+implemented. A public Windows release still needs hardware-isolated tests,
+signed packaging, and release jobs. The current backend requires Administrator
+rights; a dedicated privileged helper would provide a better privilege boundary.
 
-- a Windows implementation of the removable-device backend and its safety
-  checks;
-- a Windows-native implementation of `internal/filepicker.OpenImage`;
-- a Windows Fyne GUI entry point that uses those implementations;
-- hardware-isolated Windows tests; and
-- signed Windows packaging and release jobs.
+## macOS work remaining
 
-The non-Linux picker stub exists to keep Linux D-Bus imports out of Windows
-builds; it is not a functional Windows file picker.
+The macOS GUI, native Finder chooser, conservative removable-USB backend, raw
+writing, read-back verification, and `diskutil` eject operation are implemented.
+A public macOS release still needs hardware-isolated tests, a dedicated
+privileged helper, signed and notarized packaging, and release jobs.
