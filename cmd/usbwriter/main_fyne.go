@@ -24,7 +24,10 @@ import (
 )
 
 func main() {
-	tr := i18n.System()
+	runApplication(i18n.System())
+}
+
+func runApplication(tr i18n.Localizer) {
 	a := app.NewWithID("org.goflasher.usbwriter")
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(fyne.NewSize(720, 620))
@@ -96,13 +99,7 @@ func main() {
 			if formatDevice(d) == value {
 				selected = d
 				deviceDetail.SetText(tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(tr, d.IsCardReader), localBool(tr, d.Mounted), d.PartitionCount))
-				if info.Path != "" {
-					if machine.State() == core.ImageSelected {
-						_ = machine.Transition(core.Ready)
-					}
-				} else if machine.State() == core.Idle {
-					_ = machine.Transition(core.DeviceSelected)
-				}
+				advanceSelection(machine, info.Path != "", core.ImageSelected, core.DeviceSelected)
 				break
 			}
 		}
@@ -129,13 +126,7 @@ func main() {
 				info = detected
 				imagePath.SetText(path)
 				imageInfo.SetText(tr.T("image.details", info.Format, info.Compression, float64(info.CompressedSize)/(1<<20)))
-				if selected.Path != "" {
-					if machine.State() == core.DeviceSelected {
-						_ = machine.Transition(core.Ready)
-					}
-				} else if machine.State() == core.Idle {
-					_ = machine.Transition(core.ImageSelected)
-				}
+				advanceSelection(machine, selected.Path != "", core.DeviceSelected, core.ImageSelected)
 			})
 			appendLog(tr.T("log.image", filepath.Base(path)))
 		}()
@@ -156,14 +147,7 @@ func main() {
 		}
 	}
 	start.OnTapped = func() {
-		if machine.State() == core.Completed {
-			_ = machine.Transition(core.Idle)
-			_ = machine.Transition(core.ImageSelected)
-			_ = machine.Transition(core.Ready)
-		}
-		if machine.State() == core.Cancelled || machine.State() == core.Failed {
-			_ = machine.Transition(core.Ready)
-		}
+		resetFinishedState(machine)
 		switch machine.State() {
 		case core.Writing, core.Flushing, core.Verifying, core.Ejecting, core.Unmounting:
 			if cancel != nil {
@@ -232,11 +216,39 @@ func main() {
 		confirm.SetDismissText(tr.T("action.cancel"))
 		confirm.Show()
 	}
-	content := container.NewVBox(widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, refreshButton, deviceSelect), deviceDetail)), widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, choose, imagePath)), widget.NewCard(tr.T("card.image_info"), "", imageInfo), widget.NewCard(tr.T("card.options"), "", container.NewVBox(verifyCheck, ejectCheck)), widget.NewCard(tr.T("card.progress"), "", container.NewVBox(status, bar, metrics)), container.NewBorder(nil, nil, container.NewHBox(copyLog, copyError), start, logPanel))
+	content := windowContent(tr, deviceSelect, deviceDetail, refreshButton, choose, imagePath, imageInfo, verifyCheck, ejectCheck, status, bar, metrics, copyLog, copyError, start, logPanel)
 	w.SetContent(container.NewVScroll(content))
 	appendLog(tr.T("log.launched"))
 	refresh()
 	w.ShowAndRun()
+}
+
+func advanceSelection(machine *core.StateMachine, counterpartSelected bool, waitingState, selectedState core.State) {
+	if counterpartSelected && machine.State() == waitingState {
+		_ = machine.Transition(core.Ready)
+	} else if !counterpartSelected && machine.State() == core.Idle {
+		_ = machine.Transition(selectedState)
+	}
+}
+
+func resetFinishedState(machine *core.StateMachine) {
+	switch machine.State() {
+	case core.Completed:
+		_ = machine.Transition(core.Idle)
+		_ = machine.Transition(core.ImageSelected)
+		_ = machine.Transition(core.Ready)
+	case core.Cancelled, core.Failed:
+		_ = machine.Transition(core.Ready)
+	}
+}
+
+func windowContent(tr i18n.Localizer, deviceSelect *widget.Select, deviceDetail *widget.Label, refreshButton, choose *widget.Button, imagePath *widget.Entry, imageInfo *widget.Label, verifyCheck, ejectCheck *widget.Check, status *widget.Label, bar *widget.ProgressBar, metrics *widget.Label, copyLog, copyError, start *widget.Button, logPanel *widget.Accordion) *fyne.Container {
+	deviceCard := widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, refreshButton, deviceSelect), deviceDetail))
+	imageCard := widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, choose, imagePath))
+	optionsCard := widget.NewCard(tr.T("card.options"), "", container.NewVBox(verifyCheck, ejectCheck))
+	progressCard := widget.NewCard(tr.T("card.progress"), "", container.NewVBox(status, bar, metrics))
+	actions := container.NewBorder(nil, nil, container.NewHBox(copyLog, copyError), start, logPanel)
+	return container.NewVBox(deviceCard, imageCard, widget.NewCard(tr.T("card.image_info"), "", imageInfo), optionsCard, progressCard, actions)
 }
 
 func userError(tr i18n.Localizer, err error) string {
