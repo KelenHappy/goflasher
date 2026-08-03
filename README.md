@@ -3,7 +3,8 @@
 
 # GoFlasher: A Safety-First USB Image Writer
 
-**GoFlasher writes raw or compressed disk images to removable USB flash media on Linux.**
+**GoFlasher writes raw or compressed disk images to removable USB flash media
+on Linux, Windows, and macOS.**
 
 [繁體中文說明](readme-zh-tw.md)
 </div>
@@ -29,24 +30,45 @@
   media or card readers.
 - Reject mounted critical system disks, swap devices, ATA devices, SSD/HDD
   models, storage bridges, UAS devices, and ambiguous USB storage.
-- Revalidate device identity before unmounting and before raw-device access.
+- Revalidate device identity before unmounting and on both sides of the
+  privileged raw-device boundary.
+
+GoFlasher does not inspect, identify, or restrict the operating system contained
+inside an image. On every supported host it can therefore write a Linux ISO or
+any other raw disk image in a supported format: `.iso`, `.img`, `.raw`, or a
+gzip (`.gz`) or XZ (`.xz`) compressed image.
 
 GoFlasher is an image writer. It does **not** format filesystems, download
 operating-system images, create Windows installation workarounds, create
 persistent partitions, or perform bad-block tests.
 
-## Platform status
+## Host platform support
 
-The production GUI and raw-device backend support **Linux, Windows, and
-macOS**. Windows uses its native Explorer chooser and PowerShell storage
-cmdlets; raw disk access requires an Administrator session. macOS uses its
-native Finder chooser and `diskutil`; raw disk access requires elevated rights.
+“Cross-platform” means the GoFlasher application and raw-device backend can run
+on **Linux, Windows, and macOS hosts**. It does not mean an image is tied to its
+host: GoFlasher on any of those three platforms can write a Linux ISO, or any
+other supported raw disk image, to approved removable media. Windows uses its
+native Explorer chooser and PowerShell storage cmdlets; raw disk access requires
+an Administrator session. macOS uses its native Finder chooser and `diskutil`;
+raw disk access requires elevated rights.
 
 The Linux backend reads sysfs, procfs, and udev information. It uses
-`udisksctl` for unmount and power-off operations. The GUI must not be run as
-root. A dedicated Linux privileged helper has not been implemented.
+`udisksctl` for unmount and power-off operations. The GUI always remains an
+ordinary user process. For write, read-back, and flush it sends only a
+revalidated identity, major/minor number, capacity, and fixed operation mode to
+the root-owned `/usr/libexec/goflasher-helper` through `pkexec`; it never asks
+the helper to open a caller-supplied path. A polkit authentication dialog may
+therefore appear for each raw-device phase. Canceling it safely aborts the
+operation.
 
-## Downloads
+## Prebuilt downloads
+
+Source support and prebuilt package availability are separate. The current
+release workflow publishes prebuilt **Linux** artifacts only: an x86-64
+AppImage and an amd64 Debian package. The Windows and macOS implementations are
+available in the source tree and can be built from source as documented in
+[BUILDING.md](BUILDING.md), but signed Windows installers and signed/notarized
+macOS packages are not yet published.
 
 When a packaged release is published, its GitHub release assets are produced by
 the repository release workflow:
@@ -67,6 +89,17 @@ Run the AppImage:
 ```sh
 chmod +x GoFlasher-*-x86_64.AppImage
 ./GoFlasher-*-x86_64.AppImage
+```
+
+An AppImage cannot install a stable root-owned polkit helper. Before its first
+use, extract the AppImage and have an administrator audit and install the two
+bundled integration files (or install the Debian package instead):
+
+```sh
+./GoFlasher-*-x86_64.AppImage --appimage-extract
+sudo install -m 0755 squashfs-root/usr/share/goflasher/goflasher-helper /usr/libexec/goflasher-helper
+sudo install -m 0644 squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy \
+  /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy
 ```
 
 Install the Debian package on Debian or Ubuntu:

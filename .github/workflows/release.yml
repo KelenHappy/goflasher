@@ -33,6 +33,7 @@ jobs:
           go test ./...
           mkdir -p dist
           go build -trimpath -tags fyne -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
+          go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
       - name: Build Debian package
         run: packaging/make-deb.sh dist/goflasher "$VERSION" dist
       - name: Build AppImage
@@ -50,7 +51,7 @@ jobs:
         run: |
           cd dist
           sha256sum *.AppImage *.deb > SHA256SUMS
-          rm goflasher
+          rm goflasher goflasher-helper
       - uses: actions/upload-artifact@v4
         with:
           name: goflasher-linux-${{ env.VERSION }}

@@ -1,0 +1,12 @@
+{
+  "version": "goflasher-hwtest/v1",
+  "devices": [
+    {
+      "identity": "REPLACE-WITH-EXACT-BACKEND-IDENTITY",
+      "serial": "REPLACE-WITH-SERIAL-WHEN-AVAILABLE",
+      "capacity": 8053063680,
+      "model": "REPLACE-WITH-EXACT-MODEL",
+      "disposable": true
+    }
+  ]
+}

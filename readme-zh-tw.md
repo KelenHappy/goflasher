@@ -3,7 +3,8 @@
 
 # GoFlasher：以安全為優先的 USB 映像檔寫入工具
 
-**GoFlasher 可在 Linux 將未壓縮或壓縮的磁碟映像檔寫入可移除式 USB 隨身碟。**
+**GoFlasher 可在 Linux、Windows 與 macOS 將未壓縮或壓縮的磁碟映像檔寫入
+可移除式 USB 隨身碟。**
 
 [English README](README.md)
 </div>
@@ -29,20 +30,33 @@
   儲存裝置橋接器、UAS 裝置及無法明確辨識的 USB 儲存裝置。
 - 在卸載前及開啟原始裝置前，重新驗證裝置身分。
 
+GoFlasher 不會分析、辨識或限制映像檔內含的作業系統。因此，在每個支援的主機
+平台上，都可以燒錄 Linux ISO 或其他支援格式的 raw disk image；目前接受
+`.iso`、`.img`、`.raw`，以及以 gzip（`.gz`）或 XZ（`.xz`）壓縮的映像檔。
+
 GoFlasher 是映像檔寫入工具。它**不會**格式化檔案系統、下載作業系統映像檔、
 建立 Windows 安裝替代方案、建立持久化分割區或執行壞軌測試。
 
-## 平台支援狀態
+## 主機平台支援
 
-正式版 GUI 與原始裝置後端目前支援 **Linux、Windows 與 macOS**。Windows 使用
-原生 Explorer 檔案選擇器與 PowerShell 儲存裝置指令；macOS 使用原生 Finder
-選擇器與 `diskutil`。兩者的原始磁碟存取都需要提升權限。
+「跨平台」是指 GoFlasher 程式與原始裝置後端可以在 **Linux、Windows 與
+macOS 主機**上執行，而不是指映像檔受限於主機平台。在上述三種平台中的任何
+一種主機上，GoFlasher 都能將 Linux ISO 或其他支援的 raw disk image 寫入核准的
+可移除式媒體。Windows 使用原生 Explorer 檔案選擇器與 PowerShell 儲存裝置
+指令；macOS 使用原生 Finder 選擇器與 `diskutil`。兩者的原始磁碟存取都需要
+提升權限。
 
 目前的後端會讀取 Linux 的 sysfs、procfs 與 udev 資訊，並使用 `udisksctl`
-執行卸載及關閉裝置電源。請勿以 root 身分執行 GUI；專用的權限提升輔助程式
-尚未實作。
+執行卸載及關閉裝置電源。請勿以 root 身分執行 GUI；寫入、回讀與 flush 會透過
+polkit 呼叫由 root 擁有的專用權限提升輔助程式。
 
-## 下載
+## 預先建置的下載套件
+
+程式碼支援的平台與目前提供預先建置套件的平台是兩件不同的事。目前 release
+workflow 只發布預先建置的 **Linux** artifacts：x86-64 AppImage 與 amd64 Debian
+套件。Windows 與 macOS 的實作已包含在原始碼中，可依 [BUILDING.md](BUILDING.md)
+從原始碼建置；在完成程式碼簽署前，尚未提供已簽署的 Windows 安裝程式，以及
+已簽署並完成公證（notarization）的 macOS 套件。
 
 封裝版本發布後，儲存庫的發行工作流程會在 GitHub Release 提供下列檔案：
 
