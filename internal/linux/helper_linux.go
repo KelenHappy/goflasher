@@ -59,11 +59,7 @@ func newCommandHelper() privilegedHelper { return &commandHelper{executable: hel
 
 func (h *commandHelper) start(ctx context.Context, r privilegedRequest) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
 	cmd := exec.CommandContext(ctx, "pkexec", h.executable)
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	out, err := cmd.StdoutPipe()
+	in, out, err := commandPipes(cmd)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -72,25 +68,52 @@ func (h *commandHelper) start(ctx context.Context, r privilegedRequest) (*exec.C
 	if err = cmd.Start(); err != nil {
 		return nil, nil, nil, authorizationError(err, stderr.String())
 	}
-	if err = json.NewEncoder(in).Encode(r); err != nil {
-		_ = in.Close()
-		_ = cmd.Wait()
+	if err = sendRequest(cmd, in, r); err != nil {
 		return nil, nil, nil, err
 	}
 	buffered := bufio.NewReader(out)
-	line, err := buffered.ReadString('\n')
-	if err != nil || line != "OK\n" {
-		_ = in.Close()
-		waitErr := cmd.Wait()
-		if line != "" {
-			stderr.WriteString(strings.TrimSpace(line))
-		}
-		if waitErr == nil {
-			waitErr = err
-		}
-		return nil, nil, nil, authorizationError(waitErr, stderr.String())
+	if err = awaitReady(cmd, in, buffered, &stderr); err != nil {
+		return nil, nil, nil, err
 	}
 	return cmd, in, &bufferedReadCloser{Reader: buffered, closer: out}, nil
+}
+
+func commandPipes(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = in.Close()
+		return nil, nil, err
+	}
+	return in, out, nil
+}
+
+func sendRequest(cmd *exec.Cmd, in io.WriteCloser, request privilegedRequest) error {
+	if err := json.NewEncoder(in).Encode(request); err != nil {
+		_ = in.Close()
+		_ = cmd.Wait()
+		return err
+	}
+	return nil
+}
+
+func awaitReady(cmd *exec.Cmd, in io.WriteCloser, out *bufio.Reader, stderr *strings.Builder) error {
+	line, readErr := out.ReadString('\n')
+	if readErr == nil && line == "OK\n" {
+		return nil
+	}
+	_ = in.Close()
+	waitErr := cmd.Wait()
+	if line != "" {
+		stderr.WriteString(strings.TrimSpace(line))
+	}
+	if waitErr == nil {
+		waitErr = readErr
+	}
+	return authorizationError(waitErr, stderr.String())
 }
 
 type bufferedReadCloser struct {
@@ -101,13 +124,20 @@ type bufferedReadCloser struct {
 func (r *bufferedReadCloser) Close() error { return r.closer.Close() }
 
 func authorizationError(err error, detail string) error {
-	if strings.Contains(strings.ToLower(detail), "cancel") || (err != nil && strings.Contains(err.Error(), "126")) {
+	if authorizationCanceled(err, detail) {
 		return fmt.Errorf("%w: %v", ErrAuthorizationCanceled, err)
 	}
 	if detail != "" {
 		return fmt.Errorf("privileged helper: %s: %w", strings.TrimSpace(detail), err)
 	}
 	return err
+}
+
+func authorizationCanceled(err error, detail string) bool {
+	if strings.Contains(strings.ToLower(detail), "cancel") {
+		return true
+	}
+	return err != nil && strings.Contains(err.Error(), "126")
 }
 
 type processWriter struct {
@@ -214,61 +244,131 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 }
 
 func validateAndOpen(req privilegedRequest, env helperEnvironment) (*os.File, error) {
-	if req.Identity == "" || req.Capacity == 0 || (req.Mode != modeWrite && req.Mode != modeRead && req.Mode != modeFlush) {
+	if !req.valid() {
 		return nil, errors.New("incomplete request")
 	}
+	name, real, err := resolveDevice(req, env)
+	if err != nil {
+		return nil, err
+	}
+	class := filepath.Join(env.SysClassBlock, name)
+	major, minor, err := validateDeviceMetadata(req, class, real)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDeviceSafety(env, name, major, minor); err != nil {
+		return nil, err
+	}
+	return openDevice(req, env, name)
+}
+
+func (req privilegedRequest) valid() bool {
+	if req.Identity == "" {
+		return false
+	}
+	if req.Capacity == 0 {
+		return false
+	}
+	switch req.Mode {
+	case modeWrite, modeRead, modeFlush:
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveDevice(req privilegedRequest, env helperEnvironment) (string, string, error) {
 	link := filepath.Join(env.SysDevBlock, fmt.Sprintf("%d:%d", req.Major, req.Minor))
 	real, err := filepath.EvalSymlinks(link)
 	if err != nil {
-		return nil, ErrDeviceChanged
+		return "", "", ErrDeviceChanged
 	}
 	name := filepath.Base(real)
 	class := filepath.Join(env.SysClassBlock, name)
 	if exists(filepath.Join(class, "partition")) {
-		return nil, ErrUnsupportedDevice
+		return "", "", ErrUnsupportedDevice
 	}
-	if readTrim(filepath.Join(class, "removable")) != "1" || readTrim(filepath.Join(class, "device/type")) != "0" || !strings.Contains(real, "/usb") {
-		return nil, ErrUnsupportedDevice
+	if !supportedUSBDevice(class, real) {
+		return "", "", ErrUnsupportedDevice
 	}
-	maj, min, err := readDeviceNumber(filepath.Join(class, "dev"))
-	if err != nil || maj != req.Major || min != req.Minor {
-		return nil, ErrDeviceChanged
+	return name, real, nil
+}
+
+func supportedUSBDevice(class, real string) bool {
+	if readTrim(filepath.Join(class, "removable")) != "1" {
+		return false
+	}
+	if readTrim(filepath.Join(class, "device/type")) != "0" {
+		return false
+	}
+	return strings.Contains(real, "/usb")
+}
+
+func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, uint32, error) {
+	major, minor, err := readDeviceNumber(filepath.Join(class, "dev"))
+	if err != nil {
+		return 0, 0, ErrDeviceChanged
+	}
+	if major != req.Major || minor != req.Minor {
+		return 0, 0, ErrDeviceChanged
 	}
 	if readUint(filepath.Join(class, "size"))*512 != req.Capacity {
-		return nil, ErrDeviceChanged
+		return 0, 0, ErrDeviceChanged
 	}
 	serial := readTrim(filepath.Join(class, "device/serial"))
 	wwn := first(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
 	if req.Serial != "" && req.Serial != serial {
-		return nil, ErrDeviceChanged
+		return 0, 0, ErrDeviceChanged
 	}
 	if req.WWN != "" && req.WWN != wwn {
-		return nil, ErrDeviceChanged
+		return 0, 0, ErrDeviceChanged
 	}
-	derived := first(serial, wwn, fmt.Sprintf("%d:%d@%s", maj, min, real))
-	if req.Identity != derived && req.Identity != req.Serial && req.Identity != req.WWN {
-		return nil, ErrDeviceChanged
+	derived := first(serial, wwn, fmt.Sprintf("%d:%d@%s", major, minor, real))
+	if !identityMatches(req, derived) {
+		return 0, 0, ErrDeviceChanged
 	}
-	unsafe, err := mountedOrSystem(name, req.Major, req.Minor, env)
+	return major, minor, nil
+}
+
+func identityMatches(req privilegedRequest, derived string) bool {
+	if req.Identity == derived || req.Identity == req.Serial {
+		return true
+	}
+	return req.Identity == req.WWN
+}
+
+func validateDeviceSafety(env helperEnvironment, name string, major, minor uint32) error {
+	unsafe, err := mountedOrSystem(name, major, minor, env)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if unsafe {
-		return nil, ErrSystemDisk
+		return ErrSystemDisk
 	}
+	return validateDeviceNode(env, name, major, minor)
+}
+
+func validateDeviceNode(env helperEnvironment, name string, major, minor uint32) error {
 	node := filepath.Join(env.DevRoot, name)
 	var st syscall.Stat_t
 	if err := syscall.Stat(node, &st); err != nil {
-		return nil, err
+		return err
 	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK || unix.Major(uint64(st.Rdev)) != req.Major || unix.Minor(uint64(st.Rdev)) != req.Minor {
-		return nil, ErrDeviceChanged
+	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
+		return ErrDeviceChanged
 	}
+	if unix.Major(uint64(st.Rdev)) != major || unix.Minor(uint64(st.Rdev)) != minor {
+		return ErrDeviceChanged
+	}
+	return nil
+}
+
+func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.File, error) {
 	flags := os.O_RDONLY
 	if req.Mode != modeRead {
 		flags = os.O_WRONLY
 	}
-	return os.OpenFile(node, flags|syscall.O_CLOEXEC, 0)
+	return os.OpenFile(filepath.Join(env.DevRoot, name), flags|syscall.O_CLOEXEC, 0)
 }
 
 func mountedOrSystem(name string, major, minor uint32, env helperEnvironment) (bool, error) {
@@ -276,28 +376,37 @@ func mountedOrSystem(name string, major, minor uint32, env helperEnvironment) (b
 	if err != nil {
 		return false, err
 	}
-	critical := map[string]bool{"/": true, "/boot": true, "/boot/efi": true, "/home": true}
-	for n, points := range mounts {
-		parent := parentName(env.SysClassBlock, n)
-		if (n.major == major && n.minor == minor) || parent == name {
-			if len(points) != 0 {
-				return true, nil
-			}
-			for _, p := range points {
-				if critical[p] {
-					return true, nil
-				}
-			}
-		}
+	if deviceMounted(name, major, minor, env.SysClassBlock, mounts) {
+		return true, nil
 	}
 	swaps, err := parseSwaps(env.Swaps)
 	if err != nil {
 		return false, err
 	}
-	for path := range swaps {
-		if filepath.Base(path) == name || parentForPath(env.SysClassBlock, path) == name {
-			return true, nil
+	return deviceUsedForSwap(name, env.SysClassBlock, swaps), nil
+}
+
+func deviceMounted(name string, major, minor uint32, classRoot string, mounts map[devNumber][]string) bool {
+	for number, points := range mounts {
+		if len(points) == 0 {
+			continue
+		}
+		if sameDevice(number, major, minor) || parentName(classRoot, number) == name {
+			return true
 		}
 	}
-	return false, nil
+	return false
+}
+
+func sameDevice(number devNumber, major, minor uint32) bool {
+	return number.major == major && number.minor == minor
+}
+
+func deviceUsedForSwap(name, classRoot string, swaps map[string]bool) bool {
+	for path := range swaps {
+		if filepath.Base(path) == name || parentForPath(classRoot, path) == name {
+			return true
+		}
+	}
+	return false
 }
