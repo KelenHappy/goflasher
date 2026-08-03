@@ -3,12 +3,12 @@
 
 # GoFlasher: A Safety-First USB Image Writer
 
-[![CI](https://github.com/KelenHappy/goflasher/actions/workflows/ci.yml/badge.svg)](https://github.com/KelenHappy/goflasher/actions/workflows/ci.yml)
-[![Release packages](https://github.com/KelenHappy/goflasher/actions/workflows/release.yml/badge.svg)](https://github.com/KelenHappy/goflasher/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/KelenHappy/goflasher?display_name=tag)](https://github.com/KelenHappy/goflasher/releases/latest)
-[![License: GPL v3](https://img.shields.io/github/license/KelenHappy/goflasher)](LICENSE)
-[![Downloads](https://img.shields.io/github/downloads/KelenHappy/goflasher/total)](https://github.com/KelenHappy/goflasher/releases)
-[![Contributors](https://img.shields.io/github/contributors/KelenHappy/goflasher)](https://github.com/KelenHappy/goflasher/graphs/contributors)
+[![CI](https://github.com/goflasher/goflasher/actions/workflows/ci.yml/badge.svg)](https://github.com/goflasher/goflasher/actions/workflows/ci.yml)
+[![Release packages](https://github.com/goflasher/goflasher/actions/workflows/release.yml/badge.svg)](https://github.com/goflasher/goflasher/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/goflasher/goflasher?display_name=tag)](https://github.com/goflasher/goflasher/releases/latest)
+[![License: GPL v3](https://img.shields.io/github/license/goflasher/goflasher)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/goflasher/goflasher/total)](https://github.com/goflasher/goflasher/releases)
+[![Contributors](https://img.shields.io/github/contributors/goflasher/goflasher)](https://github.com/goflasher/goflasher/graphs/contributors)
 
 **GoFlasher writes raw or compressed disk images to removable USB flash media on Linux.**
 </div>
@@ -132,6 +132,6 @@ version 3**. See [LICENSE](LICENSE).
 
 ## Enhancements and bugs
 
-Use the [GitHub issue tracker](https://github.com/KelenHappy/goflasher/issues) for
+Use the [GitHub issue tracker](https://github.com/goflasher/goflasher/issues) for
 non-sensitive bug reports and feature requests. Include the GoFlasher version,
 Linux distribution, desktop environment, and relevant redacted log entries.
