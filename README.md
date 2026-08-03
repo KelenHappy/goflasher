@@ -1,70 +1,137 @@
-# GoFlasher
+<div align="center">
+  <img src="packaging/org.goflasher.usbwriter.svg" width="128" height="128" alt="GoFlasher logo">
 
-GoFlasher is a Linux-only, safety-first USB image writer. The repository now
-includes the Phase 3 write/flush/read-back/eject pipeline and the
-Phase 4 single-page Fyne UI. The final privileged-helper architecture has not
-yet been implemented.
+# GoFlasher: A Safety-First USB Image Writer
 
-The core already provides UI-independent contracts, raw/gzip/xz streaming
-image readers, SHA-256 calculation, cancellable file-to-file writing, and
-progress/speed/ETA reporting. It never expands a compressed image to a
-temporary file.
+[![CI](https://github.com/KelenHappy/goflasher/actions/workflows/ci.yml/badge.svg)](https://github.com/KelenHappy/goflasher/actions/workflows/ci.yml)
+[![Release packages](https://github.com/KelenHappy/goflasher/actions/workflows/release.yml/badge.svg)](https://github.com/KelenHappy/goflasher/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/KelenHappy/goflasher?display_name=tag)](https://github.com/KelenHappy/goflasher/releases/latest)
+[![License: GPL v3](https://img.shields.io/github/license/KelenHappy/goflasher)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/KelenHappy/goflasher/total)](https://github.com/KelenHappy/goflasher/releases)
+[![Contributors](https://img.shields.io/github/contributors/KelenHappy/goflasher)](https://github.com/KelenHappy/goflasher/graphs/contributors)
 
-The Linux backend enumerates `/sys/class/block`, supplements kernel topology
-with udev properties, reads mount and swap ownership from procfs, and only
-returns positively identified removable USB flash media or card readers. It
-rejects system disks, ATA/SSD/bridge devices, and ambiguous USB storage. Device
-identity is revalidated before unmounting or opening a target. Unmount and
-power-off currently use `udisksctl`; this is an explicit Phase 2 boundary, not
-a request to launch the GUI as root.
+**GoFlasher writes raw or compressed disk images to removable USB flash media on Linux.**
+</div>
 
-## GUI
+> [!WARNING]
+> Writing an image destroys all data on the selected device. Check its model,
+> serial number, capacity, and device path before confirming.
 
-Fyne dependencies require the usual Linux OpenGL/X11 development packages.
-Build or run the single-page UI with:
+## Features
+
+- Write `.iso`, `.img`, and `.raw` disk images.
+- Stream gzip (`.gz`) and XZ (`.xz`) images without creating an uncompressed
+  temporary file.
+- Calculate the source SHA-256 while inspecting the image and while writing it.
+- Optionally read the written bytes back and compare their SHA-256 checksum.
+- Show writing and verification progress, throughput, and estimated time.
+- Cancel an active operation.
+- Optionally power off the USB device after a successful write.
+- Open the Linux desktop's native file chooser through XDG Desktop Portal.
+- Display the interface in English or Traditional Chinese.
+- Keep a copyable, bounded activity log in the application.
+- Restrict targets to devices positively identified as removable USB flash
+  media or card readers.
+- Reject mounted critical system disks, swap devices, ATA devices, SSD/HDD
+  models, storage bridges, UAS devices, and ambiguous USB storage.
+- Revalidate device identity before unmounting and before raw-device access.
+
+GoFlasher is an image writer. It does **not** format filesystems, download
+operating-system images, create Windows installation workarounds, create
+persistent partitions, or perform bad-block tests.
+
+## Platform status
+
+The production GUI and raw-device backend currently support **Linux only**.
+The platform-neutral packages are tested on Linux and Windows, and the native
+file-picker boundary is separated by build tags so a Windows backend can be
+implemented later. There is no Windows writer or Windows GUI release yet.
+
+The current backend reads Linux sysfs, procfs, and udev information. It uses
+`udisksctl` for unmount and power-off operations. The GUI must not be run as
+root. A dedicated privileged helper has not been implemented.
+
+## Downloads
+
+When a packaged release is published, its GitHub release assets are produced by
+the repository release workflow:
+
+- `GoFlasher-<version>-x86_64.AppImage`
+- `goflasher_<version>_amd64.deb`
+- `SHA256SUMS`
+
+Verify files downloaded from the release page before running or installing
+them:
+
+```sh
+sha256sum --check SHA256SUMS
+```
+
+Run the AppImage:
+
+```sh
+chmod +x GoFlasher-*-x86_64.AppImage
+./GoFlasher-*-x86_64.AppImage
+```
+
+Install the Debian package on Debian or Ubuntu:
+
+```sh
+sudo apt install ./goflasher_*_amd64.deb
+```
+
+Do not launch GoFlasher itself with `sudo`.
+
+## Building
+
+GoFlasher requires the Go version declared in [`go.mod`](go.mod). Building the
+Fyne GUI also requires Linux OpenGL, X11, and Wayland development packages.
+See **[BUILDING.md](BUILDING.md)** for dependency installation, source builds,
+AppImage and Debian packaging, and current Windows limitations.
+
+A development GUI build can be started with:
 
 ```sh
 go run -tags fyne ./cmd/usbwriter
 ```
 
-Without the `fyne` tag, the command builds a dependency-free informational
-launcher so headless core CI does not require graphical system libraries.
+Without the `fyne` tag, `cmd/usbwriter` is only a dependency-free informational
+launcher for headless environments.
 
-The interface follows the process locale and currently supports English and
-Traditional Chinese. Set `GOFLASHER_LANG` to override the desktop locale for a
-single launch, for example:
+## Language
+
+GoFlasher follows the process locale. Override it for one launch with
+`GOFLASHER_LANG`:
 
 ```sh
 GOFLASHER_LANG=zh-TW go run -tags fyne ./cmd/usbwriter
 GOFLASHER_LANG=en go run -tags fyne ./cmd/usbwriter
 ```
 
-If the requested language is unsupported, GoFlasher falls back to English.
+Unsupported locales fall back to English.
 
-## Explicit real-device smoke test
+## Testing
 
-Listing candidates is non-destructive:
-
-```sh
-go run ./cmd/usbwriter-hwtest
-```
-
-Writing is intentionally difficult to invoke and **destroys all target data**:
-
-```sh
-go run ./cmd/usbwriter-hwtest \
-  --device /dev/sdX --image ./small-test.img --confirm-device /dev/sdX
-```
-
-The tool refuses devices outside the same conservative backend allow-list and
-always performs read-back verification. Never run this command in ordinary CI.
-
-## Development
-
-Requires Go 1.25 or newer.
+The automated suite uses temporary regular files and fake sysfs/procfs trees;
+it does not write to real block devices.
 
 ```sh
 go test ./...
 ```
 
-Automated tests deliberately never access real block devices.
+See **[TESTING.md](TESTING.md)** for race tests, GUI checks, package smoke tests,
+and the deliberately guarded real-device test command.
+
+## Security and safety
+
+Read **[SECURITY.md](SECURITY.md)** before reporting a vulnerability. Do not
+publish a device-selection or raw-write vulnerability in a public issue.
+
+GoFlasher is free software distributed under the **GNU General Public License
+version 3**. See [LICENSE](LICENSE).
+
+## Enhancements and bugs
+
+Use the [GitHub issue tracker](https://github.com/KelenHappy/goflasher/issues) for
+non-sensitive bug reports and feature requests. Include the GoFlasher version,
+Linux distribution, desktop environment, and relevant redacted log entries.

@@ -1,0 +1,65 @@
+name: Release packages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used in package names
+        required: true
+        default: 0.0.0-dev
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install GUI and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
+      - name: Test and build
+        run: |
+          go test ./...
+          mkdir -p dist
+          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
+      - name: Build Debian package
+        run: packaging/make-deb.sh dist/goflasher "$VERSION" dist
+      - name: Build AppImage
+        run: |
+          curl --fail --location --retry 3 \
+            -o appimagetool.AppImage \
+            https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
+          curl --fail --location --retry 3 \
+            -o linuxdeploy.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x appimagetool.AppImage linuxdeploy.AppImage
+          packaging/make-appimage.sh dist/goflasher "$VERSION" dist \
+            ./linuxdeploy.AppImage ./appimagetool.AppImage
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.AppImage *.deb > SHA256SUMS
+          rm goflasher
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goflasher-linux-${{ env.VERSION }}
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish GitHub release assets
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --verify-tag --generate-notes
+          gh release upload "$VERSION" dist/* --clobber

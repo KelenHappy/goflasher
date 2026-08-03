@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GoFlasher
+Comment=Safely write disk images to removable USB media
+Exec=goflasher
+Icon=org.goflasher.usbwriter
+Terminal=false
+Categories=Utility;System;
+Keywords=USB;ISO;image;flash;
