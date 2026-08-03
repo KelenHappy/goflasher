@@ -148,7 +148,10 @@ go test ./...
 ```
 
 See **[TESTING.md](TESTING.md)** for race tests, GUI checks, package smoke tests,
-and the deliberately guarded real-device test command.
+and the deliberately guarded real-device test command. Release testers can use
+the step-by-step hardware manuals in
+[English](docs/HARDWARE-TESTING.md) or
+[Traditional Chinese](docs/HARDWARE-TESTING.zh-TW.md).
 
 ## Security and safety
 

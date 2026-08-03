@@ -143,7 +143,9 @@ go test ./...
 ```
 
 競態檢查、GUI 檢查、套件煙霧測試，以及刻意加入防護措施的實體裝置測試指令，
-請參閱 **[TESTING.md](TESTING.md)**。
+請參閱 **[TESTING.md](TESTING.md)**。執行發布驗收時，可依照
+[繁體中文實體硬體測試手冊](docs/HARDWARE-TESTING.zh-TW.md)操作，或參考
+[英文版](docs/HARDWARE-TESTING.md)。
 
 ## 安全性
 
