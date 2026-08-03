@@ -1,4 +1,4 @@
-//go:build linux && fyne
+//go:build fyne && (linux || windows || darwin)
 
 package main
 
@@ -20,7 +20,6 @@ import (
 	"github.com/goflasher/goflasher/internal/filepicker"
 	"github.com/goflasher/goflasher/internal/i18n"
 	"github.com/goflasher/goflasher/internal/image"
-	linuxbackend "github.com/goflasher/goflasher/internal/linux"
 	"github.com/goflasher/goflasher/internal/progress"
 )
 
@@ -29,7 +28,7 @@ func main() {
 	a := app.NewWithID("org.goflasher.usbwriter")
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(fyne.NewSize(720, 620))
-	backend := linuxbackend.NewBackend()
+	backend := newBackend()
 	machine := core.NewStateMachine()
 	var devices []device.Device
 	var selected device.Device

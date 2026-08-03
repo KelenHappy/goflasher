@@ -4,6 +4,8 @@
 # GoFlasher: A Safety-First USB Image Writer
 
 **GoFlasher writes raw or compressed disk images to removable USB flash media on Linux.**
+
+[繁體中文說明](readme-zh-tw.md)
 </div>
 
 > [!WARNING]
@@ -20,7 +22,7 @@
 - Show writing and verification progress, throughput, and estimated time.
 - Cancel an active operation.
 - Optionally power off the USB device after a successful write.
-- Open the Linux desktop's native file chooser through XDG Desktop Portal.
+- Open native file choosers on Linux, Windows, and macOS.
 - Display the interface in English or Traditional Chinese.
 - Keep a copyable, bounded activity log in the application.
 - Restrict targets to devices positively identified as removable USB flash
@@ -35,14 +37,14 @@ persistent partitions, or perform bad-block tests.
 
 ## Platform status
 
-The production GUI and raw-device backend currently support **Linux only**.
-The platform-neutral packages are tested on Linux and Windows, and the native
-file-picker boundary is separated by build tags so a Windows backend can be
-implemented later. There is no Windows writer or Windows GUI release yet.
+The production GUI and raw-device backend support **Linux, Windows, and
+macOS**. Windows uses its native Explorer chooser and PowerShell storage
+cmdlets; raw disk access requires an Administrator session. macOS uses its
+native Finder chooser and `diskutil`; raw disk access requires elevated rights.
 
-The current backend reads Linux sysfs, procfs, and udev information. It uses
+The Linux backend reads sysfs, procfs, and udev information. It uses
 `udisksctl` for unmount and power-off operations. The GUI must not be run as
-root. A dedicated privileged helper has not been implemented.
+root. A dedicated Linux privileged helper has not been implemented.
 
 ## Downloads
 
