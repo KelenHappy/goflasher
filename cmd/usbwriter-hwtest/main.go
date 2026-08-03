@@ -44,70 +44,96 @@ type snapshot struct {
 	Capacity                uint64
 }
 
-func main() {
-	allowlistPath := flag.String("allowlist", "", "reviewed v1 JSON device allowlist (required)")
-	deviceID := flag.String("device-id", "", "exact allowlisted stable identity (required; never inferred)")
-	imagePath := flag.String("image", "", "versioned disposable test image")
-	testCase := flag.String("case", "inventory", "inventory|prepare|enumerate-present|enumerate-absent|path-reuse|write-verify-eject|write-cancel|write-remove|corruption-detect")
-	confirmation := flag.String("confirmation", "", "one-time confirmation emitted by --case prepare")
-	challengePath := flag.String("challenge-file", ".goflasher-hwtest-challenge.json", "one-time challenge state")
-	snapshotPath := flag.String("snapshot", ".goflasher-hwtest-snapshot.json", "enumeration/reuse snapshot")
-	cancelAfter := flag.Duration("cancel-after", 2*time.Second, "write-cancel deadline")
-	flag.Parse()
+type commandOptions struct {
+	allowlistPath, deviceID, imagePath, testCase string
+	confirmation, challengePath, snapshotPath    string
+	cancelAfter                                  time.Duration
+}
 
-	if *allowlistPath == "" {
+type deviceSelection struct {
+	device device.Device
+	found  bool
+}
+
+func parseFlags() commandOptions {
+	var options commandOptions
+	flag.StringVar(&options.allowlistPath, "allowlist", "", "reviewed v1 JSON device allowlist (required)")
+	flag.StringVar(&options.deviceID, "device-id", "", "exact allowlisted stable identity (required; never inferred)")
+	flag.StringVar(&options.imagePath, "image", "", "versioned disposable test image")
+	flag.StringVar(&options.testCase, "case", "inventory", "inventory|prepare|enumerate-present|enumerate-absent|path-reuse|write-verify-eject|write-cancel|write-remove|corruption-detect")
+	flag.StringVar(&options.confirmation, "confirmation", "", "one-time confirmation emitted by --case prepare")
+	flag.StringVar(&options.challengePath, "challenge-file", ".goflasher-hwtest-challenge.json", "one-time challenge state")
+	flag.StringVar(&options.snapshotPath, "snapshot", ".goflasher-hwtest-snapshot.json", "enumeration/reuse snapshot")
+	flag.DurationVar(&options.cancelAfter, "cancel-after", 2*time.Second, "write-cancel deadline")
+	flag.Parse()
+	return options
+}
+
+func main() {
+	options := parseFlags()
+	if options.allowlistPath == "" {
 		fatal(errors.New("--allowlist is required; implicit device selection is forbidden"))
 	}
-	approved := readAllowlist(*allowlistPath)
+	approved := readAllowlist(options.allowlistPath)
 	backend := newBackend()
 	ctx := context.Background()
 	devices, err := backend.ListAllowedDevices(ctx)
 	fatal(err)
 	printInventory(devices, approved)
-	if *testCase == "inventory" {
+	if options.testCase == "inventory" {
 		return
 	}
-	if *deviceID == "" {
+	if options.deviceID == "" {
 		fatal(errors.New("--device-id is required; the first enumerated device is never selected"))
 	}
-	wanted := approvedDevice(approved, *deviceID)
+	wanted := approvedDevice(approved, options.deviceID)
 	if !wanted.Disposable {
 		fatal(errors.New("allowlist entry is not explicitly marked disposable"))
 	}
 	selected, found := exactDevice(devices, wanted)
+	selection := deviceSelection{device: selected, found: found}
+	if runEnumerationCase(options, devices, approved, selection) {
+		return
+	}
+	runDestructiveCase(ctx, backend, options, selection)
+}
 
-	switch *testCase {
+func runEnumerationCase(options commandOptions, devices []device.Device, approved allowlist, selection deviceSelection) bool {
+	switch options.testCase {
 	case "prepare":
-		if !found {
+		if !selection.found {
 			fatal(errors.New("exact allowlisted device is not currently allowed"))
 		}
-		prepareChallenge(*challengePath, selected.ID)
-		return
+		prepareChallenge(options.challengePath, selection.device.ID)
 	case "enumerate-absent":
-		if found {
+		if selection.found {
 			fatal(errors.New("device remained present after removal"))
 		}
 		fmt.Println("PASS: allowlisted identity is absent")
-		return
 	case "enumerate-present":
-		if !found {
+		if !selection.found {
 			fatal(errors.New("allowlisted identity was not re-enumerated"))
 		}
-		checkOrWriteSnapshot(*snapshotPath, selected)
+		checkOrWriteSnapshot(options.snapshotPath, selection.device)
 		fmt.Println("PASS: exact identity present and snapshot recorded")
-		return
 	case "path-reuse":
-		checkPathReuse(*snapshotPath, devices, approved, *deviceID)
-		return
+		checkPathReuse(options.snapshotPath, devices, approved, options.deviceID)
+	default:
+		return false
 	}
-	if !found {
+	return true
+}
+
+func runDestructiveCase(ctx context.Context, backend device.Backend, options commandOptions, selection deviceSelection) {
+	if !selection.found {
 		fatal(errors.New("exact allowlisted device is not currently allowed"))
 	}
-	consumeChallenge(*challengePath, selected.ID, *confirmation)
-	if *imagePath == "" {
+	selected := selection.device
+	consumeChallenge(options.challengePath, selected.ID, options.confirmation)
+	if options.imagePath == "" {
 		fatal(errors.New("--image is required for destructive cases"))
 	}
-	info, err := image.Detect(*imagePath)
+	info, err := image.Detect(options.imagePath)
 	fatal(err)
 	info, err = image.Inspect(info)
 	fatal(err)
@@ -115,31 +141,31 @@ func main() {
 		fatal(errors.New("test image exceeds disposable device"))
 	}
 
-	switch *testCase {
+	switch options.testCase {
 	case "write-verify-eject":
-		result, err := run(ctx, backend, info, selected, true, true)
+		result, err := run(ctx, backend, info, selected, app.RunOptions{Verify: true, Eject: true})
 		fatal(err)
 		if !result.Verified || !result.Ejected {
 			fatal(errors.New("verification or eject result missing"))
 		}
 		fmt.Printf("PASS: bytes=%d sha256=%s verified=%v ejected=%v\n", result.BytesWritten, result.TargetSHA256, result.Verified, result.Ejected)
 	case "write-cancel":
-		cancelCtx, cancel := context.WithTimeout(ctx, *cancelAfter)
+		cancelCtx, cancel := context.WithTimeout(ctx, options.cancelAfter)
 		defer cancel()
-		_, err := run(cancelCtx, backend, info, selected, false, false)
-		if err == nil || (!errors.Is(err, context.Canceled) && !strings.Contains(strings.ToLower(err.Error()), "cancel")) {
+		_, err := run(cancelCtx, backend, info, selected, app.RunOptions{})
+		if !isCancellation(err) {
 			fatal(fmt.Errorf("expected cancellation, got %v", err))
 		}
 		fmt.Printf("PASS: cancellation rejected completion: %v\n", err)
 	case "write-remove":
 		fmt.Fprintln(os.Stderr, "REMOVE THE DISPOSABLE DEVICE WHILE WRITING; success is a test failure")
-		_, err := run(ctx, backend, info, selected, false, false)
+		_, err := run(ctx, backend, info, selected, app.RunOptions{})
 		if err == nil {
 			fatal(errors.New("write completed; removal was not observed"))
 		}
 		fmt.Printf("PASS: removal failed closed: %v\n", err)
 	case "corruption-detect":
-		_, err := run(ctx, backend, info, selected, true, false)
+		_, err := run(ctx, backend, info, selected, app.RunOptions{Verify: true})
 		fatal(err)
 		w, err := backend.OpenWriter(ctx, selected)
 		fatal(err)
@@ -158,8 +184,15 @@ func main() {
 		}
 		fmt.Println("PASS: deliberate corruption detected")
 	default:
-		fatal(fmt.Errorf("unknown --case %q", *testCase))
+		fatal(fmt.Errorf("unknown --case %q", options.testCase))
 	}
+}
+
+func isCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || strings.Contains(strings.ToLower(err.Error()), "cancel")
 }
 
 func readAllowlist(path string) allowlist {
@@ -167,17 +200,29 @@ func readAllowlist(path string) allowlist {
 	fatal(err)
 	var a allowlist
 	fatal(json.Unmarshal(b, &a))
-	if a.Version != specificationVersion || len(a.Devices) == 0 {
+	if !a.hasSupportedVersion() {
 		fatal(errors.New("allowlist must be non-empty goflasher-hwtest/v1"))
 	}
 	seen := map[string]bool{}
 	for _, d := range a.Devices {
-		if d.Identity == "" || d.Capacity == 0 || d.Model == "" || seen[d.Identity] {
+		if !d.isValid(seen) {
 			fatal(errors.New("allowlist entries require unique identity, model, and capacity"))
 		}
 		seen[d.Identity] = true
 	}
 	return a
+}
+func (a allowlist) hasSupportedVersion() bool {
+	return a.Version == specificationVersion && len(a.Devices) > 0
+}
+func (d allowedDevice) isValid(seen map[string]bool) bool {
+	if d.Identity == "" || d.Capacity == 0 {
+		return false
+	}
+	if d.Model == "" || seen[d.Identity] {
+		return false
+	}
+	return true
 }
 func approvedDevice(a allowlist, id string) allowedDevice {
 	for _, d := range a.Devices {
@@ -225,19 +270,23 @@ func consumeChallenge(path, id, answer string) {
 	var c challenge
 	fatal(json.Unmarshal(data, &c))
 	fatal(os.Remove(path))
-	expected := "ERASE " + id + " " + c.Nonce
-	age := time.Since(c.Created)
-	if c.Version != specificationVersion || c.Identity != id || age < 0 || age > 15*time.Minute || answer != expected {
+	if !c.isValid(id, answer, time.Now()) {
 		fatal(errors.New("invalid, expired, or already-consumed confirmation"))
 	}
 }
+func (c challenge) isValid(id, answer string, now time.Time) bool {
+	age := now.Sub(c.Created)
+	if c.Version != specificationVersion || c.Identity != id {
+		return false
+	}
+	if age < 0 || age > 15*time.Minute {
+		return false
+	}
+	return answer == "ERASE "+id+" "+c.Nonce
+}
 func checkOrWriteSnapshot(path string, d device.Device) {
 	if existing, err := os.ReadFile(path); err == nil {
-		var s snapshot
-		fatal(json.Unmarshal(existing, &s))
-		if s.Version != specificationVersion || s.Identity != d.ID || s.Capacity != d.Size {
-			fatal(errors.New("existing snapshot is for a different device or specification"))
-		}
+		checkSnapshot(existing, d)
 		return
 	} else if !errors.Is(err, os.ErrNotExist) {
 		fatal(err)
@@ -252,6 +301,13 @@ func checkOrWriteSnapshot(path string, d device.Device) {
 	}
 	fatal(err)
 }
+func checkSnapshot(data []byte, d device.Device) {
+	var s snapshot
+	fatal(json.Unmarshal(data, &s))
+	if s.Version != specificationVersion || s.Identity != d.ID || s.Capacity != d.Size {
+		fatal(errors.New("existing snapshot is for a different device or specification"))
+	}
+}
 func checkPathReuse(path string, devices []device.Device, approved allowlist, selectedID string) {
 	b, err := os.ReadFile(path)
 	fatal(err)
@@ -261,21 +317,33 @@ func checkPathReuse(path string, devices []device.Device, approved allowlist, se
 		fatal(errors.New("snapshot identity/version mismatch"))
 	}
 	for _, d := range devices {
-		if (d.Path == s.Path || (d.Major == s.Major && d.Minor == s.Minor)) && d.ID != s.Identity {
-			candidate := approvedOrEmpty(approved, d.ID)
-			if candidate.Identity == "" {
-				fatal(errors.New("reused address belongs to a device outside the reviewed allowlist"))
-			}
-			if _, ok := exactDevice([]device.Device{d}, candidate); !ok {
-				fatal(errors.New("replacement does not match its reviewed allowlist metadata"))
-			}
+		if addressReusedBy(d, s) {
+			checkReplacement(d, approved)
 			fmt.Printf("PASS: reused address rejected old=%q new=%q address=%q %d:%d\n", s.Identity, d.ID, d.Path, d.Major, d.Minor)
 			return
 		}
 	}
 	fatal(errors.New("no different identity observed reusing the recorded path/disk number"))
 }
-func run(ctx context.Context, backend device.Backend, info image.Info, selected device.Device, verify, eject bool) (app.RunResult, error) {
+func addressReusedBy(d device.Device, s snapshot) bool {
+	if d.ID == s.Identity {
+		return false
+	}
+	return d.Path == s.Path || sameDiskNumber(d, s)
+}
+func sameDiskNumber(d device.Device, s snapshot) bool {
+	return d.Major == s.Major && d.Minor == s.Minor
+}
+func checkReplacement(d device.Device, approved allowlist) {
+	candidate := approvedOrEmpty(approved, d.ID)
+	if candidate.Identity == "" {
+		fatal(errors.New("reused address belongs to a device outside the reviewed allowlist"))
+	}
+	if _, ok := exactDevice([]device.Device{d}, candidate); !ok {
+		fatal(errors.New("replacement does not match its reviewed allowlist metadata"))
+	}
+}
+func run(ctx context.Context, backend device.Backend, info image.Info, selected device.Device, options app.RunOptions) (app.RunResult, error) {
 	states := app.NewStateMachine()
 	for _, s := range []app.State{app.ImageSelected, app.Ready, app.Confirming} {
 		fatal(states.Transition(s))
@@ -288,7 +356,7 @@ func run(ctx context.Context, backend device.Backend, info image.Info, selected 
 			fmt.Printf("stage=%s bytes=%d total=%d\n", u.Stage, u.BytesProcessed, u.TotalBytes)
 		}
 	}()
-	result, err := (&app.Service{Backend: backend, State: states}).Run(ctx, info, selected, app.RunOptions{Verify: verify, Eject: eject}, updates)
+	result, err := (&app.Service{Backend: backend, State: states}).Run(ctx, info, selected, options, updates)
 	close(updates)
 	<-done
 	return result, err
