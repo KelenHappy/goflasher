@@ -50,37 +50,50 @@ func Detect(path string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	name := strings.ToLower(filepath.Base(path))
-	compression := CompressionNone
-	base := name
-	if strings.HasSuffix(base, ".gz") {
-		compression, base = CompressionGzip, strings.TrimSuffix(base, ".gz")
-	}
-	if strings.HasSuffix(base, ".xz") {
-		compression, base = CompressionXZ, strings.TrimSuffix(base, ".xz")
-	}
-	var format Format
-	switch filepath.Ext(base) {
-	case ".iso":
-		format = FormatISO
-	case ".img":
-		format = FormatIMG
-	case ".raw":
-		format = FormatRAW
-	default:
-		return Info{}, fmt.Errorf("%w: extension %q", ErrUnsupported, filepath.Ext(base))
+	format, compression, err := formatFromName(path)
+	if err != nil {
+		return Info{}, err
 	}
 	magic := make([]byte, 6)
 	n, readErr := io.ReadFull(file, magic)
 	if readErr != nil && readErr != io.ErrUnexpectedEOF {
 		return Info{}, readErr
 	}
-	isGzip := n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b
-	isXZ := n >= 6 && string(magic) == "\xfd7zXZ\x00"
-	if compression == CompressionGzip && !isGzip || compression == CompressionXZ && !isXZ || compression == CompressionNone && (isGzip || isXZ) {
+	if !magicMatchesCompression(magic[:n], compression) {
 		return Info{}, fmt.Errorf("%w: extension and magic bytes disagree", ErrUnsupported)
 	}
 	return Info{Path: path, Format: format, Compression: compression, CompressedSize: uint64(stat.Size())}, nil
+}
+
+func formatFromName(path string) (Format, Compression, error) {
+	base := strings.ToLower(filepath.Base(path))
+	compression := CompressionNone
+	for suffix, candidate := range map[string]Compression{".gz": CompressionGzip, ".xz": CompressionXZ} {
+		if strings.HasSuffix(base, suffix) {
+			compression, base = candidate, strings.TrimSuffix(base, suffix)
+			break
+		}
+	}
+	formats := map[string]Format{".iso": FormatISO, ".img": FormatIMG, ".raw": FormatRAW}
+	extension := filepath.Ext(base)
+	format, ok := formats[extension]
+	if !ok {
+		return "", "", fmt.Errorf("%w: extension %q", ErrUnsupported, extension)
+	}
+	return format, compression, nil
+}
+
+func magicMatchesCompression(magic []byte, compression Compression) bool {
+	isGzip := len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b
+	isXZ := len(magic) >= 6 && string(magic[:6]) == "\xfd7zXZ\x00"
+	switch compression {
+	case CompressionGzip:
+		return isGzip
+	case CompressionXZ:
+		return isXZ
+	default:
+		return !isGzip && !isXZ
+	}
 }
 
 type ReadCloser struct {
