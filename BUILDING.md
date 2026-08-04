@@ -14,8 +14,8 @@ macOS uses `diskutil` for removable-USB discovery, unmount, and eject operations
 - `xz` at runtime when opening XZ-compressed images.
 - `udisksctl` at runtime for unmount and device power-off operations.
 - polkit/`pkexec` at runtime for narrowly scoped raw-device operations.
-- XDG Desktop Portal and a desktop-specific portal backend for native image
-  selection.
+- No portal, D-Bus file chooser, `kdialog`, or Zenity package is needed; the
+  Linux image chooser is part of the Fyne GUI.
 
 On Ubuntu 24.04, install the build and runtime dependencies with:
 
@@ -23,10 +23,11 @@ On Ubuntu 24.04, install the build and runtime dependencies with:
 sudo apt update
 sudo apt install \
   gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev \
-  udisks2 xdg-desktop-portal xz-utils
+  udisks2 xz-utils
 ```
 
-Other distributions may use different package names.
+Other distributions may use different package names. GoFlasher does not use
+`xdg-desktop-portal` for image selection.
 
 ## Build from source
 

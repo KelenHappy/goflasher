@@ -23,7 +23,8 @@ on Linux, Windows, and macOS.**
 - Show writing and verification progress, throughput, and estimated time.
 - Cancel an active operation.
 - Optionally power off the USB device after a successful write.
-- Open native file choosers on Linux, Windows, and macOS.
+- Use the bundled, localized Fyne file chooser on Linux and native file
+  choosers on Windows and macOS.
 - Display the interface in English or Traditional Chinese.
 - Keep a copyable, bounded activity log in the application.
 - Restrict targets to devices positively identified as removable USB flash
@@ -90,6 +91,11 @@ Run the AppImage:
 chmod +x GoFlasher-*-x86_64.AppImage
 ./GoFlasher-*-x86_64.AppImage
 ```
+
+On Linux, GoFlasher always uses its bundled Fyne image chooser. Image selection
+does not call XDG Desktop Portal, D-Bus, `kdialog`, Zenity, Dolphin, or Nautilus,
+so it requires no desktop-specific package. The chooser title, Choose button,
+and Cancel button use GoFlasher's English or Traditional Chinese localization.
 
 An AppImage cannot install a stable root-owned polkit helper. Before its first
 use, extract the AppImage and have an administrator audit and install the two
