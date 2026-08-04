@@ -30,7 +30,9 @@ func openImage(parent fyne.Window, title, acceptLabel, dismissLabel, filterName 
 	chooser.SetTitleText(title)
 	chooser.SetConfirmText(acceptLabel)
 	chooser.SetDismissText(dismissLabel)
-	chooser.Resize(fyne.NewSize(760, 520))
+	// Fyne 2.8 initializes FileDialog's internal widget tree in Show. Calling
+	// Resize first dereferences an uninitialized dialog in FileDialog.MinSize.
 	chooser.Show()
+	chooser.Resize(fyne.NewSize(760, 520))
 	_ = filterName // Fyne's extension filter does not expose a display name.
 }
