@@ -29,6 +29,7 @@ func main() {
 func runApplication(tr i18n.Localizer) {
 	configureFyneTranslations(string(tr.Locale()))
 	a := app.NewWithID("org.goflasher.usbwriter")
+	a.Settings().SetTheme(newReadableTheme())
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(fyne.NewSize(720, 620))
 	backend := newBackend()
