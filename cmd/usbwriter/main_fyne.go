@@ -17,7 +17,6 @@ import (
 
 	core "github.com/goflasher/goflasher/internal/app"
 	"github.com/goflasher/goflasher/internal/device"
-	"github.com/goflasher/goflasher/internal/filepicker"
 	"github.com/goflasher/goflasher/internal/i18n"
 	"github.com/goflasher/goflasher/internal/image"
 	"github.com/goflasher/goflasher/internal/progress"
@@ -28,6 +27,7 @@ func main() {
 }
 
 func runApplication(tr i18n.Localizer) {
+	configureFyneTranslations(string(tr.Locale()))
 	a := app.NewWithID("org.goflasher.usbwriter")
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(fyne.NewSize(720, 620))
@@ -107,29 +107,30 @@ func runApplication(tr i18n.Localizer) {
 	var choose *widget.Button
 	choose = widget.NewButton(tr.T("action.choose"), func() {
 		choose.Disable()
-		go func() {
-			defer fyne.Do(choose.Enable)
-			path, err := filepicker.OpenImage(tr.T("picker.image.title"), tr.T("picker.image.accept"), tr.T("filter.images"))
+		openImage(w, tr.T("picker.image.title"), tr.T("picker.image.accept"), tr.T("action.cancel"), tr.T("filter.images"), func(path string, err error) {
+			choose.Enable()
 			if err != nil {
-				fyne.Do(func() { dialog.ShowError(err, w) })
+				dialog.ShowError(err, w)
 				return
 			}
 			if path == "" {
 				return
 			}
-			detected, err := image.Detect(path)
-			if err != nil {
-				fyne.Do(func() { dialog.ShowError(err, w) })
-				return
-			}
-			fyne.Do(func() {
-				info = detected
-				imagePath.SetText(path)
-				imageInfo.SetText(tr.T("image.details", info.Format, info.Compression, float64(info.CompressedSize)/(1<<20)))
-				advanceSelection(machine, selected.Path != "", core.DeviceSelected, core.ImageSelected)
-			})
-			appendLog(tr.T("log.image", filepath.Base(path)))
-		}()
+			go func() {
+				detected, err := image.Detect(path)
+				if err != nil {
+					fyne.Do(func() { dialog.ShowError(err, w) })
+					return
+				}
+				fyne.Do(func() {
+					info = detected
+					imagePath.SetText(path)
+					imageInfo.SetText(tr.T("image.details", info.Format, info.Compression, float64(info.CompressedSize)/(1<<20)))
+					advanceSelection(machine, selected.Path != "", core.DeviceSelected, core.ImageSelected)
+				})
+				appendLog(tr.T("log.image", filepath.Base(path)))
+			}()
+		})
 	})
 	lock := func(v bool) {
 		if v {

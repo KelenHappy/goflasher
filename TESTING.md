@@ -24,9 +24,11 @@ go test -tags fyne ./cmd/usbwriter
 go build -tags fyne ./cmd/usbwriter
 ```
 
-Choosing an image should open the desktop environment's portal-backed native
-file chooser, not an embedded Fyne file browser. Check cancellation, paths
-containing spaces, and every supported image suffix.
+On Linux, choosing an image should open the embedded Fyne file browser without
+calling a desktop portal. Verify its title, action buttons, and file-dialog
+controls in both English and Traditional Chinese. Also check cancellation,
+paths containing spaces, and every supported image suffix. Windows and macOS
+should continue to open their native choosers.
 
 ## Package smoke tests
 
@@ -37,8 +39,9 @@ disposable VM, verify:
 2. The AppImage starts after `chmod +x` without installation.
 3. The Debian package installs with `apt install ./goflasher_*.deb`.
 4. The desktop launcher appears and opens GoFlasher as a regular user.
-5. Selecting an image opens the native chooser and cancelling it changes no
-   application state.
+5. Selecting an image opens the bundled Fyne chooser on Linux (the native
+   chooser on Windows and macOS), and cancelling it changes no application
+   state.
 
 ## Versioned physical hardware acceptance
 

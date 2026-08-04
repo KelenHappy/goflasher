@@ -22,7 +22,8 @@
 - 顯示寫入與驗證進度、傳輸速度及預估剩餘時間。
 - 可取消進行中的操作。
 - 寫入成功後，可選擇關閉 USB 裝置電源。
-- 在 Linux、Windows 與 macOS 開啟系統原生檔案選擇器。
+- Linux 使用內建且已本地化的 Fyne 檔案選擇器；Windows 與 macOS 使用系統原生
+  檔案選擇器。
 - 介面支援英文與繁體中文。
 - 在應用程式內保留可複製且有行數上限的活動紀錄。
 - 僅允許選取已明確認定為可移除式 USB 隨身碟或讀卡機的目標裝置。
@@ -76,6 +77,13 @@ sha256sum --check SHA256SUMS
 chmod +x GoFlasher-*-x86_64.AppImage
 ./GoFlasher-*-x86_64.AppImage
 ```
+
+Linux 一律使用已包入 GoFlasher 的 Fyne 映像檔選擇器；選檔流程不會呼叫 XDG
+Desktop Portal、D-Bus、`kdialog`、Zenity、Dolphin 或 Nautilus，因此不需要任何
+桌面環境專用套件。選擇器標題、「選擇」與「取消」按鈕會跟隨
+GoFlasher 的英文或繁體中文介面語言；檔案、資料夾、常用位置、新增資料夾及
+顯示隱藏檔案等 Fyne 選擇器介面文字也提供繁體中文翻譯。實際目錄名稱維持
+檔案系統中的名稱，不會翻譯或改名。
 
 在 Debian 或 Ubuntu 安裝 Debian 套件：
 

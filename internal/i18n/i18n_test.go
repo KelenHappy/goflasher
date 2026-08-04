@@ -35,3 +35,25 @@ func TestTranslateAndFallback(t *testing.T) {
 		t.Fatalf("unexpected missing-message result: %q", got)
 	}
 }
+
+func TestImageChooserLabelsAreLocalized(t *testing.T) {
+	tests := []struct {
+		locale                 string
+		title, accept, dismiss string
+	}{
+		{locale: "en", title: "Choose an image file", accept: "Choose", dismiss: "Cancel"},
+		{locale: "zh-TW", title: "選擇映像檔案", accept: "選擇", dismiss: "取消"},
+	}
+	for _, tt := range tests {
+		tr := New(tt.locale)
+		if got := tr.T("picker.image.title"); got != tt.title {
+			t.Errorf("%s title = %q, want %q", tt.locale, got, tt.title)
+		}
+		if got := tr.T("picker.image.accept"); got != tt.accept {
+			t.Errorf("%s accept = %q, want %q", tt.locale, got, tt.accept)
+		}
+		if got := tr.T("action.cancel"); got != tt.dismiss {
+			t.Errorf("%s dismiss = %q, want %q", tt.locale, got, tt.dismiss)
+		}
+	}
+}
