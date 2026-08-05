@@ -28,6 +28,12 @@ type Backend interface {
 	Eject(context.Context, Device) error
 }
 
+// FAT32Formatter is implemented by platform backends that can destructively
+// replace a device's existing layout with a single FAT32 filesystem.
+type FAT32Formatter interface {
+	FormatFAT32(context.Context, Device, string) error
+}
+
 // SameIdentity compares immutable kernel and hardware identifiers. A serial or
 // WWN mismatch is always fatal; major/minor and sysfs path protect devices that
 // do not expose either hardware identifier.

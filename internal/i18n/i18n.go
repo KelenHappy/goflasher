@@ -94,6 +94,11 @@ var catalogs = map[Locale]map[string]string{
 		"card.options": "Write options", "card.progress": "Status and progress", "log.launched": "GoFlasher started (no telemetry)",
 		"filter.images": "USB images", "error.cancelled": "operation cancelled", "bool.true": "yes", "bool.false": "no",
 		"picker.image.title": "Choose an image file", "picker.image.accept": "Choose",
+		"action.format_fat32": "Format FAT32", "dialog.format.not_ready": "Select a USB device first.",
+		"format.confirm.title": "Format USB device as FAT32", "format.confirm.accept": "Erase and format",
+		"format.confirm.body": "All data and partitions on this device will be erased\n\n%s %s\n%s\n%.1f GB\nSerial: %s\n\nA FAT32 filesystem named GOFLASHER will be created. This action cannot be undone.",
+		"status.formatting":   "Formatting as FAT32…", "status.format.complete": "FAT32 format complete",
+		"log.format.start": "Formatting %s as FAT32", "log.format.complete": "FAT32 format complete",
 	},
 	TraditionalChinese: {
 		"launcher":     "GoFlasher 圖形介面需使用 'fyne' 建置標籤。安裝 Fyne 建置相依套件後，執行：go run -tags fyne ./cmd/usbwriter",
@@ -121,5 +126,10 @@ var catalogs = map[Locale]map[string]string{
 		"card.options": "寫入選項", "card.progress": "狀態與進度", "log.launched": "GoFlasher 啟動（無遙測）",
 		"filter.images": "USB 映像", "error.cancelled": "操作已取消", "bool.true": "是", "bool.false": "否",
 		"picker.image.title": "選擇映像檔案", "picker.image.accept": "選擇",
+		"action.format_fat32": "格式化 FAT32", "dialog.format.not_ready": "請先選擇 USB 裝置。",
+		"format.confirm.title": "將 USB 裝置格式化為 FAT32", "format.confirm.accept": "清除並格式化",
+		"format.confirm.body": "即將清除以下裝置的所有資料與分割區\n\n%s %s\n%s\n%.1f GB\n序號：%s\n\n將建立名為 GOFLASHER 的 FAT32 檔案系統。此操作無法復原。",
+		"status.formatting":   "正在格式化為 FAT32…", "status.format.complete": "FAT32 格式化完成",
+		"log.format.start": "正在將 %s 格式化為 FAT32", "log.format.complete": "FAT32 格式化完成",
 	},
 }
