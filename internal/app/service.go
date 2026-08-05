@@ -84,6 +84,7 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if err = s.State.Transition(Flushing); err != nil {
 		return out, err
 	}
+	sendStage(ctx, updates, progress.StageFlushing)
 	if err = s.Backend.Flush(ctx, target); err != nil {
 		return out, fmt.Errorf("flush: %w", err)
 	}
@@ -109,6 +110,7 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 		if err = s.State.Transition(Ejecting); err != nil {
 			return out, err
 		}
+		sendStage(ctx, updates, progress.StageEjecting)
 		if err = s.Backend.Eject(ctx, target); err != nil {
 			return out, fmt.Errorf("eject: %w", err)
 		}
@@ -118,4 +120,15 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 		return out, err
 	}
 	return out, nil
+}
+
+func sendStage(ctx context.Context, updates chan<- progress.Update, stage progress.Stage) {
+	if updates == nil {
+		return
+	}
+	select {
+	case updates <- progress.Update{Stage: stage}:
+	case <-ctx.Done():
+	default:
+	}
 }

@@ -20,15 +20,17 @@ import (
 )
 
 const helperExecutable = "/usr/libexec/goflasher-helper"
+const embeddedHelperArgument = "--goflasher-privileged-helper"
 
 var ErrAuthorizationCanceled = errors.New("authorization canceled")
 
 type operationMode string
 
 const (
-	modeWrite operationMode = "write"
-	modeRead  operationMode = "read-back"
-	modeFlush operationMode = "flush"
+	modeWrite       operationMode = "write"
+	modeRead        operationMode = "read-back"
+	modeFlush       operationMode = "flush"
+	modeFormatFAT32 operationMode = "format-fat32"
 )
 
 // privilegedRequest deliberately has no device-path field. The privileged side
@@ -41,6 +43,7 @@ type privilegedRequest struct {
 	Minor    uint32        `json:"minor"`
 	Capacity uint64        `json:"capacity"`
 	Mode     operationMode `json:"mode"`
+	Label    string        `json:"label,omitempty"`
 }
 
 func helperRequest(d device.Device, mode operationMode) privilegedRequest {
@@ -51,31 +54,51 @@ type privilegedHelper interface {
 	OpenWriter(context.Context, privilegedRequest) (io.WriteCloser, error)
 	OpenReader(context.Context, privilegedRequest) (io.ReadCloser, error)
 	Flush(context.Context, privilegedRequest) error
+	FormatFAT32(context.Context, privilegedRequest) error
 }
 
-type commandHelper struct{ executable string }
+type commandHelper struct {
+	executable string
+	arguments  []string
+}
 
-func newCommandHelper() privilegedHelper { return &commandHelper{executable: helperExecutable} }
+func newCommandHelper() privilegedHelper {
+	if info, err := os.Stat(helperExecutable); err == nil && info.Mode().IsRegular() {
+		return &commandHelper{executable: helperExecutable}
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		executable = helperExecutable
+	}
+	return &commandHelper{executable: executable, arguments: []string{embeddedHelperArgument}}
+}
 
-func (h *commandHelper) start(ctx context.Context, r privilegedRequest) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
-	cmd := exec.CommandContext(ctx, "pkexec", h.executable)
+// IsEmbeddedHelperInvocation reports whether this process was started by the
+// GUI through pkexec to serve one privileged operation.
+func IsEmbeddedHelperInvocation(args []string) bool {
+	return len(args) == 2 && args[1] == embeddedHelperArgument
+}
+
+func (h *commandHelper) start(ctx context.Context, r privilegedRequest) (*exec.Cmd, io.WriteCloser, io.ReadCloser, *strings.Builder, error) {
+	pkexecArgs := append([]string{h.executable}, h.arguments...)
+	cmd := exec.CommandContext(ctx, "pkexec", pkexecArgs...)
 	in, out, err := commandPipes(cmd)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
+	stderr := &strings.Builder{}
+	cmd.Stderr = stderr
 	if err = cmd.Start(); err != nil {
-		return nil, nil, nil, authorizationError(err, stderr.String())
+		return nil, nil, nil, stderr, authorizationError(err, stderr.String())
 	}
 	if err = sendRequest(cmd, in, r); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, stderr, err
 	}
 	buffered := bufio.NewReader(out)
-	if err = awaitReady(cmd, in, buffered, &stderr); err != nil {
-		return nil, nil, nil, err
+	if err = awaitReady(cmd, in, buffered, stderr); err != nil {
+		return nil, nil, nil, stderr, err
 	}
-	return cmd, in, &bufferedReadCloser{Reader: buffered, closer: out}, nil
+	return cmd, in, &bufferedReadCloser{Reader: buffered, closer: out}, stderr, nil
 }
 
 func commandPipes(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
@@ -92,7 +115,11 @@ func commandPipes(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
 }
 
 func sendRequest(cmd *exec.Cmd, in io.WriteCloser, request privilegedRequest) error {
-	if err := json.NewEncoder(in).Encode(request); err != nil {
+	data, err := json.Marshal(request)
+	if err == nil {
+		_, err = in.Write(data)
+	}
+	if err != nil {
 		_ = in.Close()
 		_ = cmd.Wait()
 		return err
@@ -174,7 +201,7 @@ func (r *processReader) Close() error {
 }
 
 func (h *commandHelper) OpenWriter(ctx context.Context, r privilegedRequest) (io.WriteCloser, error) {
-	cmd, in, out, err := h.start(ctx, r)
+	cmd, in, out, _, err := h.start(ctx, r)
 	if out != nil {
 		_ = out.Close()
 	}
@@ -184,7 +211,7 @@ func (h *commandHelper) OpenWriter(ctx context.Context, r privilegedRequest) (io
 	return &processWriter{WriteCloser: in, cmd: cmd}, nil
 }
 func (h *commandHelper) OpenReader(ctx context.Context, r privilegedRequest) (io.ReadCloser, error) {
-	cmd, in, out, err := h.start(ctx, r)
+	cmd, in, out, _, err := h.start(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -192,13 +219,26 @@ func (h *commandHelper) OpenReader(ctx context.Context, r privilegedRequest) (io
 	return &processReader{ReadCloser: out, input: in, cmd: cmd}, nil
 }
 func (h *commandHelper) Flush(ctx context.Context, r privilegedRequest) error {
-	cmd, in, out, err := h.start(ctx, r)
+	cmd, in, out, _, err := h.start(ctx, r)
 	if err != nil {
 		return err
 	}
 	_ = in.Close()
 	_ = out.Close()
 	return cmd.Wait()
+}
+
+func (h *commandHelper) FormatFAT32(ctx context.Context, r privilegedRequest) error {
+	cmd, in, out, stderr, err := h.start(ctx, r)
+	if err != nil {
+		return err
+	}
+	_ = in.Close()
+	_ = out.Close()
+	if err := cmd.Wait(); err != nil {
+		return authorizationError(err, stderr.String())
+	}
+	return nil
 }
 
 type helperEnvironment struct{ SysDevBlock, SysClassBlock, MountInfo, Swaps, DevRoot string }
@@ -229,18 +269,30 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 	}
 	switch req.Mode {
 	case modeWrite:
-		_, err = io.Copy(f, dec.Buffered())
-		if err == nil {
-			_, err = io.Copy(f, in)
-		}
+		err = writeAndSync(f, dec.Buffered(), in)
 	case modeRead:
 		_, err = io.CopyN(out, f, int64(req.Capacity))
 	case modeFlush:
 		err = f.Sync()
+	case modeFormatFAT32:
+		err = makeFAT32(f, req.Label, errOut)
 	default:
 		err = errors.New("unsupported operation mode")
 	}
 	return err
+}
+
+func writeAndSync(target interface {
+	io.Writer
+	Sync() error
+}, buffered, remaining io.Reader) error {
+	if _, err := io.Copy(target, buffered); err != nil {
+		return err
+	}
+	if _, err := io.Copy(target, remaining); err != nil {
+		return err
+	}
+	return target.Sync()
 }
 
 func validateAndOpen(req privilegedRequest, env helperEnvironment) (*os.File, error) {
@@ -272,9 +324,44 @@ func (req privilegedRequest) valid() bool {
 	switch req.Mode {
 	case modeWrite, modeRead, modeFlush:
 		return true
+	case modeFormatFAT32:
+		return validFATLabel(req.Label)
 	default:
 		return false
 	}
+}
+
+func validFATLabel(label string) bool {
+	if label == "" || len(label) > 11 {
+		return false
+	}
+	for _, r := range label {
+		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func makeFAT32(device *os.File, label string, errOut io.Writer) error {
+	mkfs, err := fixedMkfsFAT()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(mkfs, "-I", "-F", "32", "-n", label, "/proc/self/fd/3")
+	cmd.ExtraFiles = []*os.File{device}
+	cmd.Stdout = errOut
+	cmd.Stderr = errOut
+	return cmd.Run()
+}
+
+func fixedMkfsFAT() (string, error) {
+	for _, path := range []string{"/usr/sbin/mkfs.vfat", "/usr/bin/mkfs.vfat", "/sbin/mkfs.vfat"} {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return path, nil
+		}
+	}
+	return "", errors.New("mkfs.vfat is not installed")
 }
 
 func resolveDevice(req privilegedRequest, env helperEnvironment) (string, string, error) {
@@ -315,7 +402,7 @@ func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, 
 	if readUint(filepath.Join(class, "size"))*512 != req.Capacity {
 		return 0, 0, ErrDeviceChanged
 	}
-	serial := readTrim(filepath.Join(class, "device/serial"))
+	serial := first(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
 	wwn := first(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
 	if req.Serial != "" && req.Serial != serial {
 		return 0, 0, ErrDeviceChanged
@@ -328,6 +415,19 @@ func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, 
 		return 0, 0, ErrDeviceChanged
 	}
 	return major, minor, nil
+}
+
+// Some USB flash drives expose their serial only on the USB device node, while
+// udev propagates it to ID_SERIAL_SHORT for the block device. Walk to the first
+// physical USB ancestor so privileged revalidation uses the same hardware
+// identity without trusting data supplied by the GUI.
+func readUSBAncestorAttribute(real, attribute string) string {
+	for path := filepath.Clean(real); path != filepath.Dir(path); path = filepath.Dir(path) {
+		if exists(filepath.Join(path, "idVendor")) && exists(filepath.Join(path, "idProduct")) {
+			return readTrim(filepath.Join(path, attribute))
+		}
+	}
+	return ""
 }
 
 func identityMatches(req privilegedRequest, derived string) bool {

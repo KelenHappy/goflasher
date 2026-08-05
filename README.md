@@ -27,10 +27,11 @@ on Linux, Windows, and macOS.**
   choosers on Windows and macOS.
 - Display the interface in English or Traditional Chinese.
 - Keep a copyable, bounded activity log in the application.
-- Restrict targets to devices positively identified as removable USB flash
-  media or card readers.
+- Restrict targets to removable USB flash media or card readers. On Linux,
+  generic `usb-storage` media up to 128 GB is accepted when udev omits its
+  flash-drive classification.
 - Reject mounted critical system disks, swap devices, ATA devices, SSD/HDD
-  models, storage bridges, UAS devices, and ambiguous USB storage.
+  models, storage bridges, UAS devices, and larger ambiguous USB storage.
 - Revalidate device identity before unmounting and on both sides of the
   privileged raw-device boundary.
 

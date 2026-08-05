@@ -24,13 +24,21 @@ var (
 	ErrUnmountFailed     = errors.New("unmount failed")
 )
 
+// maxGenericUSBFlashSize is a conservative fallback for removable USB mass
+// storage that udev does not tag with ID_DRIVE_THUMB or ID_DRIVE_FLASH.  Use
+// decimal GB here to match the capacity printed on consumer flash drives.
+const maxGenericUSBFlashSize uint64 = 128_000_000_000
+
 type commandRunner interface {
 	Output(context.Context, string, ...string) ([]byte, error)
 }
 type osRunner struct{}
 
 func (osRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	// udisksctl writes its useful diagnostics to stderr. Keep stdout and stderr
+	// together so GUI errors explain the actual failure instead of only showing
+	// "exit status 1".
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
 // Backend enumerates Linux block devices from sysfs. udev is supplementary:
@@ -124,13 +132,14 @@ func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
 		removable := readTrim(filepath.Join(link, "removable")) == "1"
 		diskType := readTrim(filepath.Join(link, "device/type")) == "0"
 		isFlash := props["ID_DRIVE_THUMB"] == "1" || props["ID_DRIVE_FLASH"] == "1"
+		isSmallUSBStorage := props["ID_USB_DRIVER"] == "usb-storage" && d.Size <= maxGenericUSBFlashSize
 		suspicious := containsAny(strings.ToLower(strings.Join([]string{d.Vendor, d.Model, props["ID_MODEL"], props["ID_VENDOR"]}, " ")), "ssd", "hard disk", "hdd", "bridge", "sata", "nvme") || props["ID_ATA"] == "1" || props["ID_USB_DRIVER"] == "uas"
 		switch {
 		case d.IsSystemDisk:
 			d.RejectReason = ErrSystemDisk.Error()
 		case !usb || !removable || !diskType || d.Size == 0 || suspicious:
 			d.RejectReason = ErrUnsupportedDevice.Error()
-		case !isFlash && !d.IsCardReader:
+		case !isFlash && !d.IsCardReader && !isSmallUSBStorage:
 			d.RejectReason = "not positively identified as USB flash media"
 		default:
 			d.IsAllowed = true
@@ -173,8 +182,8 @@ func (b *Backend) Unmount(ctx context.Context, d device.Device) error {
 		return err
 	}
 	for _, partition := range b.mountedPartitions(fresh) {
-		if _, err := b.runner.Output(ctx, "udisksctl", "unmount", "--block-device", partition, "--no-user-interaction"); err != nil {
-			return fmt.Errorf("%w: %s: %w", ErrUnmountFailed, partition, err)
+		if out, err := b.runner.Output(ctx, "udisksctl", "unmount", "--block-device", partition); err != nil {
+			return fmt.Errorf("%w: %s: %w: %s", ErrUnmountFailed, partition, err, strings.TrimSpace(string(out)))
 		}
 	}
 	again, err := b.Revalidate(ctx, fresh)
@@ -229,7 +238,7 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.runner.Output(ctx, "udisksctl", "power-off", "--block-device", fresh.Path, "--no-user-interaction")
+	_, err = b.runner.Output(ctx, "udisksctl", "power-off", "--block-device", fresh.Path)
 	return err
 }
 
@@ -248,12 +257,10 @@ func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string
 	if err != nil {
 		return err
 	}
-	args := []string{"format", "--block-device", again.Path, "--type", "vfat", "--no-user-interaction"}
-	if label != "" {
-		args = append(args, "--label", label)
-	}
-	if out, err := b.runner.Output(ctx, "udisksctl", args...); err != nil {
-		return fmt.Errorf("format FAT32: %w: %s", err, strings.TrimSpace(string(out)))
+	request := helperRequest(again, modeFormatFAT32)
+	request.Label = label
+	if err := b.privileged().FormatFAT32(ctx, request); err != nil {
+		return fmt.Errorf("format FAT32: %w", err)
 	}
 	return nil
 }

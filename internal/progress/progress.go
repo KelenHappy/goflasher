@@ -6,7 +6,9 @@ type Stage string
 
 const (
 	StageWriting   Stage = "writing"
+	StageFlushing  Stage = "flushing"
 	StageVerifying Stage = "verifying"
+	StageEjecting  Stage = "ejecting"
 )
 
 type Update struct {

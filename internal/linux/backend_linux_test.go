@@ -3,7 +3,9 @@
 package linux
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,15 +42,27 @@ func (f *fakePrivilegedHelper) Flush(_ context.Context, r privilegedRequest) err
 	f.requests = append(f.requests, r)
 	return f.err
 }
+func (f *fakePrivilegedHelper) FormatFAT32(_ context.Context, r privilegedRequest) error {
+	f.requests = append(f.requests, r)
+	return f.err
+}
 
 type nopWriteCloser struct{ io.Writer }
 
 func (nopWriteCloser) Close() error { return nil }
 
+type syncBuffer struct {
+	strings.Builder
+	synced bool
+}
+
+func (b *syncBuffer) Sync() error { b.synced = true; return nil }
+
 type fakeRunner struct {
 	properties  map[string]string
 	mountInfo   string
 	failUnmount bool
+	udisksCalls [][]string
 }
 
 func (f *fakeRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -56,6 +70,7 @@ func (f *fakeRunner) Output(_ context.Context, name string, args ...string) ([]b
 	case "udevadm":
 		return []byte(f.properties[args[len(args)-1]]), nil
 	case "udisksctl":
+		f.udisksCalls = append(f.udisksCalls, append([]string(nil), args...))
 		return f.runUDisks(args)
 	default:
 		return nil, nil
@@ -94,6 +109,26 @@ func TestEnumerationFiltersAndMounts(t *testing.T) {
 		assertEnumerationSafety(t, d)
 	}
 	_ = run
+}
+
+func TestSmallGenericUSBStorageFallback(t *testing.T) {
+	b, run := fixture(t)
+	run.properties[filepath.Join(b.DevRoot, "sdb")] = "ID_BUS=usb\nID_SERIAL_SHORT=FLASH123\nID_USB_DRIVER=usb-storage\n"
+
+	device, err := b.RefreshDevice(context.Background(), "FLASH123")
+	requireNoError(t, err)
+	if !device.IsAllowed {
+		t.Fatalf("small removable usb-storage device rejected: %+v", device)
+	}
+
+	real, err := filepath.EvalSymlinks(filepath.Join(b.SysClassBlock, "sdb"))
+	requireNoError(t, err)
+	write(t, filepath.Join(real, "size"), fmt.Sprint(maxGenericUSBFlashSize/512+1))
+	device, err = b.RefreshDevice(context.Background(), "FLASH123")
+	requireNoError(t, err)
+	if device.IsAllowed {
+		t.Fatalf("generic usb-storage device over 128 GB allowed: %+v", device)
+	}
 }
 
 func requireDevicePaths(t *testing.T, devices []device.Device, paths ...string) {
@@ -221,6 +256,54 @@ func TestPrivilegedProtocolRejectsPathsAndUnknownModes(t *testing.T) {
 	}
 }
 
+func TestEmbeddedHelperInvocationRequiresExactPrivateArgument(t *testing.T) {
+	if !IsEmbeddedHelperInvocation([]string{"usbwriter", embeddedHelperArgument}) {
+		t.Fatal("exact embedded helper invocation rejected")
+	}
+	for _, args := range [][]string{{"usbwriter"}, {"usbwriter", embeddedHelperArgument, "extra"}, {"usbwriter", "--helper"}} {
+		if IsEmbeddedHelperInvocation(args) {
+			t.Fatalf("unexpected embedded helper invocation accepted: %#v", args)
+		}
+	}
+}
+
+func TestWriteProtocolPreservesBufferedBinaryPayloadAndSyncs(t *testing.T) {
+	payload := append([]byte{0x00, 0xff, 0x7f, '\n'}, []byte("binary image payload")...)
+	request := privilegedRequest{Identity: "SERIAL", Major: 8, Minor: 32, Capacity: uint64(len(payload)), Mode: modeWrite}
+	var wire strings.Builder
+	requestData, err := json.Marshal(request)
+	requireNoError(t, err)
+	_, err = wire.Write(requestData)
+	requireNoError(t, err)
+	_, err = wire.Write(payload)
+	requireNoError(t, err)
+
+	decoder := json.NewDecoder(strings.NewReader(wire.String()))
+	var decoded privilegedRequest
+	requireNoError(t, decoder.Decode(&decoded))
+	target := &syncBuffer{}
+	requireNoError(t, writeAndSync(target, decoder.Buffered(), strings.NewReader("")))
+	if got := []byte(target.String()); !bytes.Equal(got, payload) {
+		t.Fatalf("written payload = %x, want %x", got, payload)
+	}
+	if !target.synced {
+		t.Fatal("write completed without syncing the target descriptor")
+	}
+}
+
+func TestReadUSBAncestorSerial(t *testing.T) {
+	root := t.TempDir()
+	usb := filepath.Join(root, "usb1", "1-13")
+	block := filepath.Join(usb, "1-13:1.0", "host8", "target8:0:0", "8:0:0:0", "block", "sdc")
+	requireNoError(t, os.MkdirAll(block, 0755))
+	write(t, filepath.Join(usb, "idVendor"), "090c")
+	write(t, filepath.Join(usb, "idProduct"), "1000")
+	write(t, filepath.Join(usb, "serial"), "AA0OO7RP1MRHMVZW")
+	if got := readUSBAncestorAttribute(block, "serial"); got != "AA0OO7RP1MRHMVZW" {
+		t.Fatalf("USB ancestor serial = %q", got)
+	}
+}
+
 func TestUnmountAllMountedPartitions(t *testing.T) {
 	b, run := fixture(t)
 	selected, err := b.RefreshDevice(context.Background(), "FLASH123")
@@ -239,6 +322,29 @@ func TestUnmountAllMountedPartitions(t *testing.T) {
 	selected, _ = b.RefreshDevice(context.Background(), "FLASH123")
 	if err := b.Unmount(context.Background(), selected); !errors.Is(err, ErrUnmountFailed) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestUDisksOperationsAllowDesktopAuthorization(t *testing.T) {
+	b, run := fixture(t)
+	fake := &fakePrivilegedHelper{}
+	b.helper = fake
+	selected, err := b.RefreshDevice(context.Background(), "FLASH123")
+	requireNoError(t, err)
+	requireNoError(t, b.FormatFAT32(context.Background(), selected, "GOFLASHER"))
+
+	if len(run.udisksCalls) != 1 {
+		t.Fatalf("udisks calls = %#v", run.udisksCalls)
+	}
+	for _, call := range run.udisksCalls {
+		for _, arg := range call {
+			if arg == "--no-user-interaction" {
+				t.Fatalf("desktop authorization disabled in call: %#v", call)
+			}
+		}
+	}
+	if len(fake.requests) != 1 || fake.requests[0].Mode != modeFormatFAT32 || fake.requests[0].Label != "GOFLASHER" {
+		t.Fatalf("format helper request = %#v", fake.requests)
 	}
 }
 

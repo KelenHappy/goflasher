@@ -23,6 +23,9 @@ import (
 )
 
 func main() {
+	if dispatchEmbeddedHelper() {
+		return
+	}
 	runApplication(i18n.System())
 }
 
@@ -169,6 +172,8 @@ func runApplication(tr i18n.Localizer) {
 			}
 			lock(true)
 			status.SetText(tr.T("status.formatting"))
+			bar.SetValue(0)
+			metrics.SetText(tr.T("metrics.empty"))
 			appendLog(tr.T("log.format.start", selected.Path))
 			go func(target device.Device) {
 				err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER")
@@ -178,9 +183,11 @@ func runApplication(tr i18n.Localizer) {
 						status.SetText(tr.T("status.failed", err))
 						appendLog(tr.T("log.error", err))
 						copyError.Show()
+						dialog.ShowError(err, w)
 						return
 					}
 					status.SetText(tr.T("status.format.complete"))
+					bar.SetValue(1)
 					appendLog(tr.T("log.format.complete"))
 					refresh()
 				})
@@ -225,10 +232,10 @@ func runApplication(tr i18n.Localizer) {
 					u := u
 					fyne.Do(func() {
 						status.SetText(tr.T("stage." + string(u.Stage)))
+						bar.SetValue(overallProgress(u, verifyCheck.Checked))
 						if u.TotalBytes > 0 {
-							bar.SetValue(float64(u.BytesProcessed) / float64(u.TotalBytes))
+							metrics.SetText(tr.T("metrics.progress", u.BytesPerSecond/(1<<20), float64(u.BytesProcessed)/(1<<20), u.ETA.Round(time.Second)))
 						}
-						metrics.SetText(tr.T("metrics.progress", u.BytesPerSecond/(1<<20), float64(u.BytesProcessed)/(1<<20), u.ETA.Round(time.Second)))
 					})
 				}
 			}()
@@ -264,6 +271,37 @@ func runApplication(tr i18n.Localizer) {
 	appendLog(tr.T("log.launched"))
 	refresh()
 	w.ShowAndRun()
+}
+
+func overallProgress(update progress.Update, verify bool) float64 {
+	ratio := 0.0
+	if update.TotalBytes > 0 {
+		ratio = float64(update.BytesProcessed) / float64(update.TotalBytes)
+		if ratio > 1 {
+			ratio = 1
+		}
+	}
+	if verify {
+		switch update.Stage {
+		case progress.StageWriting:
+			return ratio * 0.45
+		case progress.StageFlushing:
+			return 0.45
+		case progress.StageVerifying:
+			return 0.45 + ratio*0.50
+		case progress.StageEjecting:
+			return 0.95
+		}
+	}
+	switch update.Stage {
+	case progress.StageWriting:
+		return ratio * 0.90
+	case progress.StageFlushing:
+		return 0.90
+	case progress.StageEjecting:
+		return 0.95
+	}
+	return 0
 }
 
 func advanceSelection(machine *core.StateMachine, counterpartSelected bool, waitingState, selectedState core.State) {
