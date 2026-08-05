@@ -29,6 +29,7 @@ func main() {
 func runApplication(tr i18n.Localizer) {
 	configureFyneTranslations(string(tr.Locale()))
 	a := app.NewWithID("org.goflasher.usbwriter")
+	a.Settings().SetTheme(newReadableTheme())
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(fyne.NewSize(720, 620))
 	backend := newBackend()
@@ -56,6 +57,8 @@ func runApplication(tr i18n.Localizer) {
 	logPanel := widget.NewAccordion(logItem)
 	logPanel.CloseAll()
 	start := widget.NewButton(tr.T("action.start"), nil)
+	format := widget.NewButton(tr.T("action.format_fat32"), nil)
+	format.Disable()
 	copyError := widget.NewButton(tr.T("action.copy_error"), func() { w.Clipboard().SetContent(logs.Text) })
 	copyError.Hide()
 	copyLog := widget.NewButton(tr.T("action.copy_log"), func() { w.Clipboard().SetContent(logs.Text) })
@@ -100,6 +103,7 @@ func runApplication(tr i18n.Localizer) {
 				selected = d
 				deviceDetail.SetText(tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(tr, d.IsCardReader), localBool(tr, d.Mounted), d.PartitionCount))
 				advanceSelection(machine, info.Path != "", core.ImageSelected, core.DeviceSelected)
+				format.Enable()
 				break
 			}
 		}
@@ -137,15 +141,53 @@ func runApplication(tr i18n.Localizer) {
 			deviceSelect.Disable()
 			refreshButton.Disable()
 			choose.Disable()
+			format.Disable()
 			verifyCheck.Disable()
 			ejectCheck.Disable()
 		} else {
 			deviceSelect.Enable()
 			refreshButton.Enable()
 			choose.Enable()
+			if selected.Path != "" {
+				format.Enable()
+			}
 			verifyCheck.Enable()
 			ejectCheck.Enable()
 		}
+	}
+	format.OnTapped = func() {
+		formatter, ok := backend.(device.FAT32Formatter)
+		if !ok || selected.Path == "" {
+			dialog.ShowInformation(tr.T("dialog.not_ready.title"), tr.T("dialog.format.not_ready"), w)
+			return
+		}
+		body := widget.NewLabel(tr.T("format.confirm.body", selected.Vendor, selected.Model, selected.Path, float64(selected.Size)/1e9, selected.Serial))
+		body.Wrapping = fyne.TextWrapWord
+		confirm := dialog.NewCustomConfirm(tr.T("format.confirm.title"), tr.T("format.confirm.accept"), tr.T("action.cancel"), body, func(ok bool) {
+			if !ok {
+				return
+			}
+			lock(true)
+			status.SetText(tr.T("status.formatting"))
+			appendLog(tr.T("log.format.start", selected.Path))
+			go func(target device.Device) {
+				err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER")
+				fyne.Do(func() {
+					lock(false)
+					if err != nil {
+						status.SetText(tr.T("status.failed", err))
+						appendLog(tr.T("log.error", err))
+						copyError.Show()
+						return
+					}
+					status.SetText(tr.T("status.format.complete"))
+					appendLog(tr.T("log.format.complete"))
+					refresh()
+				})
+			}(selected)
+		}, w)
+		confirm.SetDismissText(tr.T("action.cancel"))
+		confirm.Show()
 	}
 	start.OnTapped = func() {
 		resetFinishedState(machine)
@@ -217,7 +259,7 @@ func runApplication(tr i18n.Localizer) {
 		confirm.SetDismissText(tr.T("action.cancel"))
 		confirm.Show()
 	}
-	content := windowContent(tr, deviceSelect, deviceDetail, refreshButton, choose, imagePath, imageInfo, verifyCheck, ejectCheck, status, bar, metrics, copyLog, copyError, start, logPanel)
+	content := windowContent(tr, deviceSelect, deviceDetail, refreshButton, format, choose, imagePath, imageInfo, verifyCheck, ejectCheck, status, bar, metrics, copyLog, copyError, start, logPanel)
 	w.SetContent(container.NewVScroll(content))
 	appendLog(tr.T("log.launched"))
 	refresh()
@@ -243,8 +285,8 @@ func resetFinishedState(machine *core.StateMachine) {
 	}
 }
 
-func windowContent(tr i18n.Localizer, deviceSelect *widget.Select, deviceDetail *widget.Label, refreshButton, choose *widget.Button, imagePath *widget.Entry, imageInfo *widget.Label, verifyCheck, ejectCheck *widget.Check, status *widget.Label, bar *widget.ProgressBar, metrics *widget.Label, copyLog, copyError, start *widget.Button, logPanel *widget.Accordion) *fyne.Container {
-	deviceCard := widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, refreshButton, deviceSelect), deviceDetail))
+func windowContent(tr i18n.Localizer, deviceSelect *widget.Select, deviceDetail *widget.Label, refreshButton, format, choose *widget.Button, imagePath *widget.Entry, imageInfo *widget.Label, verifyCheck, ejectCheck *widget.Check, status *widget.Label, bar *widget.ProgressBar, metrics *widget.Label, copyLog, copyError, start *widget.Button, logPanel *widget.Accordion) *fyne.Container {
+	deviceCard := widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, container.NewHBox(refreshButton, format), deviceSelect), deviceDetail))
 	imageCard := widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, choose, imagePath))
 	optionsCard := widget.NewCard(tr.T("card.options"), "", container.NewVBox(verifyCheck, ejectCheck))
 	progressCard := widget.NewCard(tr.T("card.progress"), "", container.NewVBox(status, bar, metrics))

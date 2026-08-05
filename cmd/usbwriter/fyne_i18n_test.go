@@ -2,7 +2,11 @@
 
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"fyne.io/fyne/v2/lang"
+)
 
 func TestFyneTraditionalChineseFileDialogTranslations(t *testing.T) {
 	want := map[string]string{
@@ -15,8 +19,21 @@ func TestFyneTraditionalChineseFileDialogTranslations(t *testing.T) {
 			t.Errorf("%q = %q, want %q", key, got, value)
 		}
 	}
-	name, ok := fyneTraditionalChinese["file.name"].(map[string]string)
-	if !ok || name["other"] != "名稱" {
-		t.Errorf("file.name = %#v, want 名稱", fyneTraditionalChinese["file.name"])
+	contextual := map[string]string{
+		"file.name":   "名稱",
+		"file.parent": "上層",
+	}
+	for key, value := range contextual {
+		message, ok := fyneTraditionalChinese[key].(map[string]string)
+		if !ok || message["other"] != value {
+			t.Errorf("%s = %#v, want %s", key, fyneTraditionalChinese[key], value)
+		}
+	}
+
+	t.Setenv("LC_ALL", "zh_TW.UTF-8")
+	t.Setenv("LANGUAGE", "")
+	configureFyneTranslations("zh-TW")
+	if got := lang.X("file.parent", "Parent"); got != "上層" {
+		t.Errorf("localized file.parent = %q, want %q", got, "上層")
 	}
 }

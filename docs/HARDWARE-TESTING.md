@@ -42,17 +42,18 @@ distribution during every release. Use one example from each required row:
 |---|---|---|
 | Ordinary ISO | [Debian netinst ISO](https://www.debian.org/distrib/) | ISO selection, writing, read-back verification, and PC boot |
 | Ordinary IMG | An uncompressed Raspberry Pi OS `.img` from the [official Raspberry Pi OS page](https://www.raspberrypi.com/software/operating-systems/) | Full-disk IMG writing, verification, and Raspberry Pi boot |
-| Gzip-compressed image | An official OpenWrt x86-64 `combined-efi.img.gz` image from the [OpenWrt releases page](https://downloads.openwrt.org/releases/) | Gzip streaming, progress, cancellation, and verification |
-| XZ-compressed image | An official Ubuntu Core amd64 `.img.xz` image from the [Ubuntu Core download page](https://ubuntu.com/download/core) | XZ streaming, progress, cancellation, and verification |
+| Gzip-compressed image | An official LibreELEC Generic x86-64 `.img.gz` image from the [LibreELEC Generic download page](https://libreelec.tv/downloads/generic/) | Gzip streaming, progress, cancellation, verification, and PC boot |
+| XZ-compressed image | An official Raspberry Pi OS `.img.xz` image from the [Raspberry Pi OS download directory](https://downloads.raspberrypi.com/raspios_arm64/images/) | XZ streaming, progress, cancellation, verification, and Raspberry Pi boot |
 | Destructive safety image | The fixed 256 MiB raw image defined by the v1 specification | Complete write, flush, read-back, checksum, and corruption detection |
 | Interruption image | The fixed 4 GiB-or-larger raw image defined by the v1 specification | Cancellation and physical removal while writing |
 
-Download the OpenWrt and Ubuntu Core images in their publisher-provided
+Download the LibreELEC and Raspberry Pi OS images in their publisher-provided
 compressed form. Do not recompress or rename them. One official `.img.gz` and
 one official `.img.xz` are sufficient to cover the two compressed filename
 endings; every distribution does not need to be tested in both formats. Select
-the current x86-64/amd64 image whose filename has the exact ending shown above,
-and verify its publisher-provided checksum before testing.
+the current Generic x86-64 LibreELEC image and current Raspberry Pi OS arm64
+image whose filenames have the exact endings shown above, and verify their
+publisher-provided checksums before testing. OpenWrt is intentionally not used.
 
 If a Raspberry Pi download is a ZIP file, extract its `.img` first; ZIP is not
 one of GoFlasher's advertised input formats.

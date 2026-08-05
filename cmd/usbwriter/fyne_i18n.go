@@ -20,6 +20,7 @@ var fyneTraditionalChinese = map[string]any{
 	"Open":              "開啟",
 	"Show Hidden Files": "顯示隱藏檔案",
 	"file.name":         map[string]string{"other": "名稱"},
+	"file.parent":       map[string]string{"other": "上層"},
 }
 
 // configureFyneTranslations supplies Traditional Chinese strings for controls

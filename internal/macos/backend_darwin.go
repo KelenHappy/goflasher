@@ -218,6 +218,21 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	return nil
 }
 
+func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string) error {
+	fresh, err := b.revalidate(ctx, d)
+	if err != nil {
+		return err
+	}
+	if label == "" {
+		label = "GOFLASHER"
+	}
+	out, err := b.runner.Run(ctx, "eraseDisk", "FAT32", label, "MBRFormat", wholeDevice(fresh.Path))
+	if err != nil {
+		return fmt.Errorf("format FAT32: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func rawDevice(path string) string {
 	if strings.HasPrefix(path, "/dev/disk") {
 		return strings.Replace(path, "/dev/disk", "/dev/rdisk", 1)

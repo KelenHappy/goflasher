@@ -52,3 +52,22 @@ func TestDevicePathConversions(t *testing.T) {
 		t.Fatalf("wholeDevice() = %q", got)
 	}
 }
+
+func TestFormatFAT32UsesWholeDeviceAndMBR(t *testing.T) {
+	runner := &fakeRunner{json: map[string][]byte{
+		"[list external physical]": []byte(`{"AllDisksAndPartitions":[{"DeviceIdentifier":"disk4"}]}`),
+		"[info disk4]":             []byte(`{"DeviceIdentifier":"disk4","DeviceNode":"/dev/disk4","DeviceTreePath":"IOService:/USB/disk@1","MediaName":"USB Flash","BusProtocol":"USB","TotalSize":16000000000,"Whole":true,"Internal":false,"RemovableMedia":true}`),
+	}}
+	backend := &Backend{runner: runner}
+	devices, err := backend.ListAllowedDevices(context.Background())
+	if err != nil || len(devices) != 1 {
+		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
+	}
+	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER"); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprint([]string{"eraseDisk", "FAT32", "GOFLASHER", "MBRFormat", "/dev/disk4"})
+	if got := fmt.Sprint(runner.runs[0]); got != want {
+		t.Fatalf("format command = %s, want %s", got, want)
+	}
+}
