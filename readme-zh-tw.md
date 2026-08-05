@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="packaging/org.goflasher.usbwriter.svg?v=20260805" width="128" height="128" alt="GoFlasher 標誌">
+  <img src="packaging/org.goflasher.usbwriter.svg" width="128" height="128" alt="GoFlasher 標誌">
 
 # GoFlasher：以安全為優先的 USB 映像檔寫入工具
 
