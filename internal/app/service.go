@@ -35,6 +35,9 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	start := time.Now()
 	defer func() {
 		out.Elapsed = time.Since(start)
+		if out.BytesWritten > 0 && out.Elapsed > 0 {
+			out.AverageBytesPerSecond = float64(out.BytesWritten) / out.Elapsed.Seconds()
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, writer.ErrCancelled) {
 				_ = s.State.Transition(Cancelled)
@@ -80,7 +83,6 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	}
 	out.BytesWritten = wr.BytesWritten
 	out.SourceSHA256 = wr.SHA256
-	out.AverageBytesPerSecond = wr.AverageBytesPerSecond
 	if err = s.State.Transition(Flushing); err != nil {
 		return out, err
 	}
