@@ -27,7 +27,7 @@ jobs:
       - name: Install GUI and packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev rpm
       - name: Test and build
         run: |
           go test ./...
@@ -36,6 +36,8 @@ jobs:
           go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
       - name: Build Debian package
         run: packaging/make-deb.sh dist/goflasher "$VERSION" dist
+      - name: Build RPM package
+        run: packaging/make-rpm.sh dist/goflasher "$VERSION" dist
       - name: Build AppImage
         run: |
           curl --fail --location --retry 3 \
@@ -50,7 +52,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.AppImage *.deb > SHA256SUMS
+          sha256sum *.AppImage *.deb *.rpm > SHA256SUMS
           rm goflasher goflasher-helper
       - uses: actions/upload-artifact@v4
         with:

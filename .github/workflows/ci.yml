@@ -34,3 +34,24 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race ./...
+
+  package-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install GUI and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev rpm
+      - name: Build Linux binary and packages
+        run: |
+          mkdir -p dist
+          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
+          packaging/make-deb.sh dist/goflasher 0.0.0-ci dist
+          packaging/make-rpm.sh dist/goflasher 0.0.0-ci dist
+          test -f dist/goflasher_0.0.0-ci_amd64.deb
+          test -n "$(find dist -maxdepth 1 -name 'goflasher-0.0.0_ci-1*.rpm' -print -quit)"

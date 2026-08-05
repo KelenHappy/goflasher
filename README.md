@@ -66,16 +66,17 @@ operation.
 
 Source support and prebuilt package availability are separate. The current
 release workflow publishes prebuilt **Linux** artifacts only: an x86-64
-AppImage and an amd64 Debian package. The Windows and macOS implementations are
-available in the source tree and can be built from source as documented in
-[BUILDING.md](BUILDING.md), but signed Windows installers and signed/notarized
-macOS packages are not yet published.
+AppImage, an amd64 Debian package, and an x86-64 RPM package. The
+Windows and macOS implementations are available in the source tree and can be
+built from source as documented in [BUILDING.md](BUILDING.md), but signed Windows
+installers and signed/notarized macOS packages are not yet published.
 
 When a packaged release is published, its GitHub release assets are produced by
 the repository release workflow:
 
 - `GoFlasher-<version>-x86_64.AppImage`
 - `goflasher_<version>_amd64.deb`
+- `goflasher-<version>-1*.x86_64.rpm`
 - `SHA256SUMS`
 
 Verify files downloaded from the release page before running or installing
@@ -112,6 +113,12 @@ Install the Debian package on Debian or Ubuntu:
 
 ```sh
 sudo apt install ./goflasher_*_amd64.deb
+```
+
+Install the RPM package on Fedora, RHEL, or compatible distributions:
+
+```sh
+sudo dnf install ./goflasher-*.x86_64.rpm
 ```
 
 Do not launch GoFlasher itself with `sudo`.
