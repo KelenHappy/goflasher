@@ -194,3 +194,18 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	_, err := b.revalidate(ctx, d)
 	return err // The disk is already offline, Windows' safe-removal state.
 }
+
+func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string) error {
+	fresh, err := b.revalidate(ctx, d)
+	if err != nil {
+		return err
+	}
+	// Literal labels are escaped before interpolation. Clear-Disk and the
+	// explicit MBR initialization make this a full-device, Rufus-style format.
+	label = strings.ReplaceAll(label, "'", "''")
+	script := fmt.Sprintf("$ErrorActionPreference='Stop'; Set-Disk -Number %d -IsOffline $false; Clear-Disk -Number %d -RemoveData -RemoveOEM -Confirm:$false; Initialize-Disk -Number %d -PartitionStyle MBR; $p=New-Partition -DiskNumber %d -UseMaximumSize -AssignDriveLetter; Format-Volume -Partition $p -FileSystem FAT32 -NewFileSystemLabel '%s' -Confirm:$false -Force | Out-Null", fresh.Major, fresh.Major, fresh.Major, fresh.Major, label)
+	if out, err := b.runner.Output(ctx, script); err != nil {
+		return fmt.Errorf("format FAT32: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}

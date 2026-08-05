@@ -233,6 +233,31 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	return err
 }
 
+// FormatFAT32 asks udisks to create a FAT32 filesystem on the whole removable
+// device. udisks performs the privileged operation through the desktop's
+// normal authorization agent; revalidation and unmounting happen first.
+func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string) error {
+	fresh, err := b.Revalidate(ctx, d)
+	if err != nil {
+		return err
+	}
+	if err := b.Unmount(ctx, fresh); err != nil {
+		return err
+	}
+	again, err := b.Revalidate(ctx, fresh)
+	if err != nil {
+		return err
+	}
+	args := []string{"format", "--block-device", again.Path, "--type", "vfat", "--no-user-interaction"}
+	if label != "" {
+		args = append(args, "--label", label)
+	}
+	if out, err := b.runner.Output(ctx, "udisksctl", args...); err != nil {
+		return fmt.Errorf("format FAT32: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 type devNumber struct{ major, minor uint32 }
 
 func parseMountInfo(path string) (map[devNumber][]string, error) {

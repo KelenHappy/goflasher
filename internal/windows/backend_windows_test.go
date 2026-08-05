@@ -52,3 +52,20 @@ func TestUnmountRevalidatesAndTakesDiskOffline(t *testing.T) {
 		t.Fatalf("unexpected PowerShell script: %q", runner.script)
 	}
 }
+
+func TestFormatFAT32RevalidatesAndCreatesMBRVolume(t *testing.T) {
+	runner := &fakeRunner{output: []byte(`[{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true}]`)}
+	backend := &Backend{runner: runner}
+	devices, err := backend.ListAllowedDevices(context.Background())
+	if err != nil || len(devices) != 1 {
+		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
+	}
+	if err := backend.FormatFAT32(context.Background(), devices[0], "GO'FLASHER"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Clear-Disk -Number 4", "Initialize-Disk -Number 4 -PartitionStyle MBR", "Format-Volume", "-FileSystem FAT32", "GO''FLASHER"} {
+		if !strings.Contains(runner.script, want) {
+			t.Fatalf("format script %q does not contain %q", runner.script, want)
+		}
+	}
+}
