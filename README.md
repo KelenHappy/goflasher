@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="packaging/org.goflasher.usbwriter.svg" width="128" height="128" alt="GoFlasher logo">
+  <img src="packaging/org.goflasher.usbwriter.svg?v=20260805" width="128" height="128" alt="GoFlasher logo">
 
 # GoFlasher: A Safety-First USB Image Writer
 
