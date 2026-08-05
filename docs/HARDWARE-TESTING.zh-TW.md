@@ -40,13 +40,13 @@ VM 可以用來測試套件安裝，但不能取代實體電腦的 USB 硬體驗
 | 必測範圍 | 範例 | 檢查目的 |
 |---|---|---|
 | 一般 ISO | [Debian netinst ISO](https://www.debian.org/distrib/) | ISO 選取、寫入、read-back verification 與 PC 開機 |
-| 一般 IMG | 從 [Raspberry Pi OS 官方頁面](https://www.raspberrypi.com/software/operating-systems/)取得並解壓縮的 `.img` | 完整磁碟 IMG 寫入、驗證與 Raspberry Pi 開機 |
-| Gzip 壓縮映像 | 從 [LibreELEC Generic 官方下載頁](https://libreelec.tv/downloads/generic/)下載 x86-64 `.img.gz` 映像 | Gzip 串流、進度、取消、驗證與 PC 開機 |
+| Gzip 壓縮映像 | 從 [Retropie 官方下載頁](https://retropie.org.uk/download/)下載 x86-64 `.img.gz` 映像 | Gzip 串流、進度、取消、驗證與 PC 開機 |
 | XZ 壓縮映像 | 從 [Raspberry Pi OS 官方下載目錄](https://downloads.raspberrypi.com/raspios_arm64/images/)下載 `.img.xz` 映像 | XZ 串流、進度、取消、驗證與 Raspberry Pi 開機 |
+| raw ...|https://fedoraproject.org/iot/download/
 | 破壞性安全測試映像 | v1 規格定義的固定 256 MiB raw image | 完整寫入、flush、read-back、checksum 與 corruption detection |
 | 中斷測試映像 | v1 規格定義的固定 4 GiB 以上 raw image | 寫入中取消及實體拔除 |
 
-LibreELEC 與 Raspberry Pi OS 都直接下載發行者提供的壓縮映像，不要自行壓縮或重新命名。
+Retropie 與 Raspberry Pi OS 都直接下載發行者提供的壓縮映像，不要自行壓縮或重新命名。
 測試一個官方 `.img.gz` 和一個官方 `.img.xz`，就足以覆蓋兩種壓縮結尾，不必讓每個
 發行版都測兩種格式。請選擇檔名符合上述結尾的最新 Generic x86-64 LibreELEC 映像與
 Raspberry Pi OS arm64 映像，並在測試前核對發行者提供的 checksum。本測試刻意不使用 OpenWrt。
