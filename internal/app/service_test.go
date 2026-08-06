@@ -3,13 +3,16 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/image"
+	"github.com/goflasher/goflasher/internal/writer"
 )
 
 type fileBackend struct {
@@ -98,5 +101,32 @@ func TestServiceCancellationBeforeDestructiveWork(t *testing.T) {
 	_, err := (&Service{Backend: backend, State: states}).Run(ctx, info, d, RunOptions{}, nil)
 	if err == nil || backend.unmounted || states.State() != Cancelled {
 		t.Fatalf("error=%v unmounted=%v state=%s", err, backend.unmounted, states.State())
+	}
+}
+
+func TestServiceRejectsSourceChecksumChangedAfterInspection(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.img")
+	target := filepath.Join(dir, "target")
+	payload := []byte("changed image")
+	os.WriteFile(source, payload, 0600)
+	os.WriteFile(target, make([]byte, len(payload)), 0600)
+	info, err := image.Detect(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.UncompressedSize = uint64(len(payload))
+	info.SHA256 = strings.Repeat("0", 64)
+	d := device.Device{ID: "test", Path: target, Size: uint64(len(payload)), IsAllowed: true}
+	backend := &fileBackend{path: target, d: d}
+	states := NewStateMachine()
+	for _, state := range []State{ImageSelected, Ready, Confirming} {
+		if err := states.Transition(state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := (&Service{Backend: backend, State: states}).Run(context.Background(), info, d, RunOptions{}, nil)
+	if !errors.Is(err, writer.ErrSourceChanged) || result.BytesWritten != uint64(len(payload)) || backend.flushed {
+		t.Fatalf("result=%+v error=%v flushed=%v", result, err, backend.flushed)
 	}
 }

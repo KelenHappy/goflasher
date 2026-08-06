@@ -169,7 +169,8 @@ func authorizationCanceled(err error, detail string) bool {
 
 type processWriter struct {
 	io.WriteCloser
-	cmd *exec.Cmd
+	cmd    *exec.Cmd
+	stderr *strings.Builder
 }
 
 func (w *processWriter) Close() error {
@@ -178,7 +179,10 @@ func (w *processWriter) Close() error {
 	if a != nil {
 		return a
 	}
-	return b
+	if b == nil {
+		return nil
+	}
+	return authorizationError(b, w.stderr.String())
 }
 
 type processReader struct {
@@ -201,14 +205,14 @@ func (r *processReader) Close() error {
 }
 
 func (h *commandHelper) OpenWriter(ctx context.Context, r privilegedRequest) (io.WriteCloser, error) {
-	cmd, in, out, _, err := h.start(ctx, r)
+	cmd, in, out, stderr, err := h.start(ctx, r)
 	if out != nil {
 		_ = out.Close()
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &processWriter{WriteCloser: in, cmd: cmd}, nil
+	return &processWriter{WriteCloser: in, cmd: cmd, stderr: stderr}, nil
 }
 func (h *commandHelper) OpenReader(ctx context.Context, r privilegedRequest) (io.ReadCloser, error) {
 	cmd, in, out, _, err := h.start(ctx, r)
@@ -402,19 +406,39 @@ func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, 
 	if readUint(filepath.Join(class, "size"))*512 != req.Capacity {
 		return 0, 0, ErrDeviceChanged
 	}
-	serial := first(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
-	wwn := first(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
-	if req.Serial != "" && req.Serial != serial {
+	serials := uniqueIdentityValues(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
+	wwns := uniqueIdentityValues(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
+	if req.Serial != "" && !containsIdentity(serials, req.Serial) {
 		return 0, 0, ErrDeviceChanged
 	}
-	if req.WWN != "" && req.WWN != wwn {
+	if req.WWN != "" && !containsIdentity(wwns, req.WWN) {
 		return 0, 0, ErrDeviceChanged
 	}
-	derived := first(serial, wwn, fmt.Sprintf("%d:%d@%s", major, minor, real))
-	if !identityMatches(req, derived) {
+	identities := append(append(serials, wwns...), fmt.Sprintf("%d:%d@%s", major, minor, real))
+	if !containsIdentity(identities, req.Identity) {
 		return 0, 0, ErrDeviceChanged
 	}
 	return major, minor, nil
+}
+
+func uniqueIdentityValues(values ...string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !containsIdentity(result, value) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func containsIdentity(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // Some USB flash drives expose their serial only on the USB device node, while
@@ -428,13 +452,6 @@ func readUSBAncestorAttribute(real, attribute string) string {
 		}
 	}
 	return ""
-}
-
-func identityMatches(req privilegedRequest, derived string) bool {
-	if req.Identity == derived || req.Identity == req.Serial {
-		return true
-	}
-	return req.Identity == req.WWN
 }
 
 func validateDeviceSafety(env helperEnvironment, name string, major, minor uint32) error {
@@ -465,7 +482,11 @@ func validateDeviceNode(env helperEnvironment, name string, major, minor uint32)
 
 func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.File, error) {
 	flags := os.O_RDONLY
-	if req.Mode != modeRead {
+	if req.Mode == modeFormatFAT32 {
+		// mkfs.fat examines the existing device as well as writing the new
+		// filesystem, so its validated descriptor must permit both operations.
+		flags = os.O_RDWR
+	} else if req.Mode != modeRead {
 		flags = os.O_WRONLY
 	}
 	return os.OpenFile(filepath.Join(env.DevRoot, name), flags|syscall.O_CLOEXEC, 0)

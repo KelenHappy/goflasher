@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,6 +31,29 @@ func TestTargetTooSmall(t *testing.T) {
 	_, err := Copy(context.Background(), io.Discard, bytes.NewReader(nil), Options{TotalBytes: 2, TargetSize: 1})
 	if !errors.Is(err, ErrTargetTooSmall) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCopyRejectsChangedSourceLength(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		source   string
+		expected uint64
+		written  int
+	}{
+		{name: "shorter", source: "abc", expected: 4, written: 3},
+		{name: "longer", source: "abcde", expected: 4, written: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var target bytes.Buffer
+			result, err := Copy(context.Background(), &target, strings.NewReader(test.source), Options{TotalBytes: test.expected, TargetSize: 16, BufferSize: 16})
+			if !errors.Is(err, ErrSourceChanged) {
+				t.Fatalf("error = %v", err)
+			}
+			if result.BytesWritten != uint64(test.written) || target.Len() != test.written {
+				t.Fatalf("result=%+v target bytes=%d", result, target.Len())
+			}
+		})
 	}
 }
 
