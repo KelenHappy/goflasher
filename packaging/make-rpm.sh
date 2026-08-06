@@ -43,6 +43,8 @@ URL: https://github.com/KelenHappy/goflasher
 BuildArch: $arch
 Requires: polkit
 Requires: udisks2
+Requires: dosfstools
+Requires: xz
 Requires: glibc
 Requires: libX11
 Requires: libglvnd-glx

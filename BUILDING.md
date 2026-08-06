@@ -23,7 +23,7 @@ On Ubuntu 24.04, install the build and runtime dependencies with:
 sudo apt update
 sudo apt install \
   gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev \
-  udisks2 xz-utils
+  udisks2 dosfstools xz-utils
 ```
 
 Other distributions may use different package names. GoFlasher does not use
@@ -95,8 +95,10 @@ sudo apt install ./dist/goflasher_1.0.0_amd64.deb
 ```
 
 The Debian package installs the helper at `/usr/libexec/goflasher-helper` and
-its polkit action. The helper is a separate non-GUI executable; never make the
-GUI setuid and never run it with `sudo`.
+its polkit action. It also depends on `dosfstools`, which provides the
+`mkfs.vfat` executable used by the FAT32 format operation. The helper is a
+separate non-GUI executable; never make the GUI setuid and never run it with
+`sudo`.
 
 ## AppImage
 
