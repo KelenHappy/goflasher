@@ -55,7 +55,8 @@ removable USB flash media and can verify and eject the result.
 
 %install
 rm -rf %{buildroot}
-cp -a $stage/* %{buildroot}/
+mkdir -p %{buildroot}
+cp -a $stage/. %{buildroot}/
 
 %files
 %license /usr/share/doc/goflasher/copyright
