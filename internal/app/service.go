@@ -75,14 +75,17 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	}
 	wr, writeErr := writer.Copy(ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: target.Size, Progress: updates})
 	closeErr := dst.Close()
+	out.BytesWritten = wr.BytesWritten
+	out.SourceSHA256 = wr.SHA256
 	if writeErr != nil {
 		return out, writeErr
 	}
 	if closeErr != nil {
 		return out, closeErr
 	}
-	out.BytesWritten = wr.BytesWritten
-	out.SourceSHA256 = wr.SHA256
+	if wr.SHA256 != info.SHA256 {
+		return out, fmt.Errorf("%w: checksum no longer matches inspected image", writer.ErrSourceChanged)
+	}
 	if err = s.State.Transition(Flushing); err != nil {
 		return out, err
 	}

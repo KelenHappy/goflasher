@@ -40,9 +40,10 @@ inside an image. On every supported host it can therefore write a Linux ISO or
 any other raw disk image in a supported format: `.iso`, `.img`, `.raw`, or a
 gzip (`.gz`) or XZ (`.xz`) compressed image.
 
-GoFlasher is an image writer. It does **not** format filesystems, download
-operating-system images, create Windows installation workarounds, create
-persistent partitions, or perform bad-block tests.
+GoFlasher is primarily an image writer. It can also erase a selected supported
+USB device and create a FAT32 filesystem. It does **not** download operating-
+system images, create Windows installation workarounds, create persistent
+partitions, or perform bad-block tests.
 
 ## Host platform support
 

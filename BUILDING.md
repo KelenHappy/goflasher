@@ -95,8 +95,10 @@ sudo apt install ./dist/goflasher_1.0.0_amd64.deb
 ```
 
 The Debian package installs the helper at `/usr/libexec/goflasher-helper` and
-its polkit action. The helper is a separate non-GUI executable; never make the
-GUI setuid and never run it with `sudo`.
+its polkit action. FAT32 creation is built into the helper and does not require
+`mkfs.vfat`, `dosfstools`, `parted`, or another formatting package. The helper
+is a separate non-GUI executable; never make the GUI setuid and never run it
+with `sudo`.
 
 ## AppImage
 

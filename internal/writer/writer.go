@@ -15,6 +15,7 @@ import (
 var (
 	ErrCancelled      = errors.New("write cancelled")
 	ErrTargetTooSmall = errors.New("target too small")
+	ErrSourceChanged  = errors.New("source image changed during write")
 	ErrWriteFailed    = errors.New("write failed")
 )
 
@@ -53,6 +54,9 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, opts Options) (Resu
 		}
 		n, readErr := src.Read(buf)
 		if n > 0 {
+			if opts.TotalBytes > 0 && uint64(n) > opts.TotalBytes-written {
+				return result(written, h, start, opts.Now()), fmt.Errorf("%w: expected %d bytes", ErrSourceChanged, opts.TotalBytes)
+			}
 			wn, err := mw.Write(buf[:n])
 			written += uint64(wn)
 			if err != nil {
@@ -64,6 +68,9 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, opts Options) (Resu
 			send(ctx, opts.Progress, progress.Calculate(progress.StageWriting, written, opts.TotalBytes, opts.Now().Sub(start)))
 		}
 		if readErr == io.EOF {
+			if opts.TotalBytes > 0 && written != opts.TotalBytes {
+				return result(written, h, start, opts.Now()), fmt.Errorf("%w: got %d bytes, expected %d", ErrSourceChanged, written, opts.TotalBytes)
+			}
 			break
 		}
 		if readErr != nil {

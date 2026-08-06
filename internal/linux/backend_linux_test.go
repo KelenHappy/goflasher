@@ -5,6 +5,7 @@ package linux
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -291,6 +292,39 @@ func TestWriteProtocolPreservesBufferedBinaryPayloadAndSyncs(t *testing.T) {
 	}
 }
 
+func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T) {
+	const size = uint64(64 << 20)
+	path := filepath.Join(t.TempDir(), "device")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	requireNoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+	requireNoError(t, file.Truncate(int64(size)))
+	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 512), int64(size-512))
+	requireNoError(t, err)
+	requireNoError(t, formatFAT32(file, size, "GOFLASHER"))
+
+	boot := make([]byte, 512)
+	_, err = file.ReadAt(boot, 0)
+	requireNoError(t, err)
+	if string(boot[82:90]) != "FAT32   " || string(boot[71:82]) != "GOFLASHER  " || boot[510] != 0x55 || boot[511] != 0xaa {
+		t.Fatalf("invalid FAT32 boot sector: type=%q label=%q signature=%x", boot[82:90], boot[71:82], boot[510:512])
+	}
+	fatSectors := binary.LittleEndian.Uint32(boot[36:40])
+	rootOffset := int64((32 + 2*uint64(fatSectors)) * 512)
+	root := make([]byte, 32)
+	_, err = file.ReadAt(root, rootOffset)
+	requireNoError(t, err)
+	if string(root[:11]) != "GOFLASHER  " || root[11] != 0x08 {
+		t.Fatalf("invalid root volume label: %q attribute=%x", root[:11], root[11])
+	}
+	last := make([]byte, 512)
+	_, err = file.ReadAt(last, int64(size-512))
+	requireNoError(t, err)
+	if !bytes.Equal(last, make([]byte, 512)) {
+		t.Fatal("stale backup partition table was not cleared")
+	}
+}
+
 func TestReadUSBAncestorSerial(t *testing.T) {
 	root := t.TempDir()
 	usb := filepath.Join(root, "usb1", "1-13")
@@ -301,6 +335,29 @@ func TestReadUSBAncestorSerial(t *testing.T) {
 	write(t, filepath.Join(usb, "serial"), "AA0OO7RP1MRHMVZW")
 	if got := readUSBAncestorAttribute(block, "serial"); got != "AA0OO7RP1MRHMVZW" {
 		t.Fatalf("USB ancestor serial = %q", got)
+	}
+}
+
+func TestMetadataAcceptsMatchingUSBSerialWhenSCSISerialDiffers(t *testing.T) {
+	root := t.TempDir()
+	usb := filepath.Join(root, "usb1", "1-13")
+	real := filepath.Join(usb, "1-13:1.0", "host8", "target8:0:0", "8:0:0:0", "block", "sdc")
+	class := filepath.Join(root, "class", "sdc")
+	requireNoError(t, os.MkdirAll(filepath.Join(real, "device"), 0755))
+	requireNoError(t, os.MkdirAll(class, 0755))
+	write(t, filepath.Join(usb, "idVendor"), "090c")
+	write(t, filepath.Join(usb, "idProduct"), "1000")
+	write(t, filepath.Join(usb, "serial"), "USB-SERIAL")
+	write(t, filepath.Join(class, "device", "serial"), "SCSI-SERIAL")
+	write(t, filepath.Join(class, "dev"), "8:32")
+	write(t, filepath.Join(class, "size"), "65536")
+	req := privilegedRequest{Identity: "USB-SERIAL", Serial: "USB-SERIAL", Major: 8, Minor: 32, Capacity: 65536 * 512, Mode: modeWrite}
+	if _, _, err := validateDeviceMetadata(req, class, real); err != nil {
+		t.Fatalf("matching physical USB serial rejected: %v", err)
+	}
+	req.Identity, req.Serial = "REPLACED", "REPLACED"
+	if _, _, err := validateDeviceMetadata(req, class, real); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("replacement error = %v", err)
 	}
 }
 

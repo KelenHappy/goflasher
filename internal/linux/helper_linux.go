@@ -5,6 +5,7 @@ package linux
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -169,7 +170,8 @@ func authorizationCanceled(err error, detail string) bool {
 
 type processWriter struct {
 	io.WriteCloser
-	cmd *exec.Cmd
+	cmd    *exec.Cmd
+	stderr *strings.Builder
 }
 
 func (w *processWriter) Close() error {
@@ -178,7 +180,10 @@ func (w *processWriter) Close() error {
 	if a != nil {
 		return a
 	}
-	return b
+	if b == nil {
+		return nil
+	}
+	return authorizationError(b, w.stderr.String())
 }
 
 type processReader struct {
@@ -201,14 +206,14 @@ func (r *processReader) Close() error {
 }
 
 func (h *commandHelper) OpenWriter(ctx context.Context, r privilegedRequest) (io.WriteCloser, error) {
-	cmd, in, out, _, err := h.start(ctx, r)
+	cmd, in, out, stderr, err := h.start(ctx, r)
 	if out != nil {
 		_ = out.Close()
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &processWriter{WriteCloser: in, cmd: cmd}, nil
+	return &processWriter{WriteCloser: in, cmd: cmd, stderr: stderr}, nil
 }
 func (h *commandHelper) OpenReader(ctx context.Context, r privilegedRequest) (io.ReadCloser, error) {
 	cmd, in, out, _, err := h.start(ctx, r)
@@ -275,7 +280,7 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 	case modeFlush:
 		err = f.Sync()
 	case modeFormatFAT32:
-		err = makeFAT32(f, req.Label, errOut)
+		err = makeFAT32(f, req.Capacity, req.Label, errOut)
 	default:
 		err = errors.New("unsupported operation mode")
 	}
@@ -343,25 +348,128 @@ func validFATLabel(label string) bool {
 	return true
 }
 
-func makeFAT32(device *os.File, label string, errOut io.Writer) error {
-	mkfs, err := fixedMkfsFAT()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(mkfs, "-I", "-F", "32", "-n", label, "/proc/self/fd/3")
-	cmd.ExtraFiles = []*os.File{device}
-	cmd.Stdout = errOut
-	cmd.Stderr = errOut
-	return cmd.Run()
+func makeFAT32(device *os.File, size uint64, label string, _ io.Writer) error {
+	return formatFAT32(device, size, label)
 }
 
-func fixedMkfsFAT() (string, error) {
-	for _, path := range []string{"/usr/sbin/mkfs.vfat", "/usr/bin/mkfs.vfat", "/sbin/mkfs.vfat"} {
-		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-			return path, nil
+type randomAccessSyncer interface {
+	io.WriterAt
+	Sync() error
+}
+
+// formatFAT32 creates a standards-compatible FAT32 "superfloppy" directly.
+// Keeping this small formatter in-process avoids executing distribution tools
+// as root and makes packaged formatting independent of dosfstools.
+func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
+	const sectorSize, reserved, fatCount = uint64(512), uint64(32), uint64(2)
+	if size < 64<<20 || size/sectorSize > uint64(^uint32(0)) {
+		return errors.New("device size is not supported by FAT32")
+	}
+	totalSectors := size / sectorSize
+	sectorsPerCluster := fat32SectorsPerCluster(size)
+	fatSectors := uint64(1)
+	for {
+		clusters := (totalSectors - reserved - fatCount*fatSectors) / sectorsPerCluster
+		next := ((clusters+2)*4 + sectorSize - 1) / sectorSize
+		if next == fatSectors {
+			break
+		}
+		fatSectors = next
+	}
+	dataSectors := totalSectors - reserved - fatCount*fatSectors
+	clusters := dataSectors / sectorsPerCluster
+	if clusters < 65525 {
+		return errors.New("device is too small for FAT32")
+	}
+	// Invalidate a backup GPT header left at the end of a previously partitioned
+	// disk. The primary partition table is replaced by the FAT boot sector below.
+	if _, err := device.WriteAt(make([]byte, sectorSize), int64((totalSectors-1)*sectorSize)); err != nil {
+		return err
+	}
+
+	boot := fat32BootSector(uint32(totalSectors), uint32(fatSectors), byte(sectorsPerCluster), label)
+	fsinfo := fat32FSInfo(uint32(clusters))
+	for _, write := range []struct {
+		offset int64
+		data   []byte
+	}{{0, boot}, {512, fsinfo}, {6 * 512, boot}, {7 * 512, fsinfo}} {
+		if _, err := device.WriteAt(write.data, write.offset); err != nil {
+			return err
 		}
 	}
-	return "", errors.New("mkfs.vfat is not installed")
+	fat := make([]byte, fatSectors*sectorSize)
+	binary.LittleEndian.PutUint32(fat[0:4], 0x0ffffff8)
+	binary.LittleEndian.PutUint32(fat[4:8], 0x0fffffff)
+	binary.LittleEndian.PutUint32(fat[8:12], 0x0fffffff)
+	for copyIndex := uint64(0); copyIndex < fatCount; copyIndex++ {
+		offset := int64((reserved + copyIndex*fatSectors) * sectorSize)
+		if _, err := device.WriteAt(fat, offset); err != nil {
+			return err
+		}
+	}
+	root := make([]byte, sectorsPerCluster*sectorSize)
+	copy(root[:11], fatLabel(label))
+	root[11] = 0x08
+	rootOffset := int64((reserved + fatCount*fatSectors) * sectorSize)
+	if _, err := device.WriteAt(root, rootOffset); err != nil {
+		return err
+	}
+	return device.Sync()
+}
+
+func fat32SectorsPerCluster(size uint64) uint64 {
+	switch {
+	case size <= 260<<20:
+		return 1
+	case size <= 8<<30:
+		return 8
+	case size <= 16<<30:
+		return 16
+	case size <= 32<<30:
+		return 32
+	default:
+		return 64
+	}
+}
+
+func fatLabel(label string) []byte {
+	value := []byte("           ")
+	copy(value, label)
+	return value
+}
+
+func fat32BootSector(totalSectors, fatSectors uint32, sectorsPerCluster byte, label string) []byte {
+	b := make([]byte, 512)
+	copy(b[0:3], []byte{0xeb, 0x58, 0x90})
+	copy(b[3:11], "GOFLASH ")
+	binary.LittleEndian.PutUint16(b[11:13], 512)
+	b[13] = sectorsPerCluster
+	binary.LittleEndian.PutUint16(b[14:16], 32)
+	b[16] = 2
+	b[21] = 0xf8
+	binary.LittleEndian.PutUint16(b[24:26], 63)
+	binary.LittleEndian.PutUint16(b[26:28], 255)
+	binary.LittleEndian.PutUint32(b[32:36], totalSectors)
+	binary.LittleEndian.PutUint32(b[36:40], fatSectors)
+	binary.LittleEndian.PutUint32(b[44:48], 2)
+	binary.LittleEndian.PutUint16(b[48:50], 1)
+	binary.LittleEndian.PutUint16(b[50:52], 6)
+	b[64], b[66] = 0x80, 0x29
+	binary.LittleEndian.PutUint32(b[67:71], 0x47464c53)
+	copy(b[71:82], fatLabel(label))
+	copy(b[82:90], "FAT32   ")
+	b[510], b[511] = 0x55, 0xaa
+	return b
+}
+
+func fat32FSInfo(clusters uint32) []byte {
+	b := make([]byte, 512)
+	binary.LittleEndian.PutUint32(b[0:4], 0x41615252)
+	binary.LittleEndian.PutUint32(b[484:488], 0x61417272)
+	binary.LittleEndian.PutUint32(b[488:492], clusters-1)
+	binary.LittleEndian.PutUint32(b[492:496], 3)
+	binary.LittleEndian.PutUint32(b[508:512], 0xaa550000)
+	return b
 }
 
 func resolveDevice(req privilegedRequest, env helperEnvironment) (string, string, error) {
@@ -402,19 +510,39 @@ func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, 
 	if readUint(filepath.Join(class, "size"))*512 != req.Capacity {
 		return 0, 0, ErrDeviceChanged
 	}
-	serial := first(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
-	wwn := first(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
-	if req.Serial != "" && req.Serial != serial {
+	serials := uniqueIdentityValues(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
+	wwns := uniqueIdentityValues(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
+	if req.Serial != "" && !containsIdentity(serials, req.Serial) {
 		return 0, 0, ErrDeviceChanged
 	}
-	if req.WWN != "" && req.WWN != wwn {
+	if req.WWN != "" && !containsIdentity(wwns, req.WWN) {
 		return 0, 0, ErrDeviceChanged
 	}
-	derived := first(serial, wwn, fmt.Sprintf("%d:%d@%s", major, minor, real))
-	if !identityMatches(req, derived) {
+	identities := append(append(serials, wwns...), fmt.Sprintf("%d:%d@%s", major, minor, real))
+	if !containsIdentity(identities, req.Identity) {
 		return 0, 0, ErrDeviceChanged
 	}
 	return major, minor, nil
+}
+
+func uniqueIdentityValues(values ...string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !containsIdentity(result, value) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func containsIdentity(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // Some USB flash drives expose their serial only on the USB device node, while
@@ -428,13 +556,6 @@ func readUSBAncestorAttribute(real, attribute string) string {
 		}
 	}
 	return ""
-}
-
-func identityMatches(req privilegedRequest, derived string) bool {
-	if req.Identity == derived || req.Identity == req.Serial {
-		return true
-	}
-	return req.Identity == req.WWN
 }
 
 func validateDeviceSafety(env helperEnvironment, name string, major, minor uint32) error {
@@ -465,7 +586,11 @@ func validateDeviceNode(env helperEnvironment, name string, major, minor uint32)
 
 func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.File, error) {
 	flags := os.O_RDONLY
-	if req.Mode != modeRead {
+	if req.Mode == modeFormatFAT32 {
+		// mkfs.fat examines the existing device as well as writing the new
+		// filesystem, so its validated descriptor must permit both operations.
+		flags = os.O_RDWR
+	} else if req.Mode != modeRead {
 		flags = os.O_WRONLY
 	}
 	return os.OpenFile(filepath.Join(env.DevRoot, name), flags|syscall.O_CLOEXEC, 0)
