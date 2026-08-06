@@ -5,6 +5,7 @@ package linux
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -288,6 +289,39 @@ func TestWriteProtocolPreservesBufferedBinaryPayloadAndSyncs(t *testing.T) {
 	}
 	if !target.synced {
 		t.Fatal("write completed without syncing the target descriptor")
+	}
+}
+
+func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T) {
+	const size = uint64(64 << 20)
+	path := filepath.Join(t.TempDir(), "device")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	requireNoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+	requireNoError(t, file.Truncate(int64(size)))
+	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 512), int64(size-512))
+	requireNoError(t, err)
+	requireNoError(t, formatFAT32(file, size, "GOFLASHER"))
+
+	boot := make([]byte, 512)
+	_, err = file.ReadAt(boot, 0)
+	requireNoError(t, err)
+	if string(boot[82:90]) != "FAT32   " || string(boot[71:82]) != "GOFLASHER  " || boot[510] != 0x55 || boot[511] != 0xaa {
+		t.Fatalf("invalid FAT32 boot sector: type=%q label=%q signature=%x", boot[82:90], boot[71:82], boot[510:512])
+	}
+	fatSectors := binary.LittleEndian.Uint32(boot[36:40])
+	rootOffset := int64((32 + 2*uint64(fatSectors)) * 512)
+	root := make([]byte, 32)
+	_, err = file.ReadAt(root, rootOffset)
+	requireNoError(t, err)
+	if string(root[:11]) != "GOFLASHER  " || root[11] != 0x08 {
+		t.Fatalf("invalid root volume label: %q attribute=%x", root[:11], root[11])
+	}
+	last := make([]byte, 512)
+	_, err = file.ReadAt(last, int64(size-512))
+	requireNoError(t, err)
+	if !bytes.Equal(last, make([]byte, 512)) {
+		t.Fatal("stale backup partition table was not cleared")
 	}
 }
 
