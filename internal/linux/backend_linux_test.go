@@ -292,6 +292,38 @@ func TestWriteProtocolPreservesBufferedBinaryPayloadAndSyncs(t *testing.T) {
 	}
 }
 
+func TestFlushSyncsBeforeInvalidatingBlockCache(t *testing.T) {
+	target := &syncBuffer{}
+	invalidated := false
+	requireNoError(t, flushAndInvalidate(target, func() error {
+		if !target.synced {
+			t.Fatal("block cache invalidated before target sync")
+		}
+		invalidated = true
+		return nil
+	}))
+	if !invalidated {
+		t.Fatal("block cache was not invalidated")
+	}
+}
+
+func TestFlushDoesNotInvalidateAfterSyncFailure(t *testing.T) {
+	want := errors.New("sync failed")
+	target := syncError{err: want}
+	invalidated := false
+	err := flushAndInvalidate(target, func() error {
+		invalidated = true
+		return nil
+	})
+	if !errors.Is(err, want) || invalidated {
+		t.Fatalf("error = %v, invalidated = %v", err, invalidated)
+	}
+}
+
+type syncError struct{ err error }
+
+func (s syncError) Sync() error { return s.err }
+
 func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T) {
 	const size = uint64(64 << 20)
 	path := filepath.Join(t.TempDir(), "device")

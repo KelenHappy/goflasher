@@ -278,13 +278,31 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 	case modeRead:
 		_, err = io.CopyN(out, f, int64(req.Capacity))
 	case modeFlush:
-		err = f.Sync()
+		err = flushAndInvalidate(f, func() error { return invalidateBlockCache(f) })
 	case modeFormatFAT32:
 		err = makeFAT32(f, req.Capacity, req.Label, errOut)
 	default:
 		err = errors.New("unsupported operation mode")
 	}
 	return err
+}
+
+func flushAndInvalidate(target interface{ Sync() error }, invalidate func() error) error {
+	if err := target.Sync(); err != nil {
+		return err
+	}
+	return invalidate()
+}
+
+func invalidateBlockCache(target *os.File) error {
+	// Verification must read the USB media, not clean pages retained from the
+	// preceding write. BLKFLSBUF invalidates this block device's buffer cache;
+	// the helper runs with the privilege required by the ioctl.
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, target.Fd(), uintptr(unix.BLKFLSBUF), 0)
+	if errno != 0 {
+		return fmt.Errorf("invalidate block cache: %w", errno)
+	}
+	return nil
 }
 
 func writeAndSync(target interface {
@@ -367,15 +385,22 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 	}
 	totalSectors := size / sectorSize
 	sectorsPerCluster := fat32SectorsPerCluster(size)
-	fatSectors := uint64(1)
-	for {
-		clusters := (totalSectors - reserved - fatCount*fatSectors) / sectorsPerCluster
-		next := ((clusters+2)*4 + sectorSize - 1) / sectorSize
-		if next == fatSectors {
-			break
+	// The usual fixed-point iteration can oscillate forever between adjacent
+	// sector counts for valid device sizes. Find the smallest FAT that can hold
+	// its resulting cluster count with a bounded monotonic search instead.
+	low := uint64(1)
+	high := (((totalSectors-reserved)/sectorsPerCluster+2)*4 + sectorSize - 1) / sectorSize
+	for low < high {
+		middle := low + (high-low)/2
+		clusters := (totalSectors - reserved - fatCount*middle) / sectorsPerCluster
+		required := ((clusters+2)*4 + sectorSize - 1) / sectorSize
+		if required <= middle {
+			high = middle
+		} else {
+			low = middle + 1
 		}
-		fatSectors = next
 	}
+	fatSectors := low
 	dataSectors := totalSectors - reserved - fatCount*fatSectors
 	clusters := dataSectors / sectorsPerCluster
 	if clusters < 65525 {
@@ -590,6 +615,12 @@ func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.
 		// mkfs.fat examines the existing device as well as writing the new
 		// filesystem, so its validated descriptor must permit both operations.
 		flags = os.O_RDWR
+	} else if req.Mode == modeWrite {
+		// Keep each large stream write tied to actual device progress instead of
+		// letting Linux accept the entire image into the page cache at RAM speed.
+		// Besides producing meaningful throughput/ETA figures, this bounds the
+		// otherwise very long and apparently frozen Sync at the end of a write.
+		flags = os.O_WRONLY | syscall.O_SYNC
 	} else if req.Mode != modeRead {
 		flags = os.O_WRONLY
 	}

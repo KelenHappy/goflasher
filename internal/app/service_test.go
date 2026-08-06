@@ -35,6 +35,30 @@ func (f *fileBackend) OpenReader(context.Context, device.Device) (io.ReadCloser,
 func (f *fileBackend) Flush(context.Context, device.Device) error { f.flushed = true; return nil }
 func (f *fileBackend) Eject(context.Context, device.Device) error { f.ejected = true; return nil }
 
+type closeStateBackend struct {
+	*fileBackend
+	state        *StateMachine
+	stateAtClose State
+}
+
+func (b *closeStateBackend) OpenWriter(context.Context, device.Device) (io.WriteCloser, error) {
+	f, err := os.OpenFile(b.path, os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, err
+	}
+	return &observedWriteCloser{WriteCloser: f, close: func() { b.stateAtClose = b.state.State() }}, nil
+}
+
+type observedWriteCloser struct {
+	io.WriteCloser
+	close func()
+}
+
+func (w *observedWriteCloser) Close() error {
+	w.close()
+	return w.WriteCloser.Close()
+}
+
 func TestServiceRawWriteVerifyEject(t *testing.T) {
 	payload := bytes.Repeat([]byte("image"), 4096)
 	dir := t.TempDir()
@@ -65,6 +89,37 @@ func TestServiceRawWriteVerifyEject(t *testing.T) {
 	got, _ := os.ReadFile(target)
 	if !bytes.Equal(got, payload) {
 		t.Fatal("written data differs")
+	}
+}
+
+func TestServiceEntersFlushingBeforeWriterClose(t *testing.T) {
+	payload := []byte("image payload")
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.iso")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(source, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, make([]byte, len(payload)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := image.Detect(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := device.Device{ID: "test", Path: target, Size: uint64(len(payload)), IsAllowed: true}
+	state := NewStateMachine()
+	for _, next := range []State{ImageSelected, Ready, Confirming} {
+		if err := state.Transition(next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backend := &closeStateBackend{fileBackend: &fileBackend{path: target, d: d}, state: state}
+	if _, err := (&Service{Backend: backend, State: state}).Run(context.Background(), info, d, RunOptions{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if backend.stateAtClose != Flushing {
+		t.Fatalf("state at writer close = %s, want %s", backend.stateAtClose, Flushing)
 	}
 }
 

@@ -74,6 +74,16 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 		return out, err
 	}
 	wr, writeErr := writer.Copy(ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: target.Size, Progress: updates})
+	// Some backends perform the durability sync while closing the writer. Move
+	// the UI to Flushing before Close so that a slow USB device does not appear
+	// frozen at 100% writing while its cached data is committed.
+	if writeErr == nil {
+		if err = s.State.Transition(Flushing); err != nil {
+			_ = dst.Close()
+			return out, err
+		}
+		sendStage(ctx, updates, progress.StageFlushing)
+	}
 	closeErr := dst.Close()
 	out.BytesWritten = wr.BytesWritten
 	out.SourceSHA256 = wr.SHA256
@@ -86,10 +96,6 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if wr.SHA256 != info.SHA256 {
 		return out, fmt.Errorf("%w: checksum no longer matches inspected image", writer.ErrSourceChanged)
 	}
-	if err = s.State.Transition(Flushing); err != nil {
-		return out, err
-	}
-	sendStage(ctx, updates, progress.StageFlushing)
 	if err = s.Backend.Flush(ctx, target); err != nil {
 		return out, fmt.Errorf("flush: %w", err)
 	}
