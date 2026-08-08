@@ -15,6 +15,20 @@ The tests use temporary regular files and fake sysfs/procfs trees. They must
 never write to a real block device. They complement, but cannot replace, the
 three-platform physical-media acceptance suite below.
 
+XZ fixtures are produced and decoded with the compiled pure-Go implementation.
+CI runs the focused XZ tests on Linux, Windows, and macOS and rejects source,
+package, or workflow changes that restore an external `xz` runtime dependency:
+
+```sh
+go test ./internal/image -run XZ
+```
+
+The normal three-platform CI matrix also compiles and tests `internal/disk` on
+each host OS. Linux unit tests use temporary sysfs, mountinfo, and command-runner
+fixtures, including post-unmount state verification. Windows and macOS tests
+currently assert that their compile-safe outlines return `disk.ErrUnsupported`;
+native behavior tests will be added when those implementations are activated.
+
 ## GUI build check
 
 Install the Fyne Linux dependencies described in the README, then run:

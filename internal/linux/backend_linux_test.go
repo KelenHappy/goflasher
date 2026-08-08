@@ -331,7 +331,9 @@ func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T
 	requireNoError(t, err)
 	t.Cleanup(func() { _ = file.Close() })
 	requireNoError(t, file.Truncate(int64(size)))
-	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 512), int64(size-512))
+	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 33*512), int64(size-33*512))
+	requireNoError(t, err)
+	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 32*512), 0)
 	requireNoError(t, err)
 	requireNoError(t, formatFAT32(file, size, "GOFLASHER"))
 
@@ -349,11 +351,17 @@ func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T
 	if string(root[:11]) != "GOFLASHER  " || root[11] != 0x08 {
 		t.Fatalf("invalid root volume label: %q attribute=%x", root[:11], root[11])
 	}
-	last := make([]byte, 512)
-	_, err = file.ReadAt(last, int64(size-512))
+	reservedGap := make([]byte, 4*512)
+	_, err = file.ReadAt(reservedGap, 2*512)
 	requireNoError(t, err)
-	if !bytes.Equal(last, make([]byte, 512)) {
-		t.Fatal("stale backup partition table was not cleared")
+	if !bytes.Equal(reservedGap, make([]byte, len(reservedGap))) {
+		t.Fatal("stale primary partition metadata was not cleared")
+	}
+	tail := make([]byte, 33*512)
+	_, err = file.ReadAt(tail, int64(size)-int64(len(tail)))
+	requireNoError(t, err)
+	if !bytes.Equal(tail, make([]byte, len(tail))) {
+		t.Fatal("stale backup partition metadata was not cleared")
 	}
 }
 

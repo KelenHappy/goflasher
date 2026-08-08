@@ -16,7 +16,8 @@
 ## 功能
 
 - 寫入 `.iso`、`.img` 與 `.raw` 磁碟映像檔。
-- 以串流方式寫入 gzip（`.gz`）與 XZ（`.xz`）映像檔，不必先建立未壓縮的暫存檔。
+- 使用內建 Go 解碼器串流寫入 gzip（`.gz`）與 XZ（`.xz`）映像檔，不需外部解壓縮
+  程式，也不必先建立未壓縮的暫存檔。
 - 檢查及寫入映像檔時，計算來源檔案的 SHA-256。
 - 可選擇回讀已寫入的位元組，並比對 SHA-256 總和檢查碼。
 - 顯示寫入與驗證進度、傳輸速度及預估剩餘時間。
@@ -31,14 +32,18 @@
 - 拒絕已掛載的重要系統磁碟、交換空間裝置、ATA 裝置、SSD/HDD 型號、
   儲存裝置橋接器、UAS 裝置及容量較大且無法明確辨識的 USB 儲存裝置。
 - 在卸載前及開啟原始裝置前，重新驗證裝置身分。
+- 提供跨平台且不洩漏原生 handle 或常數的 `disk.Manager` 統一介面，上層只需呼叫
+  `disk.NewManager()`。Linux 的 sysfs/udisks 實作已啟用；Windows 與 macOS 目前先
+  保留可編譯的雛形，日後再分別接上 Win32 API 與 Disk Arbitration/IOKit。
 
 GoFlasher 不會分析、辨識或限制映像檔內含的作業系統。因此，在每個支援的主機
 平台上，都可以燒錄 Linux ISO 或其他支援格式的 raw disk image；目前接受
 `.iso`、`.img`、`.raw`，以及以 gzip（`.gz`）或 XZ（`.xz`）壓縮的映像檔。
 
 GoFlasher 主要是映像檔寫入工具，也可以清除已選取且受支援的 USB 裝置並建立
-FAT32 檔案系統。它不會下載作業系統映像檔、建立 Windows 安裝替代方案、建立
-持久化分割區或執行壞軌測試。
+名為 `GOFLASHER` 的 FAT32 檔案系統。Linux 使用內建格式化器建立全裝置 FAT32；
+Windows 與 macOS 則建立含單一 FAT32 volume 的 MBR 配置。它不會下載作業系統
+映像檔、建立 Windows 安裝替代方案、建立持久化分割區或執行壞軌測試。
 
 ## 主機平台支援
 
@@ -56,8 +61,8 @@ polkit 呼叫由 root 擁有的專用權限提升輔助程式。
 ## 預先建置的下載套件
 
 程式碼支援的平台與目前提供預先建置套件的平台是兩件不同的事。目前 release
-workflow 只發布預先建置的 **Linux** artifacts：x86-64 AppImage 與 amd64 Debian
-套件。Windows 與 macOS 的實作已包含在原始碼中，可依 [BUILDING.md](BUILDING.md)
+workflow 只發布預先建置的 **Linux** artifacts：x86-64 AppImage、amd64 Debian
+套件與 x86-64 RPM。Windows 與 macOS 的實作已包含在原始碼中，可依 [BUILDING.md](BUILDING.md)
 從原始碼建置；在完成程式碼簽署前，尚未提供已簽署的 Windows 安裝程式，以及
 已簽署並完成公證（notarization）的 macOS 套件。
 
@@ -65,7 +70,14 @@ workflow 只發布預先建置的 **Linux** artifacts：x86-64 AppImage 與 amd6
 
 - `GoFlasher-<version>-x86_64.AppImage`
 - `goflasher_<version>_amd64.deb`
+- `goflasher-<version>-1*.x86_64.rpm`
 - `SHA256SUMS`
+
+套件並不是可跨所有平台共用的單一執行檔；每個作業系統及 CPU 架構都必須分別
+建置與封裝。Debian 套件透過 APT、RPM 套件透過 DNF 安裝宣告的執行期相依套件。
+Windows 目前必須以系統管理員身分執行；macOS 目前仍需提升 raw disk 存取權限，
+而公開發行也分別需要 code signing，以及 macOS notarization。gzip 與 XZ 解碼器
+都會編譯進 GoFlasher，因此各平台套件皆不需額外安裝解壓縮程式。
 
 執行或安裝從發行頁面下載的檔案前，請先驗證檔案：
 
@@ -78,6 +90,16 @@ sha256sum --check SHA256SUMS
 ```sh
 chmod +x GoFlasher-*-x86_64.AppImage
 ./GoFlasher-*-x86_64.AppImage
+```
+
+AppImage 無法自行安裝固定且由 root 擁有的 polkit helper。第一次使用前，請解開
+AppImage，讓系統管理員檢查並安裝其中兩個整合檔案（或改裝 Debian/RPM 套件）：
+
+```sh
+./GoFlasher-*-x86_64.AppImage --appimage-extract
+sudo install -m 0755 squashfs-root/usr/share/goflasher/goflasher-helper /usr/libexec/goflasher-helper
+sudo install -m 0644 squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy \
+  /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy
 ```
 
 Linux 一律使用已包入 GoFlasher 的 Fyne 映像檔選擇器；選檔流程不會呼叫 XDG
@@ -93,13 +115,19 @@ GoFlasher 的英文或繁體中文介面語言；檔案、資料夾、常用位�
 sudo apt install ./goflasher_*_amd64.deb
 ```
 
+在 Fedora、RHEL 或相容發行版安裝 RPM 套件：
+
+```sh
+sudo dnf install ./goflasher-*.x86_64.rpm
+```
+
 請勿使用 `sudo` 啟動 GoFlasher 本身。
 
 ## 建置
 
 GoFlasher 需要 [`go.mod`](go.mod) 指定的 Go 版本。建置 Fyne GUI 還需要 Linux
 的 OpenGL、X11 與 Wayland 開發套件。相依套件安裝、從原始碼建置、AppImage、
-Debian 封裝方式及目前的 Windows 限制，請參閱 **[BUILDING.md](BUILDING.md)**。
+Debian/RPM 封裝方式及目前的 Windows/macOS 限制，請參閱 **[BUILDING.md](BUILDING.md)**。
 
 開發用 GUI 可使用下列指令啟動：
 
@@ -163,7 +191,9 @@ go test ./...
 揭露裝置選取或原始寫入相關的安全漏洞。
 
 GoFlasher 是依 **GNU General Public License version 3** 授權的自由軟體。
-詳情請參閱 [LICENSE](LICENSE)。
+詳情請參閱 [LICENSE](LICENSE)。編譯後的發行版本亦包含 BSD 授權的第三方元件；
+其著作權聲明與再散布資訊請參閱
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 尚待完成的項目
 
@@ -174,7 +204,8 @@ Windows GUI、原生 Explorer 選擇器、可移除式裝置探索、重複身�
 - 加入已簽署的 Windows 安裝套件及發行工作流程。
 
 目前 Windows 後端需要系統管理員權限；日後加入專用權限提升輔助程式可建立更好的
-權限邊界。Linux 版的專用權限提升輔助程式也尚未實作。
+權限邊界。Linux 版已使用透過 polkit 啟動、會再次驗證裝置身分的專用權限提升
+輔助程式。
 
 macOS GUI、原生 Finder 選擇器、可移除式 USB 後端、原始寫入、回讀驗證與
 `diskutil` 退出操作均已實作。正式發布前仍需要實體硬體隔離測試、專用權限提升

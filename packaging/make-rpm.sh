@@ -11,6 +11,7 @@ version=${2#v}
 rpm_version=${version//-/_}
 output=$(realpath -m "$3")
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+xz_dir=$(cd "$root" && go list -m -f '{{.Dir}}' github.com/ulikunitz/xz)
 arch=${RPM_ARCH:-$(uname -m)}
 topdir=$(mktemp -d)
 stage="$topdir/stage"
@@ -30,6 +31,10 @@ install -Dm644 "$root/packaging/org.goflasher.usbwriter.desktop" \
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.svg" \
   "$stage/usr/share/icons/hicolor/scalable/apps/org.goflasher.usbwriter.svg"
 install -Dm644 "$root/LICENSE" "$stage/usr/share/doc/goflasher/copyright"
+install -Dm644 "$root/THIRD_PARTY_NOTICES.md" \
+  "$stage/usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md"
+install -Dm644 "$xz_dir/LICENSE" \
+  "$stage/usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE"
 
 mkdir -p "$topdir/BUILD" "$topdir/BUILDROOT" "$topdir/RPMS" \
   "$topdir/SOURCES" "$topdir/SPECS" "$topdir/SRPMS" "$output"
@@ -43,8 +48,6 @@ URL: https://github.com/KelenHappy/goflasher
 BuildArch: $arch
 Requires: polkit
 Requires: udisks2
-Requires: dosfstools
-Requires: xz
 Requires: glibc
 Requires: libX11
 Requires: libglvnd-glx
@@ -60,6 +63,8 @@ cp -a $stage/. %{buildroot}/
 
 %files
 %license /usr/share/doc/goflasher/copyright
+%doc /usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md
+%license /usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE
 /usr/bin/goflasher
 /usr/libexec/goflasher-helper
 /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy

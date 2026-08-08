@@ -10,9 +10,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/ulikunitz/xz"
 )
 
 type Format string
@@ -101,22 +102,6 @@ type ReadCloser struct {
 	closers []io.Closer
 }
 
-type commandCloser struct {
-	pipe io.Closer
-	cmd  *exec.Cmd
-}
-
-func (c *commandCloser) Close() error {
-	pipeErr := c.pipe.Close()
-	waitErr := c.cmd.Wait()
-	// Closing a partially consumed pipe intentionally gives xz SIGPIPE.
-	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.Is(waitErr, os.ErrProcessDone) && !errors.As(waitErr, &exitErr) {
-		return errors.Join(pipeErr, waitErr)
-	}
-	return pipeErr
-}
-
 func (r *ReadCloser) Close() error {
 	var result error
 	for _, c := range r.closers {
@@ -144,20 +129,15 @@ func Open(info Info) (*ReadCloser, error) {
 		}
 		reader, closers = gz, []io.Closer{gz, f}
 	case CompressionXZ:
-		// Go's standard library does not include XZ. Invoke the ubiquitous
-		// xz decoder without a shell; stdout remains a bounded streaming pipe.
-		// The input path is supplied after -- to prevent option injection.
-		_ = f.Close()
-		cmd := exec.Command("xz", "--decompress", "--stdout", "--", info.Path)
-		xr, err := cmd.StdoutPipe()
+		// Go's standard library does not include XZ. Use a pure-Go streaming
+		// decoder so every packaged platform has identical support without an
+		// external executable or an uncompressed temporary file.
+		xr, err := xz.NewReader(f)
 		if err != nil {
+			f.Close()
 			return nil, err
 		}
-		if err := cmd.Start(); err != nil {
-			_ = xr.Close()
-			return nil, err
-		}
-		reader, closers = xr, []io.Closer{&commandCloser{pipe: xr, cmd: cmd}}
+		reader = xr
 	default:
 		f.Close()
 		return nil, ErrUnsupported

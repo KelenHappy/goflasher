@@ -406,9 +406,15 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 	if clusters < 65525 {
 		return errors.New("device is too small for FAT32")
 	}
-	// Invalidate a backup GPT header left at the end of a previously partitioned
-	// disk. The primary partition table is replaced by the FAT boot sector below.
-	if _, err := device.WriteAt(make([]byte, sectorSize), int64((totalSectors-1)*sectorSize)); err != nil {
+	// Clear both GPT metadata areas before creating the filesystem. Merely
+	// replacing sector zero and the backup GPT header leaves partition-entry
+	// arrays behind, which recovery tools can mistake for a still-valid layout.
+	// The first 32 sectors are FAT32's reserved area and are rewritten below;
+	// the final 33 sectors are outside the filesystem's allocated clusters.
+	if err := writeFullAt(device, make([]byte, reserved*sectorSize), 0); err != nil {
+		return err
+	}
+	if err := writeFullAt(device, make([]byte, 33*sectorSize), int64((totalSectors-33)*sectorSize)); err != nil {
 		return err
 	}
 
@@ -418,7 +424,7 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 		offset int64
 		data   []byte
 	}{{0, boot}, {512, fsinfo}, {6 * 512, boot}, {7 * 512, fsinfo}} {
-		if _, err := device.WriteAt(write.data, write.offset); err != nil {
+		if err := writeFullAt(device, write.data, write.offset); err != nil {
 			return err
 		}
 	}
@@ -428,7 +434,7 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 	binary.LittleEndian.PutUint32(fat[8:12], 0x0fffffff)
 	for copyIndex := uint64(0); copyIndex < fatCount; copyIndex++ {
 		offset := int64((reserved + copyIndex*fatSectors) * sectorSize)
-		if _, err := device.WriteAt(fat, offset); err != nil {
+		if err := writeFullAt(device, fat, offset); err != nil {
 			return err
 		}
 	}
@@ -436,10 +442,25 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 	copy(root[:11], fatLabel(label))
 	root[11] = 0x08
 	rootOffset := int64((reserved + fatCount*fatSectors) * sectorSize)
-	if _, err := device.WriteAt(root, rootOffset); err != nil {
+	if err := writeFullAt(device, root, rootOffset); err != nil {
 		return err
 	}
 	return device.Sync()
+}
+
+func writeFullAt(target io.WriterAt, data []byte, offset int64) error {
+	for len(data) > 0 {
+		n, err := target.WriteAt(data, offset)
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(data) {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+		offset += int64(n)
+	}
+	return nil
 }
 
 func fat32SectorsPerCluster(size uint64) uint64 {
@@ -612,8 +633,8 @@ func validateDeviceNode(env helperEnvironment, name string, major, minor uint32)
 func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.File, error) {
 	flags := os.O_RDONLY
 	if req.Mode == modeFormatFAT32 {
-		// mkfs.fat examines the existing device as well as writing the new
-		// filesystem, so its validated descriptor must permit both operations.
+		// The in-process formatter uses random-access writes and syncs the
+		// completed filesystem, so its validated descriptor must be read/write.
 		flags = os.O_RDWR
 	} else if req.Mode == modeWrite {
 		// Keep each large stream write tied to actual device progress instead of
