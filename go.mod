@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	fyne.io/fyne/v2 v2.8.0
-	github.com/ulikunitz/xz v0.5.12
+	github.com/ulikunitz/xz v0.5.16
 	golang.org/x/sys v0.47.0
 )
 

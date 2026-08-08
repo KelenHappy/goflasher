@@ -1,0 +1,3 @@
+go clean -modcache
+go get -u ./...
+go mod tidy
