@@ -2,7 +2,10 @@ module github.com/goflasher/goflasher
 
 go 1.26.4
 
-require fyne.io/fyne/v2 v2.8.0
+require (
+	fyne.io/fyne/v2 v2.8.0
+	github.com/ulikunitz/xz v0.5.12
+)
 
 require (
 	fyne.io/systray v1.12.2 // indirect

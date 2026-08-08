@@ -7,11 +7,18 @@ PowerShell storage cmdlets for conservative removable-USB discovery and taking
 the target disk offline; run the Windows GUI as Administrator for raw access.
 macOS uses `diskutil` for removable-USB discovery, unmount, and eject operations.
 
+The reusable `internal/disk` abstraction is separate from the existing writer
+backends. Its common `Manager` API contains no native handles or platform
+constants. `disk.NewManager()` is selected by build tags. The Linux manager is
+implemented with sysfs, mountinfo, swap inspection, and udisks2. Windows and
+macOS intentionally return `disk.ErrUnsupported` from compile-safe outlines;
+their future implementations will use Win32 and Disk Arbitration/IOKit without
+changing callers. This keeps the current work focused on making Linux reliable.
+
 ## Requirements
 
 - The Go toolchain version declared by `go.mod` (currently Go 1.26.4).
 - A C compiler and the Linux development libraries required by Fyne.
-- `xz` at runtime when opening XZ-compressed images.
 - `udisksctl` at runtime for unmount and device power-off operations.
 - polkit/`pkexec` at runtime for narrowly scoped raw-device operations.
 - No portal, D-Bus file chooser, `kdialog`, or Zenity package is needed; the
@@ -23,11 +30,18 @@ On Ubuntu 24.04, install the build and runtime dependencies with:
 sudo apt update
 sudo apt install \
   gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev \
-  udisks2 dosfstools xz-utils
+  udisks2
 ```
 
 Other distributions may use different package names. GoFlasher does not use
 `xdg-desktop-portal` for image selection.
+
+Build on (or cross-compile specifically for) every target OS and architecture;
+one binary cannot run unchanged on Linux, Windows, and macOS. Fyne's desktop
+build uses CGo, so a native build environment is the simplest supported route.
+Gzip and XZ streaming decoders are pure Go and compiled into the application;
+no external decompressor is required at runtime. Public Windows releases should
+be code-signed; public macOS app bundles should be code-signed and notarized.
 
 ## Build from source
 
@@ -74,6 +88,10 @@ go test ./...
 go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
 ```
 
+The macOS disk-manager outline does not yet link native frameworks and returns
+`disk.ErrUnsupported`. A future implementation will use Disk Arbitration and
+IOKit behind `disk_darwin.go` without changing the common API.
+
 Raw `/dev/rdiskN` access requires elevated rights. Until a dedicated privileged
 helper is available, launch the locally built binary with `sudo`; GoFlasher
 only lists external physical disks positively classified as removable USB
@@ -95,10 +113,10 @@ sudo apt install ./dist/goflasher_1.0.0_amd64.deb
 ```
 
 The Debian package installs the helper at `/usr/libexec/goflasher-helper` and
-its polkit action. It also depends on `dosfstools`, which provides the
-`mkfs.vfat` executable used by the FAT32 format operation. The helper is a
-separate non-GUI executable; never make the GUI setuid and never run it with
-`sudo`.
+its polkit action. FAT32 formatting is implemented inside the narrowly scoped
+helper and does not require `dosfstools` or execute a filesystem utility as
+root. The helper is a separate non-GUI executable; never make the GUI setuid
+and never run it with `sudo`.
 
 ## AppImage
 
@@ -119,6 +137,27 @@ The AppImage contains the helper and policy under `usr/share/goflasher`, but
 cannot safely install them from its transient mount. Extract the AppImage and
 install those files to the fixed system paths shown in the README, after
 auditing them. Raw access fails closed until that integration is installed.
+
+## RPM package
+
+The RPM packaging script requires `rpmbuild`. After building the GUI binary:
+
+```sh
+packaging/make-rpm.sh dist/goflasher 1.0.0 dist
+sudo dnf install ./dist/goflasher-1.0.0-1*.x86_64.rpm
+```
+
+Like the Debian package, the RPM installs the helper and polkit policy to their
+fixed system paths and declares the runtime dependencies required on Fedora,
+RHEL, and compatible distributions.
+
+## Third-party license notices
+
+All binary distributions must ship `THIRD_PARTY_NOTICES.md` and the unmodified
+license files for compiled dependencies. The Linux packaging scripts copy the
+BSD 3-Clause `github.com/ulikunitz/xz` license from the exact module version used
+for the build. Future Windows and macOS packaging must place the same files in
+the installer, application bundle, or accompanying documentation.
 
 ## Checksums
 

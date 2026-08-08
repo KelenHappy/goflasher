@@ -19,6 +19,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Test built-in XZ streaming
+        run: go test ./internal/image -run XZ
+      - name: Test native disk manager
+        run: go test ./internal/disk
       - run: go test ./...
       - if: runner.os == 'Windows' || runner.os == 'macOS'
         run: go build -tags fyne ./cmd/usbwriter
@@ -32,6 +36,10 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: test -z "$(gofmt -l .)"
+      - name: Reject external XZ runtime regressions
+        run: |
+          test -z "$(rg 'exec\.Command(Context)?\([^)]*xz' internal || true)"
+          test -z "$(rg '^Depends:.*xz-utils|^Requires: xz$' packaging || true)"
       - run: go vet ./...
       - run: go test -race ./...
 
@@ -54,4 +62,9 @@ jobs:
           packaging/make-deb.sh dist/goflasher 0.0.0-ci dist
           packaging/make-rpm.sh dist/goflasher 0.0.0-ci dist
           test -f dist/goflasher_0.0.0-ci_amd64.deb
-          test -n "$(find dist -maxdepth 1 -name 'goflasher-0.0.0_ci-1*.rpm' -print -quit)"
+          rpm_path=$(find dist -maxdepth 1 -name 'goflasher-0.0.0_ci-1*.rpm' -print -quit)
+          test -n "$rpm_path"
+          dpkg-deb --contents dist/goflasher_0.0.0-ci_amd64.deb | grep -F THIRD_PARTY_NOTICES.md
+          dpkg-deb --contents dist/goflasher_0.0.0-ci_amd64.deb | grep -F github.com_ulikunitz_xz_LICENSE
+          rpm -qlp "$rpm_path" | grep -F THIRD_PARTY_NOTICES.md
+          rpm -qlp "$rpm_path" | grep -F github.com_ulikunitz_xz_LICENSE

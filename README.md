@@ -16,8 +16,8 @@ on Linux, Windows, and macOS.**
 ## Features
 
 - Write `.iso`, `.img`, and `.raw` disk images.
-- Stream gzip (`.gz`) and XZ (`.xz`) images without creating an uncompressed
-  temporary file.
+- Stream gzip (`.gz`) and XZ (`.xz`) images with built-in Go decoders, without
+  an external decompressor or an uncompressed temporary file.
 - Calculate the source SHA-256 while inspecting the image and while writing it.
 - Optionally read the written bytes back and compare their SHA-256 checksum.
 - Show writing and verification progress, throughput, and estimated time.
@@ -34,6 +34,10 @@ on Linux, Windows, and macOS.**
   models, storage bridges, UAS devices, and larger ambiguous USB storage.
 - Revalidate device identity before unmounting and on both sides of the
   privileged raw-device boundary.
+- Provide a platform-neutral `disk.Manager` abstraction; callers only construct
+  `disk.NewManager()`. The Linux sysfs/udisks implementation is active, while
+  Windows and macOS currently provide compile-safe outlines for later native
+  Win32 and Disk Arbitration/IOKit implementations.
 
 GoFlasher does not inspect, identify, or restrict the operating system contained
 inside an image. On every supported host it can therefore write a Linux ISO or
@@ -41,7 +45,9 @@ any other raw disk image in a supported format: `.iso`, `.img`, `.raw`, or a
 gzip (`.gz`) or XZ (`.xz`) compressed image.
 
 GoFlasher is primarily an image writer. It can also erase a selected supported
-USB device and create a FAT32 filesystem. It does **not** download operating-
+USB device and create a FAT32 filesystem named `GOFLASHER`. Linux creates a
+whole-device FAT32 filesystem with its bundled formatter; Windows and macOS
+create an MBR layout containing a FAT32 volume. It does **not** download operating-
 system images, create Windows installation workarounds, create persistent
 partitions, or perform bad-block tests.
 
@@ -72,6 +78,15 @@ AppImage, an amd64 Debian package, and an x86-64 RPM package. The
 Windows and macOS implementations are available in the source tree and can be
 built from source as documented in [BUILDING.md](BUILDING.md), but signed Windows
 installers and signed/notarized macOS packages are not yet published.
+
+A package is not a universal executable. Build and package separately for each
+operating system and CPU architecture. Debian packages resolve their declared
+runtime dependencies through APT, and RPM packages do so through DNF. Windows
+users currently need an Administrator session, and macOS builds currently need
+elevated raw-disk access; distributing them publicly also requires the platform's
+normal code-signing (and, on macOS, notarization) process. Gzip and XZ decoding
+are compiled into GoFlasher, so packaged builds do not require external
+decompressor programs.
 
 When a packaged release is published, its GitHub release assets are produced by
 the repository release workflow:
@@ -130,7 +145,7 @@ Do not launch GoFlasher itself with `sudo`.
 GoFlasher requires the Go version declared in [`go.mod`](go.mod). Building the
 Fyne GUI also requires Linux OpenGL, X11, and Wayland development packages.
 See **[BUILDING.md](BUILDING.md)** for dependency installation, source builds,
-AppImage and Debian packaging, and current Windows limitations.
+AppImage, Debian and RPM packaging, and the current Windows/macOS limitations.
 
 A development GUI build can be started with:
 
@@ -174,7 +189,9 @@ Read **[SECURITY.md](SECURITY.md)** before reporting a vulnerability. Do not
 publish a device-selection or raw-write vulnerability in a public issue.
 
 GoFlasher is free software distributed under the **GNU General Public License
-version 3**. See [LICENSE](LICENSE).
+version 3**. See [LICENSE](LICENSE). Compiled releases also contain BSD-licensed
+third-party components; their attribution and redistribution information is in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Enhancements and bugs
 

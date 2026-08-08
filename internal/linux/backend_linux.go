@@ -242,9 +242,9 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	return err
 }
 
-// FormatFAT32 asks udisks to create a FAT32 filesystem on the whole removable
-// device. udisks performs the privileged operation through the desktop's
-// normal authorization agent; revalidation and unmounting happen first.
+// FormatFAT32 creates a FAT32 filesystem on the whole removable device through
+// the narrowly scoped privileged helper; revalidation and unmounting happen
+// first.
 func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string) error {
 	fresh, err := b.Revalidate(ctx, d)
 	if err != nil {
