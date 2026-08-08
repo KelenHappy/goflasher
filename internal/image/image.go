@@ -2,6 +2,7 @@ package image
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -132,6 +133,14 @@ func Open(info Info) (*ReadCloser, error) {
 		// Go's standard library does not include XZ. Use a pure-Go streaming
 		// decoder so every packaged platform has identical support without an
 		// external executable or an uncompressed temporary file.
+		if err := requireXZStreamFooter(f); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			f.Close()
+			return nil, err
+		}
 		xr, err := xz.NewReader(f)
 		if err != nil {
 			f.Close()
@@ -143,6 +152,26 @@ func Open(info Info) (*ReadCloser, error) {
 		return nil, ErrUnsupported
 	}
 	return &ReadCloser{Reader: bufio.NewReaderSize(reader, 1<<20), closers: closers}, nil
+}
+
+// requireXZStreamFooter rejects XZ files that do not end with the two-byte
+// stream footer magic. The pure-Go decoder treats a stream truncated right
+// after its header as a valid empty stream, which would let an incomplete
+// image be written silently; every complete XZ stream ends with "YZ", so a
+// missing footer proves the file was cut short. f's read position is moved
+// and must be rewound by the caller.
+func requireXZStreamFooter(f *os.File) error {
+	buf := make([]byte, 2)
+	if _, err := f.Seek(-int64(len(buf)), io.SeekEnd); err != nil {
+		return fmt.Errorf("%w: xz stream footer missing", ErrUnsupported)
+	}
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return fmt.Errorf("%w: xz stream footer missing", ErrUnsupported)
+	}
+	if !bytes.Equal(buf, []byte("YZ")) {
+		return fmt.Errorf("%w: xz stream footer missing", ErrUnsupported)
+	}
+	return nil
 }
 
 func Checksum(r io.Reader) (string, error) {

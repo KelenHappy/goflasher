@@ -3,7 +3,11 @@ package image
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -77,13 +81,34 @@ func TestOpenRejectsCorruptXZWithoutExternalExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := Open(info)
-	if err != nil {
-		return // Header validation may reject the truncated stream immediately.
+	if _, err := Open(info); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("Open() error = %v, want ErrUnsupported", err)
 	}
-	defer r.Close()
-	if _, err := io.Copy(io.Discard, r); err == nil {
-		t.Fatal("corrupt XZ stream decoded successfully")
+}
+
+func TestOpenRejectsMissingXZFooter(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "short file", data: []byte("Y")},
+		{name: "wrong magic", data: []byte("not-XX")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "disk.img.xz")
+			if err := os.WriteFile(path, tt.data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			if err := requireXZStreamFooter(file); !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("requireXZStreamFooter() error = %v, want ErrUnsupported", err)
+			}
+		})
 	}
 }
 
@@ -159,5 +184,46 @@ func TestDetectRejectsMismatchAndUnknown(t *testing.T) {
 		if _, err := Detect(path); err == nil {
 			t.Fatalf("Detect(%s) succeeded", name)
 		}
+	}
+}
+
+func TestInspect(t *testing.T) {
+	payload := bytes.Repeat([]byte("inspect-image"), 257)
+	path := filepath.Join(t.TempDir(), "disk.raw")
+	if err := os.WriteFile(path, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Detect(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Inspect(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSum := sha256.Sum256(payload)
+	if got.UncompressedSize != uint64(len(payload)) {
+		t.Fatalf("UncompressedSize = %d, want %d", got.UncompressedSize, len(payload))
+	}
+	if got.SHA256 != hex.EncodeToString(wantSum[:]) {
+		t.Fatalf("SHA256 = %q, want %q", got.SHA256, hex.EncodeToString(wantSum[:]))
+	}
+	if got.Path != info.Path || got.Format != info.Format || got.Compression != info.Compression {
+		t.Fatalf("Inspect() changed source metadata: got %+v, input %+v", got, info)
+	}
+}
+
+func TestInspectContextCancelled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(path, []byte("payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := InspectContext(ctx, Info{Path: path, Compression: CompressionNone})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("InspectContext() error = %v, want context.Canceled", err)
 	}
 }
