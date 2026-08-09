@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"io"
+	"github.com/goflasher/goflasher/internal/progress"
 )
 
 // Device is a stable snapshot of a candidate target. Backends must refresh it
@@ -31,7 +32,7 @@ type Backend interface {
 // FAT32Formatter is implemented by platform backends that can destructively
 // replace a device's existing layout with a single FAT32 filesystem.
 type FAT32Formatter interface {
-	FormatFAT32(context.Context, Device, string) error
+	FormatFAT32(context.Context, Device, string, chan<- progress.Update) error
 }
 
 // SameIdentity compares immutable kernel and hardware identifiers. A serial or

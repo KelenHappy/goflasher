@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"github.com/goflasher/goflasher/internal/progress"
 
 	"github.com/goflasher/goflasher/internal/device"
 )
@@ -43,7 +44,7 @@ func (f *fakePrivilegedHelper) Flush(_ context.Context, r privilegedRequest) err
 	f.requests = append(f.requests, r)
 	return f.err
 }
-func (f *fakePrivilegedHelper) FormatFAT32(_ context.Context, r privilegedRequest) error {
+func (f *fakePrivilegedHelper) FormatFAT32(_ context.Context, r privilegedRequest, _ chan<- progress.Update) error {
 	f.requests = append(f.requests, r)
 	return f.err
 }
@@ -335,7 +336,7 @@ func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T
 	requireNoError(t, err)
 	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 32*512), 0)
 	requireNoError(t, err)
-	requireNoError(t, formatFAT32(file, size, "GOFLASHER"))
+	requireNoError(t, formatFAT32(file, size, "GOFLASHER", io.Discard))
 
 	boot := make([]byte, 512)
 	_, err = file.ReadAt(boot, 0)
@@ -428,7 +429,7 @@ func TestUDisksOperationsAllowDesktopAuthorization(t *testing.T) {
 	b.helper = fake
 	selected, err := b.RefreshDevice(context.Background(), "FLASH123")
 	requireNoError(t, err)
-	requireNoError(t, b.FormatFAT32(context.Background(), selected, "GOFLASHER"))
+	requireNoError(t, b.FormatFAT32(context.Background(), selected, "GOFLASHER", nil))
 
 	if len(run.udisksCalls) != 1 {
 		t.Fatalf("udisks calls = %#v", run.udisksCalls)

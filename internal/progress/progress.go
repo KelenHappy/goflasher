@@ -5,10 +5,12 @@ import "time"
 type Stage string
 
 const (
-	StageWriting   Stage = "writing"
-	StageFlushing  Stage = "flushing"
-	StageVerifying Stage = "verifying"
-	StageEjecting  Stage = "ejecting"
+	StageFormatting        Stage = "formatting"
+	StageWriting           Stage = "writing"
+	StageDecompressWriting Stage = "decompress_writing"
+	StageFlushing          Stage = "flushing"
+	StageVerifying         Stage = "verifying"
+	StageEjecting          Stage = "ejecting"
 )
 
 type Update struct {

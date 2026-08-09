@@ -6,7 +6,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"bytes"
 	"encoding/json"
+	"github.com/goflasher/goflasher/internal/progress"
 	"errors"
 	"fmt"
 	"io"
@@ -55,7 +57,7 @@ type privilegedHelper interface {
 	OpenWriter(context.Context, privilegedRequest) (io.WriteCloser, error)
 	OpenReader(context.Context, privilegedRequest) (io.ReadCloser, error)
 	Flush(context.Context, privilegedRequest) error
-	FormatFAT32(context.Context, privilegedRequest) error
+	FormatFAT32(context.Context, privilegedRequest, chan<- progress.Update) error
 }
 
 type commandHelper struct {
@@ -80,7 +82,7 @@ func IsEmbeddedHelperInvocation(args []string) bool {
 	return len(args) == 2 && args[1] == embeddedHelperArgument
 }
 
-func (h *commandHelper) start(ctx context.Context, r privilegedRequest) (*exec.Cmd, io.WriteCloser, io.ReadCloser, *strings.Builder, error) {
+func (h *commandHelper) start(ctx context.Context, r privilegedRequest, updates chan<- progress.Update) (*exec.Cmd, io.WriteCloser, io.ReadCloser, *strings.Builder, error) {
 	pkexecArgs := append([]string{h.executable}, h.arguments...)
 	cmd := exec.CommandContext(ctx, "pkexec", pkexecArgs...)
 	in, out, err := commandPipes(cmd)
@@ -88,7 +90,11 @@ func (h *commandHelper) start(ctx context.Context, r privilegedRequest) (*exec.C
 		return nil, nil, nil, nil, err
 	}
 	stderr := &strings.Builder{}
-	cmd.Stderr = stderr
+	if updates != nil {
+		cmd.Stderr = &progressParser{builder: stderr, updates: updates}
+	} else {
+		cmd.Stderr = stderr
+	}
 	if err = cmd.Start(); err != nil {
 		return nil, nil, nil, stderr, authorizationError(err, stderr.String())
 	}
@@ -142,6 +148,36 @@ func awaitReady(cmd *exec.Cmd, in io.WriteCloser, out *bufio.Reader, stderr *str
 		waitErr = readErr
 	}
 	return authorizationError(waitErr, stderr.String())
+}
+
+type progressParser struct {
+	builder *strings.Builder
+	updates chan<- progress.Update
+	buf     []byte
+}
+
+func (p *progressParser) Write(b []byte) (int, error) {
+	p.buf = append(p.buf, b...)
+	for {
+		idx := bytes.IndexByte(p.buf, '\n')
+		if idx == -1 {
+			break
+		}
+		line := string(p.buf[:idx])
+		p.buf = p.buf[idx+1:]
+		if strings.HasPrefix(line, "PROGRESS ") {
+			var processed, total uint64
+			if n, _ := fmt.Sscanf(line, "PROGRESS %d %d", &processed, &total); n == 2 {
+				if p.updates != nil {
+					p.updates <- progress.Calculate(progress.StageFormatting, processed, total, 0)
+				}
+				continue
+			}
+		}
+		p.builder.WriteString(line)
+		p.builder.WriteByte('\n')
+	}
+	return len(b), nil
 }
 
 type bufferedReadCloser struct {
@@ -206,7 +242,7 @@ func (r *processReader) Close() error {
 }
 
 func (h *commandHelper) OpenWriter(ctx context.Context, r privilegedRequest) (io.WriteCloser, error) {
-	cmd, in, out, stderr, err := h.start(ctx, r)
+	cmd, in, out, stderr, err := h.start(ctx, r, nil)
 	if out != nil {
 		_ = out.Close()
 	}
@@ -216,7 +252,7 @@ func (h *commandHelper) OpenWriter(ctx context.Context, r privilegedRequest) (io
 	return &processWriter{WriteCloser: in, cmd: cmd, stderr: stderr}, nil
 }
 func (h *commandHelper) OpenReader(ctx context.Context, r privilegedRequest) (io.ReadCloser, error) {
-	cmd, in, out, _, err := h.start(ctx, r)
+	cmd, in, out, _, err := h.start(ctx, r, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +260,7 @@ func (h *commandHelper) OpenReader(ctx context.Context, r privilegedRequest) (io
 	return &processReader{ReadCloser: out, input: in, cmd: cmd}, nil
 }
 func (h *commandHelper) Flush(ctx context.Context, r privilegedRequest) error {
-	cmd, in, out, _, err := h.start(ctx, r)
+	cmd, in, out, _, err := h.start(ctx, r, nil)
 	if err != nil {
 		return err
 	}
@@ -233,8 +269,8 @@ func (h *commandHelper) Flush(ctx context.Context, r privilegedRequest) error {
 	return cmd.Wait()
 }
 
-func (h *commandHelper) FormatFAT32(ctx context.Context, r privilegedRequest) error {
-	cmd, in, out, stderr, err := h.start(ctx, r)
+func (h *commandHelper) FormatFAT32(ctx context.Context, r privilegedRequest, updates chan<- progress.Update) error {
+	cmd, in, out, stderr, err := h.start(ctx, r, updates)
 	if err != nil {
 		return err
 	}
@@ -366,8 +402,8 @@ func validFATLabel(label string) bool {
 	return true
 }
 
-func makeFAT32(device *os.File, size uint64, label string, _ io.Writer) error {
-	return formatFAT32(device, size, label)
+func makeFAT32(device *os.File, size uint64, label string, errOut io.Writer) error {
+	return formatFAT32(device, size, label, errOut)
 }
 
 type randomAccessSyncer interface {
@@ -378,7 +414,7 @@ type randomAccessSyncer interface {
 // formatFAT32 creates a standards-compatible FAT32 "superfloppy" directly.
 // Keeping this small formatter in-process avoids executing distribution tools
 // as root and makes packaged formatting independent of dosfstools.
-func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
+func formatFAT32(device randomAccessSyncer, size uint64, label string, errOut io.Writer) error {
 	const sectorSize, reserved, fatCount = uint64(512), uint64(32), uint64(2)
 	if size < 64<<20 || size/sectorSize > uint64(^uint32(0)) {
 		return errors.New("device size is not supported by FAT32")
@@ -414,9 +450,11 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 	if err := writeFullAt(device, make([]byte, reserved*sectorSize), 0); err != nil {
 		return err
 	}
+	fmt.Fprintf(errOut, "PROGRESS 10 100\n")
 	if err := writeFullAt(device, make([]byte, 33*sectorSize), int64((totalSectors-33)*sectorSize)); err != nil {
 		return err
 	}
+	fmt.Fprintf(errOut, "PROGRESS 15 100\n")
 
 	boot := fat32BootSector(uint32(totalSectors), uint32(fatSectors), byte(sectorsPerCluster), label)
 	fsinfo := fat32FSInfo(uint32(clusters))
@@ -428,6 +466,7 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 			return err
 		}
 	}
+	fmt.Fprintf(errOut, "PROGRESS 25 100\n")
 	fat := make([]byte, fatSectors*sectorSize)
 	binary.LittleEndian.PutUint32(fat[0:4], 0x0ffffff8)
 	binary.LittleEndian.PutUint32(fat[4:8], 0x0fffffff)
@@ -438,6 +477,7 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 			return err
 		}
 	}
+	fmt.Fprintf(errOut, "PROGRESS 80 100\n")
 	root := make([]byte, sectorsPerCluster*sectorSize)
 	copy(root[:11], fatLabel(label))
 	root[11] = 0x08
@@ -445,7 +485,12 @@ func formatFAT32(device randomAccessSyncer, size uint64, label string) error {
 	if err := writeFullAt(device, root, rootOffset); err != nil {
 		return err
 	}
-	return device.Sync()
+	fmt.Fprintf(errOut, "PROGRESS 90 100\n")
+	err := device.Sync()
+	if err == nil {
+		fmt.Fprintf(errOut, "PROGRESS 100 100\n")
+	}
+	return err
 }
 
 func writeFullAt(target io.WriterAt, data []byte, offset int64) error {

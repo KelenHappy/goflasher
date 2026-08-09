@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/goflasher/goflasher/internal/progress"
 	"io"
 	"os"
 	"os/exec"
@@ -245,21 +246,23 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 // FormatFAT32 creates a FAT32 filesystem on the whole removable device through
 // the narrowly scoped privileged helper; revalidation and unmounting happen
 // first.
-func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string) error {
+func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string, updates chan<- progress.Update) error {
 	fresh, err := b.Revalidate(ctx, d)
 	if err != nil {
 		return err
 	}
-	if err := b.Unmount(ctx, fresh); err != nil {
-		return err
-	}
+	// Best-effort unmount: corrupted partition tables may leave phantom
+	// partitions that udisksctl cannot unmount. The privileged helper
+	// re-validates identity and opens the whole-disk device directly, so
+	// a failed unmount of a damaged partition does not block formatting.
+	_ = b.Unmount(ctx, fresh)
 	again, err := b.Revalidate(ctx, fresh)
 	if err != nil {
 		return err
 	}
 	request := helperRequest(again, modeFormatFAT32)
 	request.Label = label
-	if err := b.privileged().FormatFAT32(ctx, request); err != nil {
+	if err := b.privileged().FormatFAT32(ctx, request, updates); err != nil {
 		return fmt.Errorf("format FAT32: %w", err)
 	}
 	return nil

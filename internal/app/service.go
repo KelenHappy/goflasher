@@ -73,7 +73,11 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if err != nil {
 		return out, err
 	}
-	wr, writeErr := writer.Copy(ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: target.Size, Progress: updates})
+	writeStage := progress.StageWriting
+	if info.Compression != image.CompressionNone {
+		writeStage = progress.StageDecompressWriting
+	}
+	wr, writeErr := writer.Copy(ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: target.Size, Progress: updates, WriteStage: writeStage})
 	// Some backends perform the durability sync while closing the writer. Move
 	// the UI to Flushing before Close so that a slow USB device does not appear
 	// frozen at 100% writing while its cached data is committed.

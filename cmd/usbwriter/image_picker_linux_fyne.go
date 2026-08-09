@@ -3,15 +3,34 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 )
 
 const fileDialogResizePollInterval = 100 * time.Millisecond
+
+// imageFileFilter matches files whose full name ends with one of the accepted
+// suffixes. Fyne's built-in ExtensionFileFilter only compares URI.Extension(),
+// which returns the last dot-delimited segment (e.g. ".gz" for "disk.img.gz").
+// That makes compound extensions like ".img.gz" and ".iso.xz" unmatchable.
+// This filter uses the complete file name so double extensions work correctly.
+type imageFileFilter struct {
+	suffixes []string // e.g. ".iso", ".img.gz"
+}
+
+func (f *imageFileFilter) Matches(uri fyne.URI) bool {
+	name := strings.ToLower(uri.Name())
+	for _, s := range f.suffixes {
+		if strings.HasSuffix(name, s) {
+			return true
+		}
+	}
+	return false
+}
 
 // openImage uses only Fyne's bundled chooser on Linux. Image selection does not
 // call XDG Desktop Portal, D-Bus, kdialog, Zenity, Dolphin, or Nautilus.
@@ -29,9 +48,9 @@ func openImage(parent fyne.Window, title, acceptLabel, dismissLabel, filterName 
 		}
 		done(path, nil)
 	}, parent)
-	chooser.SetFilter(storage.NewExtensionFileFilter([]string{
-		".iso", ".img", ".raw", ".iso.gz", ".img.gz", ".iso.xz", ".img.xz",
-	}))
+	chooser.SetFilter(&imageFileFilter{suffixes: []string{
+		".iso", ".img", ".raw", ".gz", ".xz",
+	}})
 	chooser.SetTitleText(title)
 	chooser.SetConfirmText(acceptLabel)
 	chooser.SetDismissText(dismissLabel)

@@ -60,7 +60,7 @@ func TestFormatFAT32RevalidatesAndCreatesMBRVolume(t *testing.T) {
 	if err != nil || len(devices) != 1 {
 		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
 	}
-	if err := backend.FormatFAT32(context.Background(), devices[0], "GO'FLASHER"); err != nil {
+	if err := backend.FormatFAT32(context.Background(), devices[0], "GO'FLASHER", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"Clear-Disk -Number 4", "Initialize-Disk -Number 4 -PartitionStyle MBR", "Format-Volume", "-FileSystem FAT32", "GO''FLASHER"} {

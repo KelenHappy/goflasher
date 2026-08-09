@@ -63,7 +63,7 @@ func TestFormatFAT32UsesWholeDeviceAndMBR(t *testing.T) {
 	if err != nil || len(devices) != 1 {
 		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
 	}
-	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER"); err != nil {
+	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
 		t.Fatal(err)
 	}
 	want := fmt.Sprint([]string{"eraseDisk", "FAT32", "GOFLASHER", "MBRFormat", "/dev/disk4"})

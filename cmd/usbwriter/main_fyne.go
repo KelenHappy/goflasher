@@ -53,9 +53,7 @@ func runApplication(tr i18n.Localizer) {
 	ejectCheck.SetChecked(true)
 	status := widget.NewLabel(tr.T("status.ready"))
 	bar := widget.NewProgressBar()
-	formatBar := widget.NewProgressBarInfinite()
-	formatBar.Stop()
-	formatBar.Hide()
+
 	metrics := widget.NewLabel(tr.T("metrics.empty"))
 	logs := widget.NewMultiLineEntry()
 	logs.Disable()
@@ -176,17 +174,25 @@ func runApplication(tr i18n.Localizer) {
 			lock(true)
 			status.SetText(tr.T("status.formatting"))
 			bar.SetValue(0)
-			bar.Hide()
-			formatBar.Show()
-			formatBar.Start()
+			bar.Show()
 			metrics.SetText(tr.T("metrics.empty"))
 			appendLog(tr.T("log.format.start", selected.Path))
+			updates := make(chan progress.Update, 100)
+			go func() {
+				for u := range updates {
+					u := u
+					fyne.Do(func() {
+						bar.SetValue(overallProgress(u, false))
+						status.SetText(tr.T("stage." + string(u.Stage)))
+						metrics.SetText(tr.T("metrics.formatting", int(u.BytesProcessed)))
+					})
+				}
+			}()
 			go func(target device.Device) {
-				err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER")
+				err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER", updates)
+				close(updates)
 				fyne.Do(func() {
 					lock(false)
-					formatBar.Stop()
-					formatBar.Hide()
 					bar.Show()
 					if err != nil {
 						status.SetText(tr.T("status.failed", err))
@@ -234,8 +240,7 @@ func runApplication(tr i18n.Localizer) {
 			cancel = c
 			start.SetText(tr.T("action.cancel"))
 			status.SetText(tr.T("status.preparing"))
-			formatBar.Stop()
-			formatBar.Hide()
+
 			bar.Show()
 			bar.SetValue(0)
 			appendLog(tr.T("log.start"))
@@ -281,7 +286,7 @@ func runApplication(tr i18n.Localizer) {
 		confirm.SetDismissText(tr.T("action.cancel"))
 		confirm.Show()
 	}
-	content := windowContent(tr, deviceSelect, deviceDetail, refreshButton, format, choose, imagePath, imageInfo, verifyCheck, ejectCheck, status, bar, formatBar, metrics, copyLog, copyError, start, logPanel)
+	content := windowContent(tr, deviceSelect, deviceDetail, refreshButton, format, choose, imagePath, imageInfo, verifyCheck, ejectCheck, status, bar, metrics, copyLog, copyError, start, logPanel)
 	w.SetContent(container.NewVScroll(content))
 	appendLog(tr.T("log.launched"))
 	refresh()
@@ -298,7 +303,7 @@ func overallProgress(update progress.Update, verify bool) float64 {
 	}
 	if verify {
 		switch update.Stage {
-		case progress.StageWriting:
+		case progress.StageWriting, progress.StageDecompressWriting:
 			return ratio * 0.45
 		case progress.StageFlushing:
 			return 0.45
@@ -309,7 +314,9 @@ func overallProgress(update progress.Update, verify bool) float64 {
 		}
 	}
 	switch update.Stage {
-	case progress.StageWriting:
+	case progress.StageFormatting:
+		return ratio
+	case progress.StageWriting, progress.StageDecompressWriting:
 		return ratio * 0.90
 	case progress.StageFlushing:
 		return 0.90
@@ -338,11 +345,11 @@ func resetFinishedState(machine *core.StateMachine) {
 	}
 }
 
-func windowContent(tr i18n.Localizer, deviceSelect *widget.Select, deviceDetail *widget.Label, refreshButton, format, choose *widget.Button, imagePath *widget.Entry, imageInfo *widget.Label, verifyCheck, ejectCheck *widget.Check, status *widget.Label, bar *widget.ProgressBar, formatBar *widget.ProgressBarInfinite, metrics *widget.Label, copyLog, copyError, start *widget.Button, logPanel *widget.Accordion) *fyne.Container {
+func windowContent(tr i18n.Localizer, deviceSelect *widget.Select, deviceDetail *widget.Label, refreshButton, format, choose *widget.Button, imagePath *widget.Entry, imageInfo *widget.Label, verifyCheck, ejectCheck *widget.Check, status *widget.Label, bar *widget.ProgressBar, metrics *widget.Label, copyLog, copyError, start *widget.Button, logPanel *widget.Accordion) *fyne.Container {
 	deviceCard := widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, container.NewHBox(refreshButton, format), deviceSelect), deviceDetail))
 	imageCard := widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, choose, imagePath))
 	optionsCard := widget.NewCard(tr.T("card.options"), "", container.NewVBox(verifyCheck, ejectCheck))
-	progressCard := widget.NewCard(tr.T("card.progress"), "", container.NewVBox(status, bar, formatBar, metrics))
+	progressCard := widget.NewCard(tr.T("card.progress"), "", container.NewVBox(status, bar, metrics))
 	actions := container.NewBorder(nil, nil, container.NewHBox(copyLog, copyError), start, logPanel)
 	return container.NewVBox(deviceCard, imageCard, widget.NewCard(tr.T("card.image_info"), "", imageInfo), optionsCard, progressCard, actions)
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goflasher/goflasher/internal/progress"
 	"io"
 	"os"
 	"os/exec"
@@ -218,7 +219,7 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	return nil
 }
 
-func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string) error {
+func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string, updates chan<- progress.Update) error {
 	fresh, err := b.revalidate(ctx, d)
 	if err != nil {
 		return err

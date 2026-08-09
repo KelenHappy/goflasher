@@ -30,6 +30,7 @@ type Options struct {
 	BufferSize             int
 	Progress               chan<- progress.Update
 	Now                    func() time.Time
+	WriteStage             progress.Stage // defaults to StageWriting when zero
 }
 
 // Copy streams source to target while hashing the exact bytes written.
@@ -42,6 +43,9 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, opts Options) (Resu
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
+	}
+	if opts.WriteStage == "" {
+		opts.WriteStage = progress.StageWriting
 	}
 	start := opts.Now()
 	h := sha256.New()
@@ -65,7 +69,7 @@ func Copy(ctx context.Context, dst io.Writer, src io.Reader, opts Options) (Resu
 			if wn != n {
 				return result(written, h, start, opts.Now()), fmt.Errorf("%w: %v", ErrWriteFailed, io.ErrShortWrite)
 			}
-			send(ctx, opts.Progress, progress.Calculate(progress.StageWriting, written, opts.TotalBytes, opts.Now().Sub(start)))
+			send(ctx, opts.Progress, progress.Calculate(opts.WriteStage, written, opts.TotalBytes, opts.Now().Sub(start)))
 		}
 		if readErr == io.EOF {
 			if opts.TotalBytes > 0 && written != opts.TotalBytes {
