@@ -41,8 +41,8 @@ on Linux, Windows, and macOS.**
 
 GoFlasher does not inspect, identify, or restrict the operating system contained
 inside an image. On every supported host it can therefore write a Linux ISO or
-any other raw disk image in a supported format: `.iso`, `.img`, `.raw`, or a
-gzip (`.gz`) or XZ (`.xz`) compressed image.
+any other raw disk image in a supported format: `.iso`, `.img`, `.raw`,
+`.iso.gz`, `.img.gz`, `.iso.xz`, or `.img.xz`.
 
 GoFlasher is primarily an image writer. It can also erase a selected supported
 USB device and create a FAT32 filesystem named `GOFLASHER`. Linux creates a

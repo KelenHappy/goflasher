@@ -89,11 +89,11 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 		sendStage(ctx, updates, progress.StageFlushing)
 	}
 	closeErr := dst.Close()
-	out.BytesWritten = wr.BytesWritten
-	out.SourceSHA256 = wr.SHA256
 	if writeErr != nil {
 		return out, writeErr
 	}
+	out.BytesWritten = wr.BytesWritten
+	out.SourceSHA256 = wr.SHA256
 	if closeErr != nil {
 		return out, closeErr
 	}

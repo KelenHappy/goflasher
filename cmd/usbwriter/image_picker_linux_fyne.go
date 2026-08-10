@@ -9,9 +9,15 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 )
 
 const fileDialogResizePollInterval = 100 * time.Millisecond
+
+var supportedImageSuffixes = []string{
+	".iso", ".img", ".raw",
+	".iso.gz", ".img.gz", ".iso.xz", ".img.xz",
+}
 
 // imageFileFilter matches files whose full name ends with one of the accepted
 // suffixes. Fyne's built-in ExtensionFileFilter only compares URI.Extension(),
@@ -23,6 +29,9 @@ type imageFileFilter struct {
 }
 
 func (f *imageFileFilter) Matches(uri fyne.URI) bool {
+	if listable, err := storage.CanList(uri); err == nil && listable {
+		return false
+	}
 	name := strings.ToLower(uri.Name())
 	for _, s := range f.suffixes {
 		if strings.HasSuffix(name, s) {
@@ -48,9 +57,7 @@ func openImage(parent fyne.Window, title, acceptLabel, dismissLabel, filterName 
 		}
 		done(path, nil)
 	}, parent)
-	chooser.SetFilter(&imageFileFilter{suffixes: []string{
-		".iso", ".img", ".raw", ".gz", ".xz",
-	}})
+	chooser.SetFilter(&imageFileFilter{suffixes: supportedImageSuffixes})
 	chooser.SetTitleText(title)
 	chooser.SetConfirmText(acceptLabel)
 	chooser.SetDismissText(dismissLabel)
