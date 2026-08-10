@@ -161,7 +161,7 @@ func (b *Backend) revalidate(ctx context.Context, selected device.Device) (devic
 	if !fresh.IsAllowed {
 		return device.Device{}, fmt.Errorf("%w: %s", ErrUnsupportedDevice, fresh.RejectReason)
 	}
-	if !device.SameIdentity(selected, fresh) {
+	if !device.SameIdentity(selected, fresh) || selected.Size != fresh.Size || selected.Model != fresh.Model {
 		return device.Device{}, ErrDeviceChanged
 	}
 	return fresh, nil
@@ -172,7 +172,7 @@ func (b *Backend) Unmount(ctx context.Context, selected device.Device) error {
 		return err
 	}
 	if out, err := b.runner.Run(ctx, "unmountDisk", wholeDevice(fresh.Path)); err != nil {
-		return fmt.Errorf("%w: %v: %s", ErrUnmountFailed, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%w: %w: %s", ErrUnmountFailed, err, strings.TrimSpace(string(out)))
 	}
 	again, err := b.revalidate(ctx, fresh)
 	if err != nil {

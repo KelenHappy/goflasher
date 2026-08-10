@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -355,7 +356,7 @@ func windowContent(tr i18n.Localizer, deviceSelect *widget.Select, deviceDetail 
 }
 
 func userError(tr i18n.Localizer, err error) string {
-	if err == context.Canceled {
+	if errors.Is(err, context.Canceled) {
 		return tr.T("error.cancelled")
 	}
 	return err.Error()
