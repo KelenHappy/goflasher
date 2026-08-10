@@ -14,9 +14,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"github.com/goflasher/goflasher/internal/progress"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/progress"
 )
 
 type fakePrivilegedHelper struct {

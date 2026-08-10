@@ -4,11 +4,10 @@ package linux
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
-	"bytes"
 	"encoding/json"
-	"github.com/goflasher/goflasher/internal/progress"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"syscall"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/progress"
 	"golang.org/x/sys/unix"
 )
 

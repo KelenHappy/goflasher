@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"io"
+
 	"github.com/goflasher/goflasher/internal/progress"
 )
 
