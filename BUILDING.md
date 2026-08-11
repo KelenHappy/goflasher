@@ -19,7 +19,9 @@ changing callers. This keeps the current work focused on making Linux reliable.
 
 - The Go toolchain version declared by `go.mod` (currently Go 1.26.4).
 - A C compiler and the Linux development libraries required by Fyne.
-- `udisksctl` at runtime for unmount and device power-off operations.
+- The UDisks2 system service at runtime for unmount and device power-off
+  operations; GoFlasher calls it directly over D-Bus and does not invoke
+  `udisksctl`.
 - polkit/`pkexec` at runtime for narrowly scoped raw-device operations.
 - No portal, D-Bus file chooser, `kdialog`, or Zenity package is needed; the
   Linux image chooser is part of the Fyne GUI.
@@ -35,6 +37,36 @@ sudo apt install \
 
 Other distributions may use different package names. GoFlasher does not use
 `xdg-desktop-portal` for image selection.
+
+## Native API and command dependencies
+
+Building successfully does not mean that every backend is free of host command
+dependencies. The current runtime boundary is:
+
+| Host | Device management | Remaining commands | Status |
+|---|---|---|---|
+| Linux | sysfs, procfs, `/run/udev/data`, and the UDisks2 system D-Bus API | `pkexec` starts the narrowly scoped privileged helper | GUI and backend are active |
+| Windows | PowerShell Storage and CIM cmdlets | `powershell.exe` | GUI and backend are active; run as Administrator |
+| macOS | `diskutil` plist output and raw `/dev/rdisk*` access | `diskutil` and `plutil`; `osascript` opens the native file chooser | GUI and backend are active; raw access requires elevation |
+
+The commands listed for Windows and macOS are part of those operating systems;
+end users do not install Visual Studio, an SDK, PowerShell, `diskutil`, `plutil`,
+or `osascript` to run a packaged GoFlasher binary. Source builds are different:
+the Go and Fyne/CGo build toolchains are required on the build machine, but they
+are not runtime dependencies and should not be bundled into the application.
+
+UDisks2 D-Bus removes the Linux `udisksctl` client process, not the UDisks2
+daemon or its polkit authorization policy. Likewise, the Windows and macOS
+backends currently compile and run on their native hosts but are not yet native
+API-only implementations. Replacing the remaining commands requires separate
+platform work: SetupAPI/Configuration Manager and Virtual Disk/volume-control
+APIs on Windows, and Disk Arbitration plus IOKit on macOS. Such replacements
+must preserve the existing repeated identity, system-disk, mount, capacity, and
+removability checks before raw access.
+
+The three-platform CI matrix proves that each native source set compiles and its
+isolated tests pass. It does not prove destructive access on real hardware; the
+physical-media acceptance gate in `TESTING.md` remains mandatory for releases.
 
 Build on (or cross-compile specifically for) every target OS and architecture;
 one binary cannot run unchanged on Linux, Windows, and macOS. Fyne's desktop

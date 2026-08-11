@@ -10,6 +10,7 @@ import (
 
 	core "github.com/goflasher/goflasher/internal/app"
 	"github.com/goflasher/goflasher/internal/i18n"
+	"github.com/goflasher/goflasher/internal/progress"
 )
 
 func TestAdvanceSelection(t *testing.T) {
@@ -35,6 +36,39 @@ func TestAdvanceSelection(t *testing.T) {
 			advanceSelection(machine, tt.counterpartSelected, tt.waitingState, tt.selectedState)
 			if got := machine.State(); got != tt.want {
 				t.Fatalf("state = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWritingState(t *testing.T) {
+	for _, state := range []core.State{core.Writing, core.Flushing, core.Verifying, core.Ejecting, core.Unmounting} {
+		if !writingState(state) {
+			t.Errorf("writingState(%s) = false", state)
+		}
+	}
+	for _, state := range []core.State{core.Idle, core.Ready, core.Completed, core.Cancelled, core.Failed} {
+		if writingState(state) {
+			t.Errorf("writingState(%s) = true", state)
+		}
+	}
+}
+
+func TestProgressRatio(t *testing.T) {
+	tests := []struct {
+		name   string
+		update progress.Update
+		want   float64
+	}{
+		{name: "unknown total", update: progress.Update{BytesProcessed: 5}, want: 0},
+		{name: "partial", update: progress.Update{BytesProcessed: 25, TotalBytes: 100}, want: 0.25},
+		{name: "complete", update: progress.Update{BytesProcessed: 100, TotalBytes: 100}, want: 1},
+		{name: "clamped", update: progress.Update{BytesProcessed: 150, TotalBytes: 100}, want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := progressRatio(tt.update); got != tt.want {
+				t.Fatalf("progressRatio() = %v, want %v", got, tt.want)
 			}
 		})
 	}

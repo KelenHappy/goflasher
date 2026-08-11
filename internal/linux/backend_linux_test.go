@@ -60,40 +60,28 @@ type syncBuffer struct {
 
 func (b *syncBuffer) Sync() error { b.synced = true; return nil }
 
-type fakeRunner struct {
-	properties  map[string]string
-	mountInfo   string
-	failUnmount bool
-	udisksCalls [][]string
+type fakeUDisks struct {
+	mountInfo  string
+	unmounted  []string
+	poweredOff []string
+	err        error
 }
 
-func (f *fakeRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
-	switch name {
-	case "udevadm":
-		return []byte(f.properties[args[len(args)-1]]), nil
-	case "udisksctl":
-		f.udisksCalls = append(f.udisksCalls, append([]string(nil), args...))
-		return f.runUDisks(args)
-	default:
-		return nil, nil
+func (f *fakeUDisks) Unmount(_ context.Context, device string) error {
+	f.unmounted = append(f.unmounted, device)
+	if f.err != nil {
+		return f.err
 	}
+	return os.WriteFile(f.mountInfo, nil, 0600)
 }
 
-func (f *fakeRunner) runUDisks(args []string) ([]byte, error) {
-	if len(args) == 0 || args[0] != "unmount" {
-		return nil, nil
-	}
-	if f.failUnmount {
-		return nil, fmt.Errorf("busy")
-	}
-	if f.mountInfo != "" {
-		_ = os.WriteFile(f.mountInfo, nil, 0600)
-	}
-	return []byte("unmounted"), nil
+func (f *fakeUDisks) PowerOff(_ context.Context, device string) error {
+	f.poweredOff = append(f.poweredOff, device)
+	return f.err
 }
 
 func TestEnumerationFiltersAndMounts(t *testing.T) {
-	b, run := fixture(t)
+	b := fixture(t)
 	devices, err := b.ListAllowedDevices(context.Background())
 	requireNoError(t, err)
 	requireDevicePaths(t, devices, "sdb", "sdc")
@@ -110,12 +98,11 @@ func TestEnumerationFiltersAndMounts(t *testing.T) {
 	for _, d := range all {
 		assertEnumerationSafety(t, d)
 	}
-	_ = run
 }
 
 func TestSmallGenericUSBStorageFallback(t *testing.T) {
-	b, run := fixture(t)
-	run.properties[filepath.Join(b.DevRoot, "sdb")] = "ID_BUS=usb\nID_SERIAL_SHORT=FLASH123\nID_USB_DRIVER=usb-storage\n"
+	b := fixture(t)
+	setUdevProperties(t, b, "sdb", "ID_BUS=usb\nID_SERIAL_SHORT=FLASH123\nID_USB_DRIVER=usb-storage\n")
 
 	device, err := b.RefreshDevice(context.Background(), "FLASH123")
 	requireNoError(t, err)
@@ -168,19 +155,19 @@ func assertEnumerationSafety(t *testing.T, d device.Device) {
 }
 
 func TestRevalidationDetectsReplacement(t *testing.T) {
-	b, run := fixture(t)
+	b := fixture(t)
 	selected, err := b.RefreshDevice(context.Background(), "FLASH123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	run.properties[selected.Path] = strings.ReplaceAll(run.properties[selected.Path], "FLASH123", "REPLACED")
+	setUdevProperties(t, b, "sdb", "ID_BUS=usb\nID_SERIAL_SHORT=REPLACED\nID_DRIVE_THUMB=1\n")
 	if _, err := b.Revalidate(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
 		t.Fatalf("error = %v", err)
 	}
 }
 
 func TestRawOperationsUseIdentityOnlyHelper(t *testing.T) {
-	b, _ := fixture(t)
+	b := fixture(t)
 	fake := &fakePrivilegedHelper{readData: "verified"}
 	b.helper = fake
 	selected, err := b.RefreshDevice(context.Background(), "CARD123")
@@ -220,7 +207,7 @@ func assertHelperRequests(t *testing.T, requests []privilegedRequest, selected d
 }
 
 func TestHelperFailureReplacementAndAuthorizationCancellation(t *testing.T) {
-	b, run := fixture(t)
+	b := fixture(t)
 	selected, _ := b.RefreshDevice(context.Background(), "CARD123")
 	fake := &fakePrivilegedHelper{err: errors.New("helper failed")}
 	b.helper = fake
@@ -237,7 +224,7 @@ func TestHelperFailureReplacementAndAuthorizationCancellation(t *testing.T) {
 	}
 	// A replacement caught by the unprivileged refresh must never reach the helper.
 	before := len(fake.requests)
-	run.properties[selected.Path] = strings.ReplaceAll(run.properties[selected.Path], "CARD123", "NEWCARD")
+	setUdevProperties(t, b, "sdc", "ID_BUS=usb\nID_SERIAL_SHORT=NEWCARD\nID_DRIVE_FLASH_SD=1\n")
 	if _, err := b.OpenWriter(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
 		t.Fatalf("pre-helper replacement = %v", err)
 	}
@@ -325,6 +312,24 @@ type syncError struct{ err error }
 
 func (s syncError) Sync() error { return s.err }
 
+func TestProgressParserHandlesFragmentedLines(t *testing.T) {
+	var diagnostics strings.Builder
+	updates := make(chan progress.Update, 1)
+	parser := &progressParser{builder: &diagnostics, updates: updates}
+	for _, chunk := range []string{"PROG", "RESS 25 100\ndiagnostic", " detail\nPROGRESS invalid\n"} {
+		if written, err := parser.Write([]byte(chunk)); err != nil || written != len(chunk) {
+			t.Fatalf("Write(%q) = %d, %v", chunk, written, err)
+		}
+	}
+	update := <-updates
+	if update.Stage != progress.StageFormatting || update.BytesProcessed != 25 || update.TotalBytes != 100 {
+		t.Fatalf("progress update = %+v", update)
+	}
+	if got, want := diagnostics.String(), "diagnostic detail\nPROGRESS invalid\n"; got != want {
+		t.Fatalf("diagnostics = %q, want %q", got, want)
+	}
+}
+
 func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T) {
 	const size = uint64(64 << 20)
 	path := filepath.Join(t.TempDir(), "device")
@@ -336,7 +341,11 @@ func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T
 	requireNoError(t, err)
 	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 32*512), 0)
 	requireNoError(t, err)
-	requireNoError(t, formatFAT32(file, size, "GOFLASHER", io.Discard))
+	var formatProgress strings.Builder
+	requireNoError(t, formatFAT32(file, size, "GOFLASHER", &formatProgress))
+	if got, want := formatProgress.String(), "PROGRESS 10 100\nPROGRESS 15 100\nPROGRESS 25 100\nPROGRESS 80 100\nPROGRESS 90 100\nPROGRESS 100 100\n"; got != want {
+		t.Fatalf("format progress = %q, want %q", got, want)
+	}
 
 	boot := make([]byte, 512)
 	_, err = file.ReadAt(boot, 0)
@@ -403,7 +412,8 @@ func TestMetadataAcceptsMatchingUSBSerialWhenSCSISerialDiffers(t *testing.T) {
 }
 
 func TestUnmountAllMountedPartitions(t *testing.T) {
-	b, run := fixture(t)
+	b := fixture(t)
+	service := b.udisks.(*fakeUDisks)
 	selected, err := b.RefreshDevice(context.Background(), "FLASH123")
 	if err != nil {
 		t.Fatal(err)
@@ -416,30 +426,30 @@ func TestUnmountAllMountedPartitions(t *testing.T) {
 	}
 	// Restore the mount and verify a backend failure aborts the operation.
 	writeMountInfo(t, b.MountInfo)
-	run.failUnmount = true
+	service.err = fmt.Errorf("busy")
 	selected, _ = b.RefreshDevice(context.Background(), "FLASH123")
 	if err := b.Unmount(context.Background(), selected); !errors.Is(err, ErrUnmountFailed) {
 		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestUDisksOperationsAllowDesktopAuthorization(t *testing.T) {
-	b, run := fixture(t)
+func TestUDisksOperationsUseDirectDBusClient(t *testing.T) {
+	b := fixture(t)
+	service := b.udisks.(*fakeUDisks)
 	fake := &fakePrivilegedHelper{}
 	b.helper = fake
 	selected, err := b.RefreshDevice(context.Background(), "FLASH123")
 	requireNoError(t, err)
 	requireNoError(t, b.FormatFAT32(context.Background(), selected, "GOFLASHER", nil))
 
-	if len(run.udisksCalls) != 1 {
-		t.Fatalf("udisks calls = %#v", run.udisksCalls)
+	if len(service.unmounted) != 1 || service.unmounted[0] != filepath.Join(b.DevRoot, "sdb1") {
+		t.Fatalf("unmounted devices = %#v", service.unmounted)
 	}
-	for _, call := range run.udisksCalls {
-		for _, arg := range call {
-			if arg == "--no-user-interaction" {
-				t.Fatalf("desktop authorization disabled in call: %#v", call)
-			}
-		}
+	selected, err = b.RefreshDevice(context.Background(), "CARD123")
+	requireNoError(t, err)
+	requireNoError(t, b.Eject(context.Background(), selected))
+	if len(service.poweredOff) != 1 || service.poweredOff[0] != selected.Path {
+		t.Fatalf("powered-off devices = %#v", service.poweredOff)
 	}
 	if len(fake.requests) != 1 || fake.requests[0].Mode != modeFormatFAT32 || fake.requests[0].Label != "GOFLASHER" {
 		t.Fatalf("format helper request = %#v", fake.requests)
@@ -458,21 +468,39 @@ func TestParseMountInfo(t *testing.T) {
 	}
 }
 
+func TestUdevPropertiesReadRuntimeDatabaseWithoutCLI(t *testing.T) {
+	root := t.TempDir()
+	b := &Backend{UdevDataRoot: root}
+	write(t, filepath.Join(root, "b8:16"), "I:ignored\nE:ID_BUS=usb\nE:ID_SERIAL_SHORT=SERIAL=WITH=EQUALS\nE:MALFORMED\n")
+
+	properties := b.udev(8, 16)
+	if properties["ID_BUS"] != "usb" || properties["ID_SERIAL_SHORT"] != "SERIAL=WITH=EQUALS" {
+		t.Fatalf("udev properties = %#v", properties)
+	}
+	if _, ok := properties["I:ignored"]; ok {
+		t.Fatal("non-environment udev record was parsed as a property")
+	}
+	if got := b.udev(8, 99); len(got) != 0 {
+		t.Fatalf("missing udev record = %#v, want empty supplementary metadata", got)
+	}
+}
+
 func TestEnumerationFailsClosedWithoutSwapMetadata(t *testing.T) {
-	b, _ := fixture(t)
+	b := fixture(t)
 	b.Swaps = filepath.Join(t.TempDir(), "missing-swaps")
 	if _, err := b.ListAllowedDevices(context.Background()); err == nil {
 		t.Fatal("enumeration succeeded without swap metadata")
 	}
 }
 
-func fixture(t *testing.T) (*Backend, *fakeRunner) {
+func fixture(t *testing.T) *Backend {
 	t.Helper()
 	root := t.TempDir()
 	class := filepath.Join(root, "sys/class/block")
 	devices := filepath.Join(root, "sys/devices")
 	dev := filepath.Join(root, "dev")
-	for _, path := range []string{class, devices, dev} {
+	udevData := filepath.Join(root, "run/udev/data")
+	for _, path := range []string{class, devices, dev, udevData} {
 		requireNoError(t, os.MkdirAll(path, 0755))
 	}
 	addFixtureDevices(t, class, devices, dev)
@@ -480,9 +508,23 @@ func fixture(t *testing.T) (*Backend, *fakeRunner) {
 	writeMountInfo(t, mount)
 	swaps := filepath.Join(root, "swaps")
 	write(t, swaps, "Filename Type Size Used Priority\n"+filepath.Join(dev, "sde1")+" partition 1024 0 -2\n")
-	run := &fakeRunner{mountInfo: mount, properties: map[string]string{filepath.Join(dev, "sdb"): "ID_BUS=usb\nID_SERIAL_SHORT=FLASH123\nID_DRIVE_THUMB=1\n", filepath.Join(dev, "sdc"): "ID_BUS=usb\nID_SERIAL_SHORT=CARD123\nID_DRIVE_FLASH_SD=1\n", filepath.Join(dev, "sdd"): "ID_BUS=usb\nID_SERIAL_SHORT=SSD123\nID_DRIVE_THUMB=1\nID_ATA=1\n", filepath.Join(dev, "sde"): "ID_BUS=usb\nID_SERIAL_SHORT=SWAP123\nID_DRIVE_THUMB=1\n", filepath.Join(dev, "nvme0n1"): "ID_BUS=nvme\nID_SERIAL_SHORT=SYS123\n"}}
-	b := &Backend{SysClassBlock: class, MountInfo: mount, Swaps: swaps, DevRoot: dev, runner: run}
-	return b, run
+	b := &Backend{SysClassBlock: class, MountInfo: mount, Swaps: swaps, DevRoot: dev, UdevDataRoot: udevData, udisks: &fakeUDisks{mountInfo: mount}}
+	setUdevProperties(t, b, "sdb", "ID_BUS=usb\nID_SERIAL_SHORT=FLASH123\nID_DRIVE_THUMB=1\n")
+	setUdevProperties(t, b, "sdc", "ID_BUS=usb\nID_SERIAL_SHORT=CARD123\nID_DRIVE_FLASH_SD=1\n")
+	setUdevProperties(t, b, "sdd", "ID_BUS=usb\nID_SERIAL_SHORT=SSD123\nID_DRIVE_THUMB=1\nID_ATA=1\n")
+	setUdevProperties(t, b, "sde", "ID_BUS=usb\nID_SERIAL_SHORT=SWAP123\nID_DRIVE_THUMB=1\n")
+	setUdevProperties(t, b, "nvme0n1", "ID_BUS=nvme\nID_SERIAL_SHORT=SYS123\n")
+	return b
+}
+
+func setUdevProperties(t *testing.T, b *Backend, name, properties string) {
+	t.Helper()
+	deviceNumber := readTrim(filepath.Join(b.SysClassBlock, name, "dev"))
+	lines := strings.Split(strings.TrimSpace(properties), "\n")
+	for i := range lines {
+		lines[i] = "E:" + lines[i]
+	}
+	write(t, filepath.Join(b.UdevDataRoot, "b"+deviceNumber), strings.Join(lines, "\n")+"\n")
 }
 
 func addFixtureDevices(t *testing.T, class, devices, dev string) {

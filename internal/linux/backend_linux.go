@@ -7,15 +7,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/goflasher/goflasher/internal/progress"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/progress"
+	"github.com/goflasher/goflasher/internal/udisks"
 )
 
 var (
@@ -30,18 +30,6 @@ var (
 // decimal GB here to match the capacity printed on consumer flash drives.
 const maxGenericUSBFlashSize uint64 = 128_000_000_000
 
-type commandRunner interface {
-	Output(context.Context, string, ...string) ([]byte, error)
-}
-type osRunner struct{}
-
-func (osRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	// udisksctl writes its useful diagnostics to stderr. Keep stdout and stderr
-	// together so GUI errors explain the actual failure instead of only showing
-	// "exit status 1".
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
-}
-
 // Backend enumerates Linux block devices from sysfs. udev is supplementary:
 // candidates must satisfy kernel topology and conservative udev classification.
 type Backend struct {
@@ -49,14 +37,15 @@ type Backend struct {
 	MountInfo     string
 	Swaps         string
 	DevRoot       string
-	runner        commandRunner
+	UdevDataRoot  string
 	helper        privilegedHelper
+	udisks        udisks.Client
 }
 
 var _ device.Backend = (*Backend)(nil)
 
 func NewBackend() *Backend {
-	return &Backend{SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev", runner: osRunner{}, helper: newCommandHelper()}
+	return &Backend{SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev", UdevDataRoot: "/run/udev/data", helper: newCommandHelper(), udisks: udisks.New()}
 }
 
 func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
@@ -107,7 +96,7 @@ func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
 		if err != nil {
 			continue
 		}
-		props := b.udev(ctx, filepath.Join(b.DevRoot, name))
+		props := b.udev(maj, min)
 		d := device.Device{Path: filepath.Join(b.DevRoot, name), Major: maj, Minor: min, SysfsPath: real, Vendor: readTrim(filepath.Join(link, "device/vendor")), Model: readTrim(filepath.Join(link, "device/model")), Serial: first(props["ID_SERIAL_SHORT"], readTrim(filepath.Join(link, "device/serial"))), WWN: props["ID_WWN"], Transport: strings.ToLower(props["ID_BUS"])}
 		d.Size = readUint(filepath.Join(link, "size")) * 512
 		d.PartitionCount = countPartitions(entries, name, b.SysClassBlock)
@@ -183,8 +172,8 @@ func (b *Backend) Unmount(ctx context.Context, d device.Device) error {
 		return err
 	}
 	for _, partition := range b.mountedPartitions(fresh) {
-		if out, err := b.runner.Output(ctx, "udisksctl", "unmount", "--block-device", partition); err != nil {
-			return fmt.Errorf("%w: %s: %w: %s", ErrUnmountFailed, partition, err, strings.TrimSpace(string(out)))
+		if err := b.diskService().Unmount(ctx, partition); err != nil {
+			return fmt.Errorf("%w: %s: %w", ErrUnmountFailed, partition, err)
 		}
 	}
 	again, err := b.Revalidate(ctx, fresh)
@@ -239,8 +228,14 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.runner.Output(ctx, "udisksctl", "power-off", "--block-device", fresh.Path)
-	return err
+	return b.diskService().PowerOff(ctx, fresh.Path)
+}
+
+func (b *Backend) diskService() udisks.Client {
+	if b.udisks == nil {
+		b.udisks = udisks.New()
+	}
+	return b.udisks
 }
 
 // FormatFAT32 creates a FAT32 filesystem on the whole removable device through
@@ -252,7 +247,7 @@ func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string
 		return err
 	}
 	// Best-effort unmount: corrupted partition tables may leave phantom
-	// partitions that udisksctl cannot unmount. The privileged helper
+	// partitions that UDisks2 cannot unmount. The privileged helper
 	// re-validates identity and opens the whole-disk device directly, so
 	// a failed unmount of a damaged partition does not block formatting.
 	_ = b.Unmount(ctx, fresh)
@@ -416,16 +411,19 @@ func (b *Backend) mountedPartitions(parent device.Device) []string {
 	}
 	return result
 }
-func (b *Backend) udev(ctx context.Context, path string) map[string]string {
-	out, e := b.runner.Output(ctx, "udevadm", "info", "--query=property", "--name", path)
-	if e != nil {
+func (b *Backend) udev(major, minor uint32) map[string]string {
+	data, err := os.ReadFile(filepath.Join(b.UdevDataRoot, fmt.Sprintf("b%d:%d", major, minor)))
+	if err != nil {
 		return map[string]string{}
 	}
-	p := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			p[k] = v
+	properties := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "E:") {
+			continue
+		}
+		if key, value, ok := strings.Cut(strings.TrimPrefix(line, "E:"), "="); ok {
+			properties[key] = value
 		}
 	}
-	return p
+	return properties
 }

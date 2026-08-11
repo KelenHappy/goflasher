@@ -9,14 +9,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/goflasher/goflasher/internal/progress"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/progress"
 )
 
 var (
@@ -36,6 +37,12 @@ func (powerShellRunner) Output(ctx context.Context, script string) ([]byte, erro
 	return exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script).CombinedOutput()
 }
 
+const (
+	queryTimeout     = 30 * time.Second
+	operationTimeout = 2 * time.Minute
+	formatTimeout    = 10 * time.Minute
+)
+
 type Backend struct{ runner commandRunner }
 
 var _ device.Backend = (*Backend)(nil)
@@ -43,36 +50,38 @@ var _ device.Backend = (*Backend)(nil)
 func NewBackend() *Backend { return &Backend{runner: powerShellRunner{}} }
 
 type diskJSON struct {
-	Number            uint32 `json:"Number"`
-	FriendlyName      string `json:"FriendlyName"`
-	SerialNumber      string `json:"SerialNumber"`
-	UniqueID          string `json:"UniqueId"`
-	Size              uint64 `json:"Size"`
-	BusType           string `json:"BusType"`
-	IsBoot            bool   `json:"IsBoot"`
-	IsSystem          bool   `json:"IsSystem"`
-	IsOffline         bool   `json:"IsOffline"`
-	PartitionCount    int    `json:"PartitionCount"`
-	HasDriveLetter    bool   `json:"HasDriveLetter"`
-	IsRemovable       bool   `json:"IsRemovable"`
-	OperationalStatus any    `json:"OperationalStatus"`
+	Number         uint32   `json:"Number"`
+	FriendlyName   string   `json:"FriendlyName"`
+	SerialNumber   string   `json:"SerialNumber"`
+	UniqueID       string   `json:"UniqueId"`
+	Size           uint64   `json:"Size"`
+	BusType        string   `json:"BusType"`
+	IsBoot         bool     `json:"IsBoot"`
+	IsSystem       bool     `json:"IsSystem"`
+	IsOffline      bool     `json:"IsOffline"`
+	PartitionCount int      `json:"PartitionCount"`
+	MountPoints    []string `json:"MountPoints"`
+	IsRemovable    bool     `json:"IsRemovable"`
 }
 
 const listScript = `$ErrorActionPreference='Stop'; $disks=@(
 Get-Disk | ForEach-Object {
   $parts=@(Get-Partition -DiskNumber $_.Number -ErrorAction SilentlyContinue)
+  $volumes=@($parts | Get-Volume -ErrorAction SilentlyContinue)
   $cim=Get-CimInstance Win32_DiskDrive -Filter ("Index=" + $_.Number) -ErrorAction SilentlyContinue
   [pscustomobject]@{
     Number=$_.Number; FriendlyName=$_.FriendlyName; SerialNumber=$_.SerialNumber
     UniqueId=$_.UniqueId; Size=$_.Size; BusType=[string]$_.BusType
     IsBoot=$_.IsBoot; IsSystem=$_.IsSystem; IsOffline=$_.IsOffline
-    PartitionCount=$parts.Count; HasDriveLetter=[bool]($parts | Where-Object DriveLetter)
+    PartitionCount=$parts.Count
+    MountPoints=@($volumes | Where-Object DriveLetter | ForEach-Object { ([string]$_.DriveLetter) + ':\' })
     IsRemovable=[bool]($cim.MediaType -match 'Removable')
-    OperationalStatus=$_.OperationalStatus
   }
 }); ConvertTo-Json -InputObject $disks -Compress`
 
 func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
 	out, err := b.runner.Output(ctx, listScript)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate Windows disks: %w: %s", err, strings.TrimSpace(string(out)))
@@ -97,7 +106,9 @@ func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
 			ID: id, Path: path, Model: strings.TrimSpace(disk.FriendlyName),
 			Serial: serial, WWN: uniqueID, Transport: strings.ToLower(disk.BusType),
 			SysfsPath: uniqueID, Major: disk.Number, Size: disk.Size,
-			Mounted: disk.HasDriveLetter && !disk.IsOffline, IsSystemDisk: disk.IsBoot || disk.IsSystem,
+			// Treat every online disk as mounted/unsafe for raw access. Set-Disk must
+			// report it offline before OpenWriter/OpenReader can proceed.
+			Mounted: !disk.IsOffline, MountPoints: disk.MountPoints, IsSystemDisk: disk.IsBoot || disk.IsSystem,
 			PartitionCount: disk.PartitionCount,
 		}
 		switch {
@@ -155,6 +166,8 @@ func (b *Backend) revalidate(ctx context.Context, selected device.Device) (devic
 }
 
 func (b *Backend) Unmount(ctx context.Context, selected device.Device) error {
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
 	fresh, err := b.revalidate(ctx, selected)
 	if err != nil {
 		return err
@@ -162,6 +175,13 @@ func (b *Backend) Unmount(ctx context.Context, selected device.Device) error {
 	script := fmt.Sprintf("$ErrorActionPreference='Stop'; Set-Disk -Number %d -IsOffline $true", fresh.Major)
 	if out, err := b.runner.Output(ctx, script); err != nil {
 		return fmt.Errorf("%w: %w: %s", ErrUnmountFailed, err, strings.TrimSpace(string(out)))
+	}
+	again, err := b.revalidate(ctx, fresh)
+	if err != nil {
+		return err
+	}
+	if again.Mounted {
+		return ErrUnmountFailed
 	}
 	return nil
 }
@@ -192,11 +212,21 @@ func (b *Backend) Flush(ctx context.Context, d device.Device) error {
 	return f.Sync()
 }
 func (b *Backend) Eject(ctx context.Context, d device.Device) error {
-	_, err := b.revalidate(ctx, d)
-	return err // The disk is already offline, Windows' safe-removal state.
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	fresh, err := b.revalidate(ctx, d)
+	if err != nil {
+		return err
+	}
+	if fresh.Mounted {
+		return ErrUnmountFailed
+	}
+	return nil // An offline disk is in Windows' safe-removal state.
 }
 
 func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string, updates chan<- progress.Update) error {
+	ctx, cancel := context.WithTimeout(ctx, formatTimeout)
+	defer cancel()
 	fresh, err := b.revalidate(ctx, d)
 	if err != nil {
 		return err

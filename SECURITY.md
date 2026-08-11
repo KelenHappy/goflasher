@@ -39,7 +39,8 @@ are not a substitute for reviewing the GitHub release and repository history.
 ## Privilege boundary
 
 The GUI must not be run as root and is never granted a raw-device descriptor.
-Unmount and power-off remain delegated to `udisksctl`. Write, read-back, and
+Unmount and power-off remain delegated to UDisks2 through its system D-Bus API.
+Write, read-back, and
 flush are performed by the root-owned `/usr/libexec/goflasher-helper`, launched
 by `pkexec` under the packaged polkit policy.
 

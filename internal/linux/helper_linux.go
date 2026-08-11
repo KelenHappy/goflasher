@@ -158,26 +158,42 @@ type progressParser struct {
 
 func (p *progressParser) Write(b []byte) (int, error) {
 	p.buf = append(p.buf, b...)
-	for {
-		idx := bytes.IndexByte(p.buf, '\n')
-		if idx == -1 {
-			break
-		}
-		line := string(p.buf[:idx])
-		p.buf = p.buf[idx+1:]
-		if strings.HasPrefix(line, "PROGRESS ") {
-			var processed, total uint64
-			if n, _ := fmt.Sscanf(line, "PROGRESS %d %d", &processed, &total); n == 2 {
-				if p.updates != nil {
-					p.updates <- progress.Calculate(progress.StageFormatting, processed, total, 0)
-				}
-				continue
-			}
-		}
-		p.builder.WriteString(line)
-		p.builder.WriteByte('\n')
+	for line, ok := p.nextLine(); ok; line, ok = p.nextLine() {
+		p.writeLine(line)
 	}
 	return len(b), nil
+}
+
+func (p *progressParser) nextLine() (string, bool) {
+	idx := bytes.IndexByte(p.buf, '\n')
+	if idx < 0 {
+		return "", false
+	}
+	line := string(p.buf[:idx])
+	p.buf = p.buf[idx+1:]
+	return line, true
+}
+
+func (p *progressParser) writeLine(line string) {
+	if update, ok := formattingProgress(line); ok {
+		if p.updates != nil {
+			p.updates <- update
+		}
+		return
+	}
+	p.builder.WriteString(line)
+	p.builder.WriteByte('\n')
+}
+
+func formattingProgress(line string) (progress.Update, bool) {
+	if !strings.HasPrefix(line, "PROGRESS ") {
+		return progress.Update{}, false
+	}
+	var processed, total uint64
+	if n, _ := fmt.Sscanf(line, "PROGRESS %d %d", &processed, &total); n != 2 {
+		return progress.Update{}, false
+	}
+	return progress.Calculate(progress.StageFormatting, processed, total, 0), true
 }
 
 type bufferedReadCloser struct {
@@ -415,82 +431,134 @@ type randomAccessSyncer interface {
 // Keeping this small formatter in-process avoids executing distribution tools
 // as root and makes packaged formatting independent of dosfstools.
 func formatFAT32(device randomAccessSyncer, size uint64, label string, errOut io.Writer) error {
-	const sectorSize, reserved, fatCount = uint64(512), uint64(32), uint64(2)
-	if size < 64<<20 || size/sectorSize > uint64(^uint32(0)) {
-		return errors.New("device size is not supported by FAT32")
+	layout, err := newFAT32Layout(size)
+	if err != nil {
+		return err
 	}
-	totalSectors := size / sectorSize
-	sectorsPerCluster := fat32SectorsPerCluster(size)
-	// The usual fixed-point iteration can oscillate forever between adjacent
-	// sector counts for valid device sizes. Find the smallest FAT that can hold
-	// its resulting cluster count with a bounded monotonic search instead.
+	formatter := fat32Formatter{device: device, layout: layout, label: label, progress: errOut}
+	return formatter.run()
+}
+
+const (
+	fat32SectorSize = uint64(512)
+	fat32Reserved   = uint64(32)
+	fat32FATCount   = uint64(2)
+)
+
+type fat32Layout struct {
+	totalSectors, sectorsPerCluster, fatSectors, clusters uint64
+}
+
+func newFAT32Layout(size uint64) (fat32Layout, error) {
+	if size < 64<<20 || size/fat32SectorSize > uint64(^uint32(0)) {
+		return fat32Layout{}, errors.New("device size is not supported by FAT32")
+	}
+	total := size / fat32SectorSize
+	clusterSize := fat32SectorsPerCluster(size)
+	fatSectors := requiredFATSectors(total, clusterSize)
+	dataSectors := total - fat32Reserved - fat32FATCount*fatSectors
+	clusters := dataSectors / clusterSize
+	if clusters < 65525 {
+		return fat32Layout{}, errors.New("device is too small for FAT32")
+	}
+	return fat32Layout{totalSectors: total, sectorsPerCluster: clusterSize, fatSectors: fatSectors, clusters: clusters}, nil
+}
+
+// requiredFATSectors uses a bounded monotonic search. The usual fixed-point
+// iteration can oscillate forever between adjacent values for valid sizes.
+func requiredFATSectors(totalSectors, sectorsPerCluster uint64) uint64 {
 	low := uint64(1)
-	high := (((totalSectors-reserved)/sectorsPerCluster+2)*4 + sectorSize - 1) / sectorSize
+	high := (((totalSectors-fat32Reserved)/sectorsPerCluster+2)*4 + fat32SectorSize - 1) / fat32SectorSize
 	for low < high {
 		middle := low + (high-low)/2
-		clusters := (totalSectors - reserved - fatCount*middle) / sectorsPerCluster
-		required := ((clusters+2)*4 + sectorSize - 1) / sectorSize
+		clusters := (totalSectors - fat32Reserved - fat32FATCount*middle) / sectorsPerCluster
+		required := ((clusters+2)*4 + fat32SectorSize - 1) / fat32SectorSize
 		if required <= middle {
 			high = middle
 		} else {
 			low = middle + 1
 		}
 	}
-	fatSectors := low
-	dataSectors := totalSectors - reserved - fatCount*fatSectors
-	clusters := dataSectors / sectorsPerCluster
-	if clusters < 65525 {
-		return errors.New("device is too small for FAT32")
-	}
-	// Clear both GPT metadata areas before creating the filesystem. Merely
-	// replacing sector zero and the backup GPT header leaves partition-entry
-	// arrays behind, which recovery tools can mistake for a still-valid layout.
-	// The first 32 sectors are FAT32's reserved area and are rewritten below;
-	// the final 33 sectors are outside the filesystem's allocated clusters.
-	if err := writeFullAt(device, make([]byte, reserved*sectorSize), 0); err != nil {
-		return err
-	}
-	fmt.Fprintf(errOut, "PROGRESS 10 100\n")
-	if err := writeFullAt(device, make([]byte, 33*sectorSize), int64((totalSectors-33)*sectorSize)); err != nil {
-		return err
-	}
-	fmt.Fprintf(errOut, "PROGRESS 15 100\n")
+	return low
+}
 
-	boot := fat32BootSector(uint32(totalSectors), uint32(fatSectors), byte(sectorsPerCluster), label)
-	fsinfo := fat32FSInfo(uint32(clusters))
-	for _, write := range []struct {
+type fat32Formatter struct {
+	device   randomAccessSyncer
+	layout   fat32Layout
+	label    string
+	progress io.Writer
+}
+
+type formatPhase struct {
+	percent uint64
+	write   func() error
+}
+
+func (f *fat32Formatter) run() error {
+	phases := []formatPhase{
+		{10, f.clearPrimaryMetadata},
+		{15, f.clearBackupMetadata},
+		{25, f.writeHeaders},
+		{80, f.writeFATCopies},
+		{90, f.writeRootDirectory},
+		{100, f.device.Sync},
+	}
+	for _, phase := range phases {
+		if err := phase.write(); err != nil {
+			return err
+		}
+		fmt.Fprintf(f.progress, "PROGRESS %d 100\n", phase.percent)
+	}
+	return nil
+}
+
+// Clear both GPT metadata areas before creating the filesystem. The first 32
+// sectors are FAT32's reserved area; the final 33 sectors remain outside the
+// filesystem's allocated clusters.
+func (f *fat32Formatter) clearPrimaryMetadata() error {
+	return writeFullAt(f.device, make([]byte, fat32Reserved*fat32SectorSize), 0)
+}
+
+func (f *fat32Formatter) clearBackupMetadata() error {
+	offset := int64((f.layout.totalSectors - 33) * fat32SectorSize)
+	return writeFullAt(f.device, make([]byte, 33*fat32SectorSize), offset)
+}
+
+func (f *fat32Formatter) writeHeaders() error {
+	boot := fat32BootSector(uint32(f.layout.totalSectors), uint32(f.layout.fatSectors), byte(f.layout.sectorsPerCluster), f.label)
+	fsinfo := fat32FSInfo(uint32(f.layout.clusters))
+	writes := []struct {
 		offset int64
 		data   []byte
-	}{{0, boot}, {512, fsinfo}, {6 * 512, boot}, {7 * 512, fsinfo}} {
-		if err := writeFullAt(device, write.data, write.offset); err != nil {
+	}{{0, boot}, {512, fsinfo}, {6 * 512, boot}, {7 * 512, fsinfo}}
+	for _, write := range writes {
+		if err := writeFullAt(f.device, write.data, write.offset); err != nil {
 			return err
 		}
 	}
-	fmt.Fprintf(errOut, "PROGRESS 25 100\n")
-	fat := make([]byte, fatSectors*sectorSize)
+	return nil
+}
+
+func (f *fat32Formatter) writeFATCopies() error {
+	fat := make([]byte, f.layout.fatSectors*fat32SectorSize)
 	binary.LittleEndian.PutUint32(fat[0:4], 0x0ffffff8)
 	binary.LittleEndian.PutUint32(fat[4:8], 0x0fffffff)
 	binary.LittleEndian.PutUint32(fat[8:12], 0x0fffffff)
-	for copyIndex := uint64(0); copyIndex < fatCount; copyIndex++ {
-		offset := int64((reserved + copyIndex*fatSectors) * sectorSize)
-		if err := writeFullAt(device, fat, offset); err != nil {
+	for copyIndex := uint64(0); copyIndex < fat32FATCount; copyIndex++ {
+		offset := int64((fat32Reserved + copyIndex*f.layout.fatSectors) * fat32SectorSize)
+		if err := writeFullAt(f.device, fat, offset); err != nil {
 			return err
 		}
 	}
-	fmt.Fprintf(errOut, "PROGRESS 80 100\n")
-	root := make([]byte, sectorsPerCluster*sectorSize)
-	copy(root[:11], fatLabel(label))
+	return nil
+}
+
+func (f *fat32Formatter) writeRootDirectory() error {
+	root := make([]byte, f.layout.sectorsPerCluster*fat32SectorSize)
+	copy(root[:11], fatLabel(f.label))
 	root[11] = 0x08
-	rootOffset := int64((reserved + fatCount*fatSectors) * sectorSize)
-	if err := writeFullAt(device, root, rootOffset); err != nil {
-		return err
-	}
-	fmt.Fprintf(errOut, "PROGRESS 90 100\n")
-	err := device.Sync()
-	if err == nil {
-		fmt.Fprintf(errOut, "PROGRESS 100 100\n")
-	}
-	return err
+	offset := int64((fat32Reserved + fat32FATCount*f.layout.fatSectors) * fat32SectorSize)
+	return writeFullAt(f.device, root, offset)
 }
 
 func writeFullAt(target io.WriterAt, data []byte, offset int64) error {
@@ -592,28 +660,38 @@ func supportedUSBDevice(class, real string) bool {
 
 func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, uint32, error) {
 	major, minor, err := readDeviceNumber(filepath.Join(class, "dev"))
-	if err != nil {
-		return 0, 0, ErrDeviceChanged
-	}
-	if major != req.Major || minor != req.Minor {
+	if err != nil || major != req.Major || minor != req.Minor {
 		return 0, 0, ErrDeviceChanged
 	}
 	if readUint(filepath.Join(class, "size"))*512 != req.Capacity {
 		return 0, 0, ErrDeviceChanged
 	}
-	serials := uniqueIdentityValues(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
-	wwns := uniqueIdentityValues(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
-	if req.Serial != "" && !containsIdentity(serials, req.Serial) {
-		return 0, 0, ErrDeviceChanged
-	}
-	if req.WWN != "" && !containsIdentity(wwns, req.WWN) {
-		return 0, 0, ErrDeviceChanged
-	}
-	identities := append(append(serials, wwns...), fmt.Sprintf("%d:%d@%s", major, minor, real))
-	if !containsIdentity(identities, req.Identity) {
+	if !readDeviceIdentities(class, real, major, minor).matches(req) {
 		return 0, 0, ErrDeviceChanged
 	}
 	return major, minor, nil
+}
+
+type deviceIdentities struct {
+	serials, wwns, all []string
+}
+
+func readDeviceIdentities(class, real string, major, minor uint32) deviceIdentities {
+	serials := uniqueIdentityValues(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
+	wwns := uniqueIdentityValues(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
+	all := append(append([]string{}, serials...), wwns...)
+	all = append(all, fmt.Sprintf("%d:%d@%s", major, minor, real))
+	return deviceIdentities{serials: serials, wwns: wwns, all: all}
+}
+
+func (ids deviceIdentities) matches(req privilegedRequest) bool {
+	if req.Serial != "" && !containsIdentity(ids.serials, req.Serial) {
+		return false
+	}
+	if req.WWN != "" && !containsIdentity(ids.wwns, req.WWN) {
+		return false
+	}
+	return containsIdentity(ids.all, req.Identity)
 }
 
 func uniqueIdentityValues(values ...string) []string {

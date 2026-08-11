@@ -21,9 +21,12 @@ type fakeRunner struct {
 	runs        [][]string
 	jsonResults map[string][]runnerResult
 	runResults  []runnerResult
+	deadlines   []bool
 }
 
-func (f *fakeRunner) JSON(_ context.Context, args ...string) ([]byte, error) {
+func (f *fakeRunner) JSON(ctx context.Context, args ...string) ([]byte, error) {
+	_, hasDeadline := ctx.Deadline()
+	f.deadlines = append(f.deadlines, hasDeadline)
 	key := fmt.Sprint(args)
 	if results := f.jsonResults[key]; len(results) > 0 {
 		result := results[0]
@@ -36,7 +39,9 @@ func (f *fakeRunner) JSON(_ context.Context, args ...string) ([]byte, error) {
 	}
 	return out, nil
 }
-func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
+func (f *fakeRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
+	_, hasDeadline := ctx.Deadline()
+	f.deadlines = append(f.deadlines, hasDeadline)
 	f.runs = append(f.runs, append([]string(nil), args...))
 	if len(f.runResults) > 0 {
 		result := f.runResults[0]
@@ -146,7 +151,7 @@ func TestListAllowedDevicesFailsClosed(t *testing.T) {
 	})
 	t.Run("malformed info JSON", func(t *testing.T) {
 		devices, err := (&Backend{runner: sequencedRunner("{bad")}).ListAllowedDevices(context.Background())
-		if err != nil || len(devices) != 0 {
+		if err == nil || len(devices) != 0 {
 			t.Fatalf("devices=%v err=%v", devices, err)
 		}
 	})
@@ -215,11 +220,48 @@ func TestFormatLabelIsSingleArgument(t *testing.T) {
 }
 
 func TestDevicePathConversions(t *testing.T) {
-	if got := rawDevice("/dev/disk12"); got != "/dev/rdisk12" {
-		t.Fatalf("rawDevice() = %q", got)
-	}
 	if got := wholeDevice("/dev/rdisk12"); got != "/dev/disk12" {
 		t.Fatalf("wholeDevice() = %q", got)
+	}
+}
+
+func TestWholeDiskIdentifierValidation(t *testing.T) {
+	valid := map[string]uint32{"disk0": 0, "disk12": 12}
+	for identifier, want := range valid {
+		if got, ok := wholeDiskNumber(identifier); !ok || got != want {
+			t.Errorf("wholeDiskNumber(%q) = %d, %v; want %d, true", identifier, got, ok, want)
+		}
+	}
+	for _, identifier := range []string{"", "disk", "disk4s1", "/dev/disk4", "Disk4", "disk-1", "friendly-name"} {
+		if got, ok := wholeDiskNumber(identifier); ok {
+			t.Errorf("wholeDiskNumber(%q) = %d, true", identifier, got)
+		}
+	}
+}
+
+func TestDeviceFromInfoRequiresMatchingStructuredIdentifiers(t *testing.T) {
+	listed := listedDisk{DeviceIdentifier: "disk4"}
+	base := infoJSON{DeviceIdentifier: "disk4", DeviceNode: "/dev/disk4", DeviceTreePath: "IOService:/USB/disk@1", BusProtocol: "USB", TotalSize: 1024, Whole: true, RemovableMedia: true}
+	if d, ok := deviceFromInfo(listed, base); !ok || d.Path != "/dev/rdisk4" || d.Major != 4 {
+		t.Fatalf("deviceFromInfo() = %+v, %v", d, ok)
+	}
+	changedIdentifier := base
+	changedIdentifier.DeviceIdentifier = "disk5"
+	if _, ok := deviceFromInfo(listed, changedIdentifier); ok {
+		t.Fatal("mismatched DeviceIdentifier was accepted")
+	}
+	changedNode := base
+	changedNode.DeviceNode = "/dev/disk5"
+	if _, ok := deviceFromInfo(listed, changedNode); ok {
+		t.Fatal("mismatched DeviceNode was accepted")
+	}
+}
+
+func TestCommandErrorIncludesStructuredCommandAndStderr(t *testing.T) {
+	cause := errors.New("exit status 1")
+	err := commandError("diskutil", cause, []byte(" permission denied\n"))
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "diskutil") || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("commandError() = %v", err)
 	}
 }
 
@@ -239,5 +281,22 @@ func TestFormatFAT32UsesWholeDeviceAndMBR(t *testing.T) {
 	want := fmt.Sprint([]string{"eraseDisk", "FAT32", "GOFLASHER", "MBRFormat", "/dev/disk4"})
 	if got := fmt.Sprint(runner.runs[0]); got != want {
 		t.Fatalf("format command = %s, want %s", got, want)
+	}
+}
+
+func TestBackendCommandsAlwaysHaveDeadlines(t *testing.T) {
+	runner := sequencedRunner(allowedInfo, allowedInfo)
+	backend := &Backend{runner: runner}
+	devices, err := backend.ListAllowedDevices(context.Background())
+	if err != nil || len(devices) != 1 {
+		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
+	}
+	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i, hasDeadline := range runner.deadlines {
+		if !hasDeadline {
+			t.Errorf("command %d had no context deadline", i)
+		}
 	}
 }

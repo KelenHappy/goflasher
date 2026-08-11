@@ -31,290 +31,368 @@ func main() {
 }
 
 func runApplication(tr i18n.Localizer) {
+	controller := newGUIController(tr)
+	controller.bindActions()
+	controller.view.window.SetContent(container.NewVScroll(windowContent(tr, controller.view)))
+	controller.appendLog(tr.T("log.launched"))
+	controller.refresh()
+	controller.view.window.ShowAndRun()
+}
+
+type applicationView struct {
+	window                                   fyne.Window
+	deviceSelect                             *widget.Select
+	deviceDetail, imageInfo, status, metrics *widget.Label
+	imagePath                                *widget.Entry
+	verifyCheck, ejectCheck                  *widget.Check
+	bar                                      *widget.ProgressBar
+	logs                                     *widget.Entry
+	logPanel                                 *widget.Accordion
+	start, format, choose, refresh, copyLog  *widget.Button
+	copyError                                *widget.Button
+}
+
+type guiController struct {
+	tr       i18n.Localizer
+	view     *applicationView
+	backend  device.Backend
+	machine  *core.StateMachine
+	devices  []device.Device
+	selected device.Device
+	info     image.Info
+	cancel   context.CancelFunc
+	logLines []string
+}
+
+func newGUIController(tr i18n.Localizer) *guiController {
 	configureFyneTranslations(string(tr.Locale()))
 	a := app.NewWithID("org.goflasher.usbwriter")
 	a.Settings().SetTheme(newReadableTheme())
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(fyne.NewSize(720, 620))
-	backend := newBackend()
-	machine := core.NewStateMachine()
-	var devices []device.Device
-	var selected device.Device
-	var info image.Info
-	var cancel context.CancelFunc
-	deviceSelect := widget.NewSelect(nil, nil)
-	deviceDetail := widget.NewLabel(tr.T("device.none"))
-	deviceDetail.Wrapping = fyne.TextWrapWord
-	imagePath := widget.NewEntry()
-	imagePath.Disable()
-	imageInfo := widget.NewLabel(tr.T("image.empty"))
-	verifyCheck := widget.NewCheck(tr.T("option.verify"), nil)
-	verifyCheck.SetChecked(true)
-	ejectCheck := widget.NewCheck(tr.T("option.eject"), nil)
-	ejectCheck.SetChecked(true)
-	status := widget.NewLabel(tr.T("status.ready"))
-	bar := widget.NewProgressBar()
+	view := newApplicationView(tr, w)
+	return &guiController{tr: tr, view: view, backend: newBackend(), machine: core.NewStateMachine()}
+}
 
-	metrics := widget.NewLabel(tr.T("metrics.empty"))
-	logs := widget.NewMultiLineEntry()
-	logs.Disable()
-	logItem := widget.NewAccordionItem(tr.T("log.details"), logs)
-	logPanel := widget.NewAccordion(logItem)
-	logPanel.CloseAll()
-	start := widget.NewButton(tr.T("action.start"), nil)
-	format := widget.NewButton(tr.T("action.format_fat32"), nil)
-	format.Disable()
-	copyError := widget.NewButton(tr.T("action.copy_error"), func() { w.Clipboard().SetContent(logs.Text) })
-	copyError.Hide()
-	copyLog := widget.NewButton(tr.T("action.copy_log"), func() { w.Clipboard().SetContent(logs.Text) })
-	var logLines []string
-	const maxLogLines = 500
-	appendLog := func(message string) {
-		line := time.Now().Format("15:04:05 ") + message
-		fyne.Do(func() {
-			logLines = append(logLines, line)
-			if len(logLines) > maxLogLines {
-				logLines = logLines[len(logLines)-maxLogLines:]
-			}
-			logs.SetText(strings.Join(logLines, "\n"))
-		})
-	}
-	formatDevice := func(d device.Device) string {
-		return fmt.Sprintf("%s %s · %.1f GB · %s", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path)
-	}
-	refresh := func() {
-		go func() {
-			list, err := backend.ListAllowedDevices(context.Background())
-			if err != nil {
-				fyne.Do(func() { status.SetText(tr.T("error.devices", err)) })
-				return
-			}
-			fyne.Do(func() {
-				devices = list
-				options := make([]string, len(list))
-				for i, d := range list {
-					options[i] = formatDevice(d)
-				}
-				deviceSelect.Options = options
-				deviceSelect.Refresh()
-			})
-			appendLog(tr.T("log.devices", len(list)))
-		}()
-	}
-	refreshButton := widget.NewButton(tr.T("action.rescan"), refresh)
-	deviceSelect.OnChanged = func(value string) {
-		for _, d := range devices {
-			if formatDevice(d) == value {
-				selected = d
-				deviceDetail.SetText(tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(tr, d.IsCardReader), localBool(tr, d.Mounted), d.PartitionCount))
-				advanceSelection(machine, info.Path != "", core.ImageSelected, core.DeviceSelected)
-				format.Enable()
-				break
-			}
+func newApplicationView(tr i18n.Localizer, w fyne.Window) *applicationView {
+	v := &applicationView{window: w}
+	v.deviceSelect = widget.NewSelect(nil, nil)
+	v.deviceDetail = widget.NewLabel(tr.T("device.none"))
+	v.deviceDetail.Wrapping = fyne.TextWrapWord
+	v.imagePath = widget.NewEntry()
+	v.imagePath.Disable()
+	v.imageInfo = widget.NewLabel(tr.T("image.empty"))
+	v.verifyCheck = widget.NewCheck(tr.T("option.verify"), nil)
+	v.verifyCheck.SetChecked(true)
+	v.ejectCheck = widget.NewCheck(tr.T("option.eject"), nil)
+	v.ejectCheck.SetChecked(true)
+	v.status = widget.NewLabel(tr.T("status.ready"))
+	v.bar = widget.NewProgressBar()
+	v.metrics = widget.NewLabel(tr.T("metrics.empty"))
+	v.logs = widget.NewMultiLineEntry()
+	v.logs.Disable()
+	v.logPanel = widget.NewAccordion(widget.NewAccordionItem(tr.T("log.details"), v.logs))
+	v.logPanel.CloseAll()
+	v.start = widget.NewButton(tr.T("action.start"), nil)
+	v.format = widget.NewButton(tr.T("action.format_fat32"), nil)
+	v.format.Disable()
+	v.choose = widget.NewButton(tr.T("action.choose"), nil)
+	v.refresh = widget.NewButton(tr.T("action.rescan"), nil)
+	v.copyError = widget.NewButton(tr.T("action.copy_error"), func() { w.Clipboard().SetContent(v.logs.Text) })
+	v.copyError.Hide()
+	v.copyLog = widget.NewButton(tr.T("action.copy_log"), func() { w.Clipboard().SetContent(v.logs.Text) })
+	return v
+}
+
+func (c *guiController) bindActions() {
+	c.view.refresh.OnTapped = c.refresh
+	c.view.deviceSelect.OnChanged = c.selectDevice
+	c.view.choose.OnTapped = c.chooseImage
+	c.view.format.OnTapped = c.formatDevice
+	c.view.start.OnTapped = c.startWrite
+}
+
+func (c *guiController) appendLog(message string) {
+	line := time.Now().Format("15:04:05 ") + message
+	fyne.Do(func() {
+		c.logLines = append(c.logLines, line)
+		const maxLogLines = 500
+		if len(c.logLines) > maxLogLines {
+			c.logLines = c.logLines[len(c.logLines)-maxLogLines:]
 		}
-	}
-	var choose *widget.Button
-	choose = widget.NewButton(tr.T("action.choose"), func() {
-		choose.Disable()
-		openImage(w, tr.T("picker.image.title"), tr.T("picker.image.accept"), tr.T("action.cancel"), tr.T("filter.images"), func(path string, err error) {
-			choose.Enable()
-			if err != nil {
-				dialog.ShowError(err, w)
-				return
-			}
-			if path == "" {
-				return
-			}
-			go func() {
-				detected, err := image.Detect(path)
-				if err != nil {
-					fyne.Do(func() { dialog.ShowError(err, w) })
-					return
-				}
-				fyne.Do(func() {
-					info = detected
-					imagePath.SetText(path)
-					imageInfo.SetText(tr.T("image.details", info.Format, info.Compression, float64(info.CompressedSize)/(1<<20)))
-					advanceSelection(machine, selected.Path != "", core.DeviceSelected, core.ImageSelected)
-				})
-				appendLog(tr.T("log.image", filepath.Base(path)))
-			}()
-		})
+		c.view.logs.SetText(strings.Join(c.logLines, "\n"))
 	})
-	lock := func(v bool) {
-		if v {
-			deviceSelect.Disable()
-			refreshButton.Disable()
-			choose.Disable()
-			format.Disable()
-			verifyCheck.Disable()
-			ejectCheck.Disable()
-		} else {
-			deviceSelect.Enable()
-			refreshButton.Enable()
-			choose.Enable()
-			if selected.Path != "" {
-				format.Enable()
-			}
-			verifyCheck.Enable()
-			ejectCheck.Enable()
-		}
-	}
-	format.OnTapped = func() {
-		formatter, ok := backend.(device.FAT32Formatter)
-		if !ok || selected.Path == "" {
-			dialog.ShowInformation(tr.T("dialog.not_ready.title"), tr.T("dialog.format.not_ready"), w)
-			return
-		}
-		body := widget.NewLabel(tr.T("format.confirm.body", selected.Vendor, selected.Model, selected.Path, float64(selected.Size)/1e9, selected.Serial))
-		body.Wrapping = fyne.TextWrapWord
-		confirm := dialog.NewCustomConfirm(tr.T("format.confirm.title"), tr.T("format.confirm.accept"), tr.T("action.cancel"), body, func(ok bool) {
-			if !ok {
-				return
-			}
-			lock(true)
-			status.SetText(tr.T("status.formatting"))
-			bar.SetValue(0)
-			bar.Show()
-			metrics.SetText(tr.T("metrics.empty"))
-			appendLog(tr.T("log.format.start", selected.Path))
-			updates := make(chan progress.Update, 100)
-			go func() {
-				for u := range updates {
-					u := u
-					fyne.Do(func() {
-						bar.SetValue(overallProgress(u, false))
-						status.SetText(tr.T("stage." + string(u.Stage)))
-						metrics.SetText(tr.T("metrics.formatting", int(u.BytesProcessed)))
-					})
-				}
-			}()
-			go func(target device.Device) {
-				err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER", updates)
-				close(updates)
-				fyne.Do(func() {
-					lock(false)
-					bar.Show()
-					if err != nil {
-						status.SetText(tr.T("status.failed", err))
-						appendLog(tr.T("log.error", err))
-						copyError.Show()
-						dialog.ShowError(err, w)
-						return
-					}
-					status.SetText(tr.T("status.format.complete"))
-					bar.SetValue(1)
-					appendLog(tr.T("log.format.complete"))
-					refresh()
-				})
-			}(selected)
-		}, w)
-		confirm.SetDismissText(tr.T("action.cancel"))
-		confirm.Show()
-	}
-	start.OnTapped = func() {
-		resetFinishedState(machine)
-		switch machine.State() {
-		case core.Writing, core.Flushing, core.Verifying, core.Ejecting, core.Unmounting:
-			if cancel != nil {
-				cancel()
-				status.SetText(tr.T("status.cancelling"))
-				appendLog(tr.T("log.cancel"))
-			}
-			return
-		}
-		if machine.State() != core.Ready {
-			dialog.ShowInformation(tr.T("dialog.not_ready.title"), tr.T("dialog.not_ready.body"), w)
-			return
-		}
-		_ = machine.Transition(core.Confirming)
-		lock(true)
-		body := widget.NewLabel(tr.T("confirm.body", selected.Vendor, selected.Model, selected.Path, float64(selected.Size)/1e9, selected.Serial, filepath.Base(info.Path), float64(info.CompressedSize)/(1<<20)))
-		body.Wrapping = fyne.TextWrapWord
-		confirm := dialog.NewCustomConfirm(tr.T("confirm.title"), tr.T("confirm.accept"), tr.T("action.cancel"), body, func(ok bool) {
-			if !ok {
-				_ = machine.Transition(core.Ready)
-				lock(false)
-				return
-			}
-			ctx, c := context.WithCancel(context.Background())
-			cancel = c
-			start.SetText(tr.T("action.cancel"))
-			status.SetText(tr.T("status.preparing"))
+}
 
-			bar.Show()
-			bar.SetValue(0)
-			appendLog(tr.T("log.start"))
-			updates := make(chan progress.Update, 32)
-			go func() {
-				for u := range updates {
-					u := u
-					fyne.Do(func() {
-						status.SetText(tr.T("stage." + string(u.Stage)))
-						bar.SetValue(overallProgress(u, verifyCheck.Checked))
-						if u.TotalBytes > 0 {
-							metrics.SetText(tr.T("metrics.progress", u.BytesPerSecond/(1<<20), float64(u.BytesProcessed)/(1<<20), u.ETA.Round(time.Second)))
-						} else {
-							metrics.SetText(tr.T("metrics.finalizing"))
-						}
-					})
-				}
-			}()
-			go func() {
-				result, runErr := (&core.Service{Backend: backend, State: machine}).Run(ctx, info, selected, core.RunOptions{Verify: verifyCheck.Checked, Eject: ejectCheck.Checked}, updates)
-				close(updates)
-				fyne.Do(func() {
-					cancel = nil
-					if runErr != nil {
-						status.SetText(tr.T("status.failed", userError(tr, runErr)))
-						appendLog(tr.T("log.error", runErr))
-						copyError.Show()
-						if machine.State() == core.Cancelled {
-							status.SetText(tr.T("status.cancelled"))
-						}
-						start.SetText(tr.T("action.retry"))
-					} else {
-						status.SetText(tr.T("status.complete"))
-						bar.SetValue(1)
-						appendLog(tr.T("log.complete", result.BytesWritten, localBool(tr, result.Verified), localBool(tr, result.Ejected), result.Elapsed.Round(time.Second)))
-						metrics.SetText(tr.T("metrics.complete", result.AverageBytesPerSecond/(1<<20), result.Elapsed.Round(time.Second)))
-						start.SetText(tr.T("action.restart"))
-					}
-					lock(false)
-				})
-			}()
-		}, w)
-		confirm.SetDismissText(tr.T("action.cancel"))
-		confirm.Show()
+func deviceDisplay(d device.Device) string {
+	return fmt.Sprintf("%s %s · %.1f GB · %s", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path)
+}
+
+func (c *guiController) refresh() {
+	go func() {
+		list, err := c.backend.ListAllowedDevices(context.Background())
+		if err != nil {
+			fyne.Do(func() { c.view.status.SetText(c.tr.T("error.devices", err)) })
+			return
+		}
+		fyne.Do(func() {
+			c.devices = list
+			options := make([]string, len(list))
+			for i, d := range list {
+				options[i] = deviceDisplay(d)
+			}
+			c.view.deviceSelect.Options = options
+			c.view.deviceSelect.Refresh()
+		})
+		c.appendLog(c.tr.T("log.devices", len(list)))
+	}()
+}
+
+func (c *guiController) selectDevice(value string) {
+	for _, d := range c.devices {
+		if deviceDisplay(d) != value {
+			continue
+		}
+		c.selected = d
+		c.view.deviceDetail.SetText(c.tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(c.tr, d.IsCardReader), localBool(c.tr, d.Mounted), d.PartitionCount))
+		advanceSelection(c.machine, c.info.Path != "", core.ImageSelected, core.DeviceSelected)
+		c.view.format.Enable()
+		return
 	}
-	content := windowContent(tr, deviceSelect, deviceDetail, refreshButton, format, choose, imagePath, imageInfo, verifyCheck, ejectCheck, status, bar, metrics, copyLog, copyError, start, logPanel)
-	w.SetContent(container.NewVScroll(content))
-	appendLog(tr.T("log.launched"))
-	refresh()
-	w.ShowAndRun()
+}
+
+func (c *guiController) chooseImage() {
+	c.view.choose.Disable()
+	openImage(c.view.window, c.tr.T("picker.image.title"), c.tr.T("picker.image.accept"), c.tr.T("action.cancel"), c.tr.T("filter.images"), func(path string, err error) {
+		c.view.choose.Enable()
+		if err != nil {
+			dialog.ShowError(err, c.view.window)
+			return
+		}
+		if path != "" {
+			c.detectImage(path)
+		}
+	})
+}
+
+func (c *guiController) detectImage(path string) {
+	go func() {
+		detected, err := image.Detect(path)
+		if err != nil {
+			fyne.Do(func() { dialog.ShowError(err, c.view.window) })
+			return
+		}
+		fyne.Do(func() {
+			c.info = detected
+			c.view.imagePath.SetText(path)
+			c.view.imageInfo.SetText(c.tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
+			advanceSelection(c.machine, c.selected.Path != "", core.DeviceSelected, core.ImageSelected)
+		})
+		c.appendLog(c.tr.T("log.image", filepath.Base(path)))
+	}()
+}
+
+func (c *guiController) lock(locked bool) {
+	controls := []fyne.Disableable{c.view.deviceSelect, c.view.refresh, c.view.choose, c.view.verifyCheck, c.view.ejectCheck}
+	for _, control := range controls {
+		if locked {
+			control.Disable()
+		} else {
+			control.Enable()
+		}
+	}
+	if locked || c.selected.Path == "" {
+		c.view.format.Disable()
+	} else {
+		c.view.format.Enable()
+	}
+}
+
+func (c *guiController) formatDevice() {
+	formatter, ok := c.backend.(device.FAT32Formatter)
+	if !ok || c.selected.Path == "" {
+		dialog.ShowInformation(c.tr.T("dialog.not_ready.title"), c.tr.T("dialog.format.not_ready"), c.view.window)
+		return
+	}
+	body := widget.NewLabel(c.tr.T("format.confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial))
+	body.Wrapping = fyne.TextWrapWord
+	confirm := dialog.NewCustomConfirm(c.tr.T("format.confirm.title"), c.tr.T("format.confirm.accept"), c.tr.T("action.cancel"), body, func(ok bool) {
+		if ok {
+			c.runFormat(formatter, c.selected)
+		}
+	}, c.view.window)
+	confirm.SetDismissText(c.tr.T("action.cancel"))
+	confirm.Show()
+}
+
+func (c *guiController) runFormat(formatter device.FAT32Formatter, target device.Device) {
+	c.lock(true)
+	c.view.status.SetText(c.tr.T("status.formatting"))
+	c.view.bar.SetValue(0)
+	c.view.bar.Show()
+	c.view.metrics.SetText(c.tr.T("metrics.empty"))
+	c.appendLog(c.tr.T("log.format.start", target.Path))
+	updates := make(chan progress.Update, 100)
+	go c.consumeFormatProgress(updates)
+	go func() {
+		err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER", updates)
+		close(updates)
+		fyne.Do(func() { c.finishFormat(err) })
+	}()
+}
+
+func (c *guiController) consumeFormatProgress(updates <-chan progress.Update) {
+	for update := range updates {
+		u := update
+		fyne.Do(func() {
+			c.view.bar.SetValue(overallProgress(u, false))
+			c.view.status.SetText(c.tr.T("stage." + string(u.Stage)))
+			c.view.metrics.SetText(c.tr.T("metrics.formatting", int(u.BytesProcessed)))
+		})
+	}
+}
+
+func (c *guiController) finishFormat(err error) {
+	c.lock(false)
+	c.view.bar.Show()
+	if err != nil {
+		c.view.status.SetText(c.tr.T("status.failed", err))
+		c.appendLog(c.tr.T("log.error", err))
+		c.view.copyError.Show()
+		dialog.ShowError(err, c.view.window)
+		return
+	}
+	c.view.status.SetText(c.tr.T("status.format.complete"))
+	c.view.bar.SetValue(1)
+	c.appendLog(c.tr.T("log.format.complete"))
+	c.refresh()
+}
+
+func (c *guiController) startWrite() {
+	resetFinishedState(c.machine)
+	if writingState(c.machine.State()) {
+		c.cancelWrite()
+		return
+	}
+	if c.machine.State() != core.Ready {
+		dialog.ShowInformation(c.tr.T("dialog.not_ready.title"), c.tr.T("dialog.not_ready.body"), c.view.window)
+		return
+	}
+	_ = c.machine.Transition(core.Confirming)
+	c.lock(true)
+	body := widget.NewLabel(c.tr.T("confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial, filepath.Base(c.info.Path), float64(c.info.CompressedSize)/(1<<20)))
+	body.Wrapping = fyne.TextWrapWord
+	confirm := dialog.NewCustomConfirm(c.tr.T("confirm.title"), c.tr.T("confirm.accept"), c.tr.T("action.cancel"), body, c.confirmWrite, c.view.window)
+	confirm.SetDismissText(c.tr.T("action.cancel"))
+	confirm.Show()
+}
+
+func writingState(state core.State) bool {
+	switch state {
+	case core.Writing, core.Flushing, core.Verifying, core.Ejecting, core.Unmounting:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *guiController) cancelWrite() {
+	if c.cancel != nil {
+		c.cancel()
+		c.view.status.SetText(c.tr.T("status.cancelling"))
+		c.appendLog(c.tr.T("log.cancel"))
+	}
+}
+
+func (c *guiController) confirmWrite(ok bool) {
+	if !ok {
+		_ = c.machine.Transition(core.Ready)
+		c.lock(false)
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	c.view.start.SetText(c.tr.T("action.cancel"))
+	c.view.status.SetText(c.tr.T("status.preparing"))
+	c.view.bar.Show()
+	c.view.bar.SetValue(0)
+	c.appendLog(c.tr.T("log.start"))
+	updates := make(chan progress.Update, 32)
+	go c.consumeWriteProgress(updates)
+	go func() {
+		result, err := (&core.Service{Backend: c.backend, State: c.machine}).Run(ctx, c.info, c.selected, core.RunOptions{Verify: c.view.verifyCheck.Checked, Eject: c.view.ejectCheck.Checked}, updates)
+		close(updates)
+		fyne.Do(func() { c.finishWrite(result, err) })
+	}()
+}
+
+func (c *guiController) consumeWriteProgress(updates <-chan progress.Update) {
+	for update := range updates {
+		u := update
+		fyne.Do(func() {
+			c.view.status.SetText(c.tr.T("stage." + string(u.Stage)))
+			c.view.bar.SetValue(overallProgress(u, c.view.verifyCheck.Checked))
+			if u.TotalBytes > 0 {
+				c.view.metrics.SetText(c.tr.T("metrics.progress", u.BytesPerSecond/(1<<20), float64(u.BytesProcessed)/(1<<20), u.ETA.Round(time.Second)))
+			} else {
+				c.view.metrics.SetText(c.tr.T("metrics.finalizing"))
+			}
+		})
+	}
+}
+
+func (c *guiController) finishWrite(result core.RunResult, runErr error) {
+	c.cancel = nil
+	if runErr != nil {
+		c.view.status.SetText(c.tr.T("status.failed", userError(c.tr, runErr)))
+		c.appendLog(c.tr.T("log.error", runErr))
+		c.view.copyError.Show()
+		if c.machine.State() == core.Cancelled {
+			c.view.status.SetText(c.tr.T("status.cancelled"))
+		}
+		c.view.start.SetText(c.tr.T("action.retry"))
+	} else {
+		c.view.status.SetText(c.tr.T("status.complete"))
+		c.view.bar.SetValue(1)
+		c.appendLog(c.tr.T("log.complete", result.BytesWritten, localBool(c.tr, result.Verified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
+		c.view.metrics.SetText(c.tr.T("metrics.complete", result.AverageBytesPerSecond/(1<<20), result.Elapsed.Round(time.Second)))
+		c.view.start.SetText(c.tr.T("action.restart"))
+	}
+	c.lock(false)
 }
 
 func overallProgress(update progress.Update, verify bool) float64 {
-	ratio := 0.0
-	if update.TotalBytes > 0 {
-		ratio = float64(update.BytesProcessed) / float64(update.TotalBytes)
-		if ratio > 1 {
-			ratio = 1
-		}
-	}
+	ratio := progressRatio(update)
 	if verify {
-		switch update.Stage {
-		case progress.StageWriting, progress.StageDecompressWriting:
-			return ratio * 0.45
-		case progress.StageFlushing:
-			return 0.45
-		case progress.StageVerifying:
-			return 0.45 + ratio*0.50
-		case progress.StageEjecting:
-			return 0.95
-		}
+		return verifyProgress(update.Stage, ratio)
 	}
-	switch update.Stage {
+	return writeProgress(update.Stage, ratio)
+}
+
+func progressRatio(update progress.Update) float64 {
+	if update.TotalBytes == 0 {
+		return 0
+	}
+	return min(float64(update.BytesProcessed)/float64(update.TotalBytes), 1)
+}
+
+func verifyProgress(stage progress.Stage, ratio float64) float64 {
+	switch stage {
+	case progress.StageWriting, progress.StageDecompressWriting:
+		return ratio * 0.45
+	case progress.StageFlushing:
+		return 0.45
+	case progress.StageVerifying:
+		return 0.45 + ratio*0.50
+	case progress.StageEjecting:
+		return 0.95
+	default:
+		return 0
+	}
+}
+
+func writeProgress(stage progress.Stage, ratio float64) float64 {
+	switch stage {
 	case progress.StageFormatting:
 		return ratio
 	case progress.StageWriting, progress.StageDecompressWriting:
@@ -323,8 +401,9 @@ func overallProgress(update progress.Update, verify bool) float64 {
 		return 0.90
 	case progress.StageEjecting:
 		return 0.95
+	default:
+		return 0
 	}
-	return 0
 }
 
 func advanceSelection(machine *core.StateMachine, counterpartSelected bool, waitingState, selectedState core.State) {
@@ -346,13 +425,13 @@ func resetFinishedState(machine *core.StateMachine) {
 	}
 }
 
-func windowContent(tr i18n.Localizer, deviceSelect *widget.Select, deviceDetail *widget.Label, refreshButton, format, choose *widget.Button, imagePath *widget.Entry, imageInfo *widget.Label, verifyCheck, ejectCheck *widget.Check, status *widget.Label, bar *widget.ProgressBar, metrics *widget.Label, copyLog, copyError, start *widget.Button, logPanel *widget.Accordion) *fyne.Container {
-	deviceCard := widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, container.NewHBox(refreshButton, format), deviceSelect), deviceDetail))
-	imageCard := widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, choose, imagePath))
-	optionsCard := widget.NewCard(tr.T("card.options"), "", container.NewVBox(verifyCheck, ejectCheck))
-	progressCard := widget.NewCard(tr.T("card.progress"), "", container.NewVBox(status, bar, metrics))
-	actions := container.NewBorder(nil, nil, container.NewHBox(copyLog, copyError), start, logPanel)
-	return container.NewVBox(deviceCard, imageCard, widget.NewCard(tr.T("card.image_info"), "", imageInfo), optionsCard, progressCard, actions)
+func windowContent(tr i18n.Localizer, v *applicationView) *fyne.Container {
+	deviceCard := widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, container.NewHBox(v.refresh, v.format), v.deviceSelect), v.deviceDetail))
+	imageCard := widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, v.choose, v.imagePath))
+	optionsCard := widget.NewCard(tr.T("card.options"), "", container.NewVBox(v.verifyCheck, v.ejectCheck))
+	progressCard := widget.NewCard(tr.T("card.progress"), "", container.NewVBox(v.status, v.bar, v.metrics))
+	actions := container.NewBorder(nil, nil, container.NewHBox(v.copyLog, v.copyError), v.start, v.logPanel)
+	return container.NewVBox(deviceCard, imageCard, widget.NewCard(tr.T("card.image_info"), "", v.imageInfo), optionsCard, progressCard, actions)
 }
 
 func userError(tr i18n.Localizer, err error) string {

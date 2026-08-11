@@ -40,6 +40,10 @@ jobs:
         run: |
           test -z "$(rg 'exec\.Command(Context)?\([^)]*xz' internal || true)"
           test -z "$(rg '^Depends:.*xz-utils|^Requires: xz$' packaging || true)"
+      - name: Reject udisksctl CLI regressions
+        run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udisksctl|Output\([^)]*udisksctl' internal || true)"
+      - name: Reject udevadm CLI regressions
+        run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udevadm|Output\([^)]*udevadm' internal || true)"
       - run: go vet ./...
       - run: go test -race ./...
 

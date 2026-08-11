@@ -10,14 +10,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/goflasher/goflasher/internal/progress"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/progress"
 )
 
 var (
@@ -35,19 +36,40 @@ type commandRunner interface {
 type diskutilRunner struct{}
 
 func (diskutilRunner) JSON(ctx context.Context, args ...string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, errors.New("diskutil: missing command")
+	}
 	commandArgs := append([]string{args[0], "-plist"}, args[1:]...)
-	plist, err := exec.CommandContext(ctx, "diskutil", commandArgs...).Output()
+	plist, err := exec.CommandContext(ctx, "diskutil", commandArgs...).CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, commandError("diskutil", err, plist)
 	}
 	cmd := exec.CommandContext(ctx, "plutil", "-convert", "json", "-o", "-", "--", "-")
 	cmd.Stdin = bytes.NewReader(plist)
-	return cmd.Output()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, commandError("plutil", err, out)
+	}
+	return out, nil
 }
 
 func (diskutilRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "diskutil", args...).CombinedOutput()
 }
+
+func commandError(command string, err error, output []byte) error {
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		return fmt.Errorf("%s: %w", command, err)
+	}
+	return fmt.Errorf("%s: %w: %s", command, err, detail)
+}
+
+const (
+	queryTimeout     = 30 * time.Second
+	operationTimeout = 2 * time.Minute
+	formatTimeout    = 10 * time.Minute
+)
 
 type Backend struct{ runner commandRunner }
 
@@ -80,6 +102,8 @@ type infoJSON struct {
 }
 
 func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
 	out, err := b.runner.JSON(ctx, "list", "external", "physical")
 	if err != nil {
 		return nil, fmt.Errorf("list macOS disks: %w", err)
@@ -90,42 +114,69 @@ func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
 	}
 	result := make([]device.Device, 0, len(listing.Disks))
 	for _, listed := range listing.Disks {
+		if _, ok := wholeDiskNumber(listed.DeviceIdentifier); !ok {
+			continue
+		}
 		infoOut, err := b.runner.JSON(ctx, "info", listed.DeviceIdentifier)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("inspect macOS disk %q: %w", listed.DeviceIdentifier, err)
 		}
 		var info infoJSON
-		if json.Unmarshal(infoOut, &info) != nil {
-			continue
+		if err := json.Unmarshal(infoOut, &info); err != nil {
+			return nil, fmt.Errorf("decode macOS disk %q info: %w", listed.DeviceIdentifier, err)
 		}
-		// DeviceTreePath identifies the physical attachment and is independent of
-		// partition contents, unlike filesystem/disk UUIDs overwritten by a flash.
-		id := strings.TrimSpace(info.DeviceTreePath)
-		number, _ := strconv.ParseUint(strings.TrimPrefix(info.DeviceIdentifier, "disk"), 10, 32)
-		mounts := make([]string, 0, len(listed.Partitions))
-		for _, partition := range listed.Partitions {
-			if partition.MountPoint != "" {
-				mounts = append(mounts, partition.MountPoint)
-			}
+		if d, ok := deviceFromInfo(listed, info); ok {
+			result = append(result, d)
 		}
-		d := device.Device{
-			ID: id, Path: rawDevice(info.DeviceNode), Model: first(info.MediaName, info.IORegistryEntryName),
-			Transport: strings.ToLower(info.BusProtocol), SysfsPath: info.DeviceTreePath,
-			Major: uint32(number), Size: info.TotalSize, IsCardReader: info.Ejectable,
-			Mounted: len(mounts) > 0, MountPoints: mounts, PartitionCount: len(listed.Partitions),
-			IsSystemDisk: info.Internal,
-		}
-		switch {
-		case d.IsSystemDisk:
-			d.RejectReason = ErrSystemDisk.Error()
-		case !info.Whole || !strings.EqualFold(info.BusProtocol, "USB") || !info.RemovableMedia || info.TotalSize == 0 || id == "":
-			d.RejectReason = ErrUnsupportedDevice.Error()
-		default:
-			d.IsAllowed = true
-		}
-		result = append(result, d)
 	}
 	return result, nil
+}
+
+func deviceFromInfo(listed listedDisk, info infoJSON) (device.Device, bool) {
+	number, ok := wholeDiskNumber(listed.DeviceIdentifier)
+	if !ok || info.DeviceIdentifier != listed.DeviceIdentifier || info.DeviceNode != "/dev/"+listed.DeviceIdentifier {
+		return device.Device{}, false
+	}
+	mounts := partitionMounts(listed.Partitions)
+	id := strings.TrimSpace(info.DeviceTreePath)
+	d := device.Device{
+		ID: id, Path: "/dev/r" + listed.DeviceIdentifier, Model: first(info.MediaName, info.IORegistryEntryName),
+		Transport: strings.ToLower(info.BusProtocol), SysfsPath: id,
+		Major: number, Size: info.TotalSize, IsCardReader: info.Ejectable,
+		Mounted: len(mounts) > 0, MountPoints: mounts, PartitionCount: len(listed.Partitions), IsSystemDisk: info.Internal,
+	}
+	classifyDevice(&d, info)
+	return d, true
+}
+
+func wholeDiskNumber(identifier string) (uint32, bool) {
+	digits := strings.TrimPrefix(identifier, "disk")
+	if digits == identifier || digits == "" {
+		return 0, false
+	}
+	number, err := strconv.ParseUint(digits, 10, 32)
+	return uint32(number), err == nil
+}
+
+func partitionMounts(partitions []listedPartition) []string {
+	mounts := make([]string, 0, len(partitions))
+	for _, partition := range partitions {
+		if partition.MountPoint != "" {
+			mounts = append(mounts, partition.MountPoint)
+		}
+	}
+	return mounts
+}
+
+func classifyDevice(d *device.Device, info infoJSON) {
+	switch {
+	case d.IsSystemDisk:
+		d.RejectReason = ErrSystemDisk.Error()
+	case !info.Whole || !strings.EqualFold(info.BusProtocol, "USB") || !info.RemovableMedia || info.TotalSize == 0 || d.ID == "":
+		d.RejectReason = ErrUnsupportedDevice.Error()
+	default:
+		d.IsAllowed = true
+	}
 }
 
 func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
@@ -167,6 +218,8 @@ func (b *Backend) revalidate(ctx context.Context, selected device.Device) (devic
 	return fresh, nil
 }
 func (b *Backend) Unmount(ctx context.Context, selected device.Device) error {
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
 	fresh, err := b.revalidate(ctx, selected)
 	if err != nil {
 		return err
@@ -208,6 +261,8 @@ func (b *Backend) Flush(ctx context.Context, d device.Device) error {
 	return f.Sync()
 }
 func (b *Backend) Eject(ctx context.Context, d device.Device) error {
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
 	fresh, err := b.revalidate(ctx, d)
 	if err != nil {
 		return err
@@ -220,6 +275,8 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 }
 
 func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string, updates chan<- progress.Update) error {
+	ctx, cancel := context.WithTimeout(ctx, formatTimeout)
+	defer cancel()
 	fresh, err := b.revalidate(ctx, d)
 	if err != nil {
 		return err
@@ -234,12 +291,6 @@ func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string
 	return nil
 }
 
-func rawDevice(path string) string {
-	if strings.HasPrefix(path, "/dev/disk") {
-		return strings.Replace(path, "/dev/disk", "/dev/rdisk", 1)
-	}
-	return path
-}
 func wholeDevice(path string) string { return strings.Replace(path, "/dev/rdisk", "/dev/disk", 1) }
 func first(values ...string) string {
 	for _, value := range values {

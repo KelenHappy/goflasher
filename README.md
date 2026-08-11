@@ -61,14 +61,23 @@ native Explorer chooser and PowerShell storage cmdlets; raw disk access requires
 an Administrator session. macOS uses its native Finder chooser and `diskutil`;
 raw disk access requires elevated rights.
 
-The Linux backend reads sysfs, procfs, and udev information. It uses
-`udisksctl` for unmount and power-off operations. The GUI always remains an
+The Linux backend reads sysfs, procfs, and udev information. It calls the
+UDisks2 service directly over the system D-Bus for unmount and power-off
+operations; the `udisksctl` CLI is not required. The GUI always remains an
 ordinary user process. For write, read-back, and flush it sends only a
 revalidated identity, major/minor number, capacity, and fixed operation mode to
 the root-owned `/usr/libexec/goflasher-helper` through `pkexec`; it never asks
 the helper to open a caller-supplied path. A polkit authentication dialog may
 therefore appear for each raw-device phase. Canceling it safely aborts the
 operation.
+
+This does not yet make every platform command-free. Linux reads supplementary
+udev properties directly from `/run/udev/data` and only uses `pkexec` as its
+privilege broker; Windows uses PowerShell Storage/CIM cmdlets; macOS uses `diskutil`, `plutil`, and
+`osascript`. All three native builds are exercised by CI, but Windows and macOS
+still require native-host privileges and physical-media acceptance before a
+release. See [BUILDING.md](BUILDING.md#native-api-and-command-dependencies) for
+the exact boundary and the native-API migration direction.
 
 ## Prebuilt downloads
 
