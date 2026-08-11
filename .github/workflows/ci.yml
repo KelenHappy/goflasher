@@ -3,6 +3,10 @@ name: CI
 on:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -24,8 +28,12 @@ jobs:
       - name: Test native disk manager
         run: go test ./internal/disk
       - run: go test ./...
-      - if: runner.os == 'Windows' || runner.os == 'macOS'
-        run: go build -tags fyne ./cmd/usbwriter
+      # Compile and exercise the GUI code without rebuilding Fyne's native
+      # OpenGL driver on every pull request. Native release builds and the
+      # documented local build commands still use the production `fyne` tag.
+      - name: Test GUI source set
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        run: go test -tags "fyne ci" ./cmd/usbwriter
 
   quality:
     runs-on: ubuntu-latest
@@ -40,6 +48,10 @@ jobs:
         run: |
           test -z "$(rg 'exec\.Command(Context)?\([^)]*xz' internal || true)"
           test -z "$(rg '^Depends:.*xz-utils|^Requires: xz$' packaging || true)"
+      - name: Reject udisksctl CLI regressions
+        run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udisksctl|Output\([^)]*udisksctl' internal || true)"
+      - name: Reject udevadm CLI regressions
+        run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udevadm|Output\([^)]*udevadm' internal || true)"
       - run: go vet ./...
       - run: go test -race ./...
 

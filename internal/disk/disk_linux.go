@@ -7,10 +7,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/goflasher/goflasher/internal/udisks"
 )
 
 type linuxManager struct {
@@ -18,7 +19,7 @@ type linuxManager struct {
 	mountInfo     string
 	swaps         string
 	devRoot       string
-	run           func(context.Context, string, ...string) ([]byte, error)
+	udisks        udisks.Client
 }
 
 // NewManager returns the native Linux implementation without exposing it in
@@ -29,9 +30,7 @@ func NewManager() Manager {
 		mountInfo:     "/proc/self/mountinfo",
 		swaps:         "/proc/swaps",
 		devRoot:       "/dev",
-		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, name, args...).CombinedOutput()
-		},
+		udisks:        udisks.New(),
 	}
 }
 
@@ -135,9 +134,8 @@ func (m *linuxManager) Unmount(ctx context.Context, selected Disk) error {
 		if source == "" {
 			return fmt.Errorf("%w: mount source for %s not found", ErrUnmountFailed, point)
 		}
-		out, runErr := m.run(ctx, "udisksctl", "unmount", "--block-device", source)
-		if runErr != nil {
-			return fmt.Errorf("%w: %v: %s", ErrUnmountFailed, runErr, strings.TrimSpace(string(out)))
+		if err := m.diskService().Unmount(ctx, source); err != nil {
+			return fmt.Errorf("%w: %s: %v", ErrUnmountFailed, source, err)
 		}
 	}
 	again, err := m.Refresh(ctx, fresh.ID)
@@ -164,11 +162,17 @@ func (m *linuxManager) Eject(ctx context.Context, selected Disk) error {
 	if fresh.Mounted {
 		return ErrUnmountFailed
 	}
-	out, runErr := m.run(ctx, "udisksctl", "power-off", "--block-device", fresh.Device)
-	if runErr != nil {
-		return fmt.Errorf("%w: %v: %s", ErrEjectFailed, runErr, strings.TrimSpace(string(out)))
+	if err := m.diskService().PowerOff(ctx, fresh.Device); err != nil {
+		return fmt.Errorf("%w: %v", ErrEjectFailed, err)
 	}
 	return nil
+}
+
+func (m *linuxManager) diskService() udisks.Client {
+	if m.udisks == nil {
+		m.udisks = udisks.New()
+	}
+	return m.udisks
 }
 
 func (m *linuxManager) revalidate(ctx context.Context, selected Disk) (Disk, error) {

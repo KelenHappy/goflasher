@@ -24,10 +24,13 @@ go test ./internal/image -run XZ
 ```
 
 The normal three-platform CI matrix also compiles and tests `internal/disk` on
-each host OS. Linux unit tests use temporary sysfs, mountinfo, and command-runner
-fixtures, including post-unmount state verification. Windows and macOS tests
+each host OS. Linux unit tests use temporary sysfs, mountinfo, `/run/udev/data`,
+and UDisks-client fixtures, including post-unmount state verification. Windows and macOS tests
 currently assert that their compile-safe outlines return `disk.ErrUnsupported`;
 native behavior tests will be added when those implementations are activated.
+Linux unmount and power-off operations use the UDisks2 system D-Bus API through
+the pure-Go `godbus/dbus` client. CI rejects regressions that invoke the
+`udisksctl` or `udevadm` CLI from Go code.
 
 ## GUI build check
 

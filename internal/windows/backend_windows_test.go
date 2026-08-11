@@ -16,14 +16,17 @@ type runnerResult struct {
 	err    error
 }
 type fakeRunner struct {
-	output  []byte
-	err     error
-	script  string
-	results []runnerResult
-	scripts []string
+	output    []byte
+	err       error
+	script    string
+	results   []runnerResult
+	scripts   []string
+	deadlines []bool
 }
 
-func (f *fakeRunner) Output(_ context.Context, script string) ([]byte, error) {
+func (f *fakeRunner) Output(ctx context.Context, script string) ([]byte, error) {
+	_, hasDeadline := ctx.Deadline()
+	f.deadlines = append(f.deadlines, hasDeadline)
 	f.script = script
 	f.scripts = append(f.scripts, script)
 	if len(f.results) > 0 {
@@ -36,7 +39,7 @@ func (f *fakeRunner) Output(_ context.Context, script string) ([]byte, error) {
 
 func TestListAllowedDevices(t *testing.T) {
 	runner := &fakeRunner{output: []byte(`[
-{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true,"PartitionCount":1,"HasDriveLetter":true},
+{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true,"PartitionCount":1,"MountPoints":["E:\\"]},
 {"Number":0,"FriendlyName":"System SSD","UniqueId":"SYSTEM","Size":1000000000000,"BusType":"NVMe","IsBoot":true,"IsSystem":true}
 ]`)}
 	backend := &Backend{runner: runner}
@@ -48,7 +51,7 @@ func TestListAllowedDevices(t *testing.T) {
 		t.Fatalf("got %d allowed devices, want 1", len(devices))
 	}
 	got := devices[0]
-	if got.ID != "USB-ID" || got.Path != `\\.\PhysicalDrive4` || !got.Mounted || !got.IsAllowed {
+	if got.ID != "USB-ID" || got.Path != `\\.\PhysicalDrive4` || !got.Mounted || !got.IsAllowed || len(got.MountPoints) != 1 || got.MountPoints[0] != `E:\` {
 		t.Fatalf("unexpected allowed device: %+v", got)
 	}
 }
@@ -175,7 +178,9 @@ func TestFormatLabelCannotChangePowerShellStructure(t *testing.T) {
 }
 
 func TestUnmountRevalidatesAndTakesDiskOffline(t *testing.T) {
-	runner := &fakeRunner{output: []byte(`[{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true,"HasDriveLetter":true}]`)}
+	online := `[{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true,"IsOffline":false}]`
+	offline := strings.Replace(online, `"IsOffline":false`, `"IsOffline":true`, 1)
+	runner := &fakeRunner{results: []runnerResult{{output: []byte(online)}, {output: []byte(online)}, {}, {output: []byte(offline)}}}
 	backend := &Backend{runner: runner}
 	devices, err := backend.ListAllowedDevices(context.Background())
 	if err != nil || len(devices) != 1 {
@@ -184,8 +189,23 @@ func TestUnmountRevalidatesAndTakesDiskOffline(t *testing.T) {
 	if err := backend.Unmount(context.Background(), devices[0]); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(runner.script, "Set-Disk -Number 4 -IsOffline $true") {
-		t.Fatalf("unexpected PowerShell script: %q", runner.script)
+	if len(runner.scripts) != 4 {
+		t.Fatalf("PowerShell scripts = %q, want select, revalidate, offline, verify", runner.scripts)
+	}
+	if !strings.Contains(runner.scripts[2], "Set-Disk -Number 4 -IsOffline $true") {
+		t.Fatalf("offline PowerShell script = %q", runner.scripts[2])
+	}
+}
+
+func TestUnmountFailsIfDiskRemainsOnline(t *testing.T) {
+	runner := &fakeRunner{output: []byte(allowedDisk)}
+	backend := &Backend{runner: runner}
+	devices, err := backend.ListAllowedDevices(context.Background())
+	if err != nil || len(devices) != 1 {
+		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
+	}
+	if err := backend.Unmount(context.Background(), devices[0]); !errors.Is(err, ErrUnmountFailed) {
+		t.Fatalf("Unmount() error = %v, want %v", err, ErrUnmountFailed)
 	}
 }
 
@@ -202,6 +222,23 @@ func TestFormatFAT32RevalidatesAndCreatesMBRVolume(t *testing.T) {
 	for _, want := range []string{"Clear-Disk -Number 4", "Initialize-Disk -Number 4 -PartitionStyle MBR", "Format-Volume", "-FileSystem FAT32", "GO''FLASHER"} {
 		if !strings.Contains(runner.script, want) {
 			t.Fatalf("format script %q does not contain %q", runner.script, want)
+		}
+	}
+}
+
+func TestBackendCommandsAlwaysHaveDeadlines(t *testing.T) {
+	runner := &fakeRunner{output: []byte(allowedDisk)}
+	backend := &Backend{runner: runner}
+	devices, err := backend.ListAllowedDevices(context.Background())
+	if err != nil || len(devices) != 1 {
+		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
+	}
+	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i, hasDeadline := range runner.deadlines {
+		if !hasDeadline {
+			t.Errorf("command %d had no context deadline", i)
 		}
 	}
 }

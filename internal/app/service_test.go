@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,35 +67,59 @@ func (w *observedWriteCloser) Close() error {
 
 func TestServiceRawWriteVerifyEject(t *testing.T) {
 	payload := bytes.Repeat([]byte("image"), 4096)
+	fixture := newFileServiceFixture(t, payload, 2)
+	result, err := fixture.service.Run(context.Background(), fixture.info, fixture.device, RunOptions{Verify: true, Eject: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Verified {
+		t.Error("result was not verified")
+	}
+	if !result.Ejected {
+		t.Error("result was not ejected")
+	}
+	if !fixture.backend.flushed {
+		t.Error("backend was not flushed")
+	}
+	if fixture.state.State() != Completed {
+		t.Errorf("state = %s, want %s", fixture.state.State(), Completed)
+	}
+	got, err := os.ReadFile(fixture.device.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("written data differs")
+	}
+}
+
+type fileServiceFixture struct {
+	service Service
+	info    image.Info
+	device  device.Device
+	backend *fileBackend
+	state   *StateMachine
+}
+
+func newFileServiceFixture(t *testing.T, payload []byte, targetMultiplier int) fileServiceFixture {
+	t.Helper()
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.img")
 	target := filepath.Join(dir, "target")
-	os.WriteFile(source, payload, 0600)
-	os.WriteFile(target, make([]byte, len(payload)*2), 0600)
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, make([]byte, len(payload)*targetMultiplier), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	info, err := image.Detect(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := device.Device{ID: "test", Path: target, Size: uint64(len(payload) * 2), IsAllowed: true}
+	d := device.Device{ID: "test", Path: target, Size: uint64(len(payload) * targetMultiplier), IsAllowed: true}
 	backend := &fileBackend{path: target, d: d}
-	states := NewStateMachine()
-	for _, s := range []State{ImageSelected, Ready, Confirming} {
-		if err := states.Transition(s); err != nil {
-			t.Fatal(err)
-		}
-	}
-	service := Service{Backend: backend, State: states}
-	result, err := service.Run(context.Background(), info, d, RunOptions{Verify: true, Eject: true}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Verified || !result.Ejected || !backend.flushed || states.State() != Completed {
-		t.Fatalf("result=%+v state=%s", result, states.State())
-	}
-	got, _ := os.ReadFile(target)
-	if !bytes.Equal(got, payload) {
-		t.Fatal("written data differs")
-	}
+	state := readyToRunState(t)
+	return fileServiceFixture{service: Service{Backend: backend, State: state}, info: info, device: d, backend: backend, state: state}
 }
 
 func TestServiceEntersFlushingBeforeWriterClose(t *testing.T) {
@@ -159,8 +184,14 @@ func TestServiceCancellationBeforeDestructiveWork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := (&Service{Backend: backend, State: states}).Run(ctx, info, d, RunOptions{}, nil)
-	if err == nil || backend.unmounted || states.State() != Cancelled {
-		t.Fatalf("error=%v unmounted=%v state=%s", err, backend.unmounted, states.State())
+	if err == nil {
+		t.Fatal("Run() succeeded after cancellation")
+	}
+	if backend.unmounted {
+		t.Error("backend was unmounted after cancellation")
+	}
+	if states.State() != Cancelled {
+		t.Errorf("state = %s, want %s", states.State(), Cancelled)
 	}
 }
 
@@ -186,8 +217,14 @@ func TestServiceRejectsSourceChecksumChangedAfterInspection(t *testing.T) {
 		}
 	}
 	result, err := (&Service{Backend: backend, State: states}).Run(context.Background(), info, d, RunOptions{}, nil)
-	if !errors.Is(err, writer.ErrSourceChanged) || result.BytesWritten != uint64(len(payload)) || backend.flushed {
-		t.Fatalf("result=%+v error=%v flushed=%v", result, err, backend.flushed)
+	if !errors.Is(err, writer.ErrSourceChanged) {
+		t.Errorf("error = %v, want %v", err, writer.ErrSourceChanged)
+	}
+	if result.BytesWritten != uint64(len(payload)) {
+		t.Errorf("bytes written = %d, want %d", result.BytesWritten, len(payload))
+	}
+	if backend.flushed {
+		t.Error("backend flushed a changed source")
 	}
 }
 
@@ -271,80 +308,134 @@ func (c *recordingWriteCloser) Close() error {
 	return c.closeErr
 }
 
+type expectedStageResult struct {
+	written                uint64
+	sourceHash, targetHash string
+	verified, ejected      bool
+}
+
+type stageFailureCase struct {
+	name                               string
+	configure                          func(*failureBackend)
+	opts                               RunOptions
+	wantErr                            error
+	wantPrefix                         string
+	wantState                          State
+	wantCalls                          []string
+	wantWriterCloses, wantReaderCloses int
+	want                               expectedStageResult
+}
+
 func TestServiceStageFailures(t *testing.T) {
 	payload := []byte("complete image payload")
 	sourceHash := fmt.Sprintf("%x", sha256.Sum256(payload))
 	mismatchPayload := bytes.Repeat([]byte("x"), len(payload))
 	mismatchHash := fmt.Sprintf("%x", sha256.Sum256(mismatchPayload))
-	errs := map[string]error{}
-	for _, name := range []string{"unmount", "open writer", "write", "writer close", "flush", "open reader", "verify read", "reader close", "eject"} {
-		errs[name] = fmt.Errorf("%s failure", name)
+	for _, testCase := range serviceStageFailureCases(payload, sourceHash, mismatchPayload, mismatchHash) {
+		t.Run(testCase.name, func(t *testing.T) {
+			runServiceStageFailure(t, testCase, payload, sourceHash)
+		})
 	}
-	type expectedResult struct {
-		written                uint64
-		sourceHash, targetHash string
-		verified, ejected      bool
-	}
-	tests := []struct {
-		name                               string
-		configure                          func(*failureBackend)
-		opts                               RunOptions
-		wantErr                            error
-		wantPrefix                         string
-		wantState                          State
-		wantCalls                          []string
-		wantWriterCloses, wantReaderCloses int
-		want                               expectedResult
-	}{
+}
+
+func serviceStageFailureCases(payload []byte, sourceHash string, mismatchPayload []byte, mismatchHash string) []stageFailureCase {
+	errs := stageErrors("unmount", "open writer", "write", "writer close", "flush", "open reader", "verify read", "reader close", "eject")
+	written := uint64(len(payload))
+	return []stageFailureCase{
 		{name: "Unmount", configure: func(b *failureBackend) { b.unmountErr = errs["unmount"] }, wantErr: errs["unmount"], wantState: Failed, wantCalls: []string{"Unmount"}},
 		{name: "Unmount cancellation", configure: func(b *failureBackend) { b.unmountErr = context.Canceled }, wantErr: context.Canceled, wantState: Cancelled, wantCalls: []string{"Unmount"}},
 		{name: "OpenWriter", configure: func(b *failureBackend) { b.openWriterErr = errs["open writer"] }, wantErr: errs["open writer"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}},
 		{name: "writer Write", configure: func(b *failureBackend) { b.writeErr = errs["write"] }, wantErr: writer.ErrWriteFailed, wantPrefix: "write failed", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}, wantWriterCloses: 1},
-		{name: "writer Close", configure: func(b *failureBackend) { b.writerCloseErr = errs["writer close"] }, wantErr: errs["writer close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}, wantWriterCloses: 1, want: expectedResult{written: uint64(len(payload)), sourceHash: sourceHash}},
-		{name: "Flush", configure: func(b *failureBackend) { b.flushErr = errs["flush"] }, wantErr: errs["flush"], wantPrefix: "flush: ", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush"}, wantWriterCloses: 1, want: expectedResult{written: uint64(len(payload)), sourceHash: sourceHash}},
-		{name: "OpenReader", configure: func(b *failureBackend) { b.openReaderErr = errs["open reader"] }, opts: RunOptions{Verify: true}, wantErr: errs["open reader"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, want: expectedResult{written: uint64(len(payload)), sourceHash: sourceHash}},
-		{name: "verify Read", configure: func(b *failureBackend) { b.readErr = errs["verify read"] }, opts: RunOptions{Verify: true}, wantErr: errs["verify read"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedResult{written: uint64(len(payload)), sourceHash: sourceHash}},
-		{name: "verify checksum mismatch", configure: func(b *failureBackend) { b.readerPayload = mismatchPayload }, opts: RunOptions{Verify: true}, wantErr: verify.ErrMismatch, wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedResult{written: uint64(len(payload)), sourceHash: sourceHash, targetHash: mismatchHash}},
-		{name: "reader Close", configure: func(b *failureBackend) { b.readerCloseErr = errs["reader close"] }, opts: RunOptions{Verify: true}, wantErr: errs["reader close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedResult{written: uint64(len(payload)), sourceHash: sourceHash, targetHash: sourceHash}},
-		{name: "Eject", configure: func(b *failureBackend) { b.ejectErr = errs["eject"] }, opts: RunOptions{Verify: true, Eject: true}, wantErr: errs["eject"], wantPrefix: "eject: ", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader", "Eject"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedResult{written: uint64(len(payload)), sourceHash: sourceHash, targetHash: sourceHash, verified: true}},
+		{name: "writer Close", configure: func(b *failureBackend) { b.writerCloseErr = errs["writer close"] }, wantErr: errs["writer close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}, wantWriterCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
+		{name: "Flush", configure: func(b *failureBackend) { b.flushErr = errs["flush"] }, wantErr: errs["flush"], wantPrefix: "flush: ", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush"}, wantWriterCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
+		{name: "OpenReader", configure: func(b *failureBackend) { b.openReaderErr = errs["open reader"] }, opts: RunOptions{Verify: true}, wantErr: errs["open reader"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
+		{name: "verify Read", configure: func(b *failureBackend) { b.readErr = errs["verify read"] }, opts: RunOptions{Verify: true}, wantErr: errs["verify read"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
+		{name: "verify checksum mismatch", configure: func(b *failureBackend) { b.readerPayload = mismatchPayload }, opts: RunOptions{Verify: true}, wantErr: verify.ErrMismatch, wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash, targetHash: mismatchHash}},
+		{name: "reader Close", configure: func(b *failureBackend) { b.readerCloseErr = errs["reader close"] }, opts: RunOptions{Verify: true}, wantErr: errs["reader close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash, targetHash: sourceHash}},
+		{name: "Eject", configure: func(b *failureBackend) { b.ejectErr = errs["eject"] }, opts: RunOptions{Verify: true, Eject: true}, wantErr: errs["eject"], wantPrefix: "eject: ", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader", "Eject"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash, targetHash: sourceHash, verified: true}},
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			source := filepath.Join(dir, "source.img")
-			if err := os.WriteFile(source, payload, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			backend := &failureBackend{payload: payload}
-			tt.configure(backend)
-			state := readyToRunState(t)
-			info := image.Info{Path: source, Format: image.FormatIMG, Compression: image.CompressionNone, UncompressedSize: uint64(len(payload)), SHA256: sourceHash}
-			target := device.Device{Size: uint64(len(payload))}
-			got, err := (&Service{Backend: backend, State: state}).Run(context.Background(), info, target, tt.opts, nil)
-			if !errors.Is(err, tt.wantErr) || tt.wantPrefix != "" && !strings.HasPrefix(err.Error(), tt.wantPrefix) {
-				t.Fatalf("error = %v, want errors.Is(%v) and prefix %q", err, tt.wantErr, tt.wantPrefix)
-			}
-			if state.State() != tt.wantState {
-				t.Errorf("state = %s, want %s", state.State(), tt.wantState)
-			}
-			if strings.Join(backend.calls, ",") != strings.Join(tt.wantCalls, ",") {
-				t.Errorf("backend calls = %v, want %v", backend.calls, tt.wantCalls)
-			}
-			writerCloses, readerCloses := 0, 0
-			if backend.writer != nil {
-				writerCloses = backend.writer.closeCalls
-			}
-			if backend.reader != nil {
-				readerCloses = backend.reader.closeCalls
-			}
-			if writerCloses != tt.wantWriterCloses || readerCloses != tt.wantReaderCloses {
-				t.Errorf("close calls = writer %d, reader %d; want writer %d, reader %d", writerCloses, readerCloses, tt.wantWriterCloses, tt.wantReaderCloses)
-			}
-			if got.BytesWritten != tt.want.written || got.SourceSHA256 != tt.want.sourceHash || got.TargetSHA256 != tt.want.targetHash || got.Verified != tt.want.verified || got.Ejected != tt.want.ejected {
-				t.Errorf("result = %+v, want completed fields %+v", got, tt.want)
-			}
-		})
+func stageErrors(names ...string) map[string]error {
+	result := make(map[string]error, len(names))
+	for _, name := range names {
+		result[name] = fmt.Errorf("%s failure", name)
+	}
+	return result
+}
+
+func runServiceStageFailure(t *testing.T, testCase stageFailureCase, payload []byte, sourceHash string) {
+	t.Helper()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.img")
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backend := &failureBackend{payload: payload}
+	testCase.configure(backend)
+	state := readyToRunState(t)
+	info := image.Info{Path: source, Format: image.FormatIMG, Compression: image.CompressionNone, UncompressedSize: uint64(len(payload)), SHA256: sourceHash}
+	target := device.Device{Size: uint64(len(payload))}
+	got, err := (&Service{Backend: backend, State: state}).Run(context.Background(), info, target, testCase.opts, nil)
+	assertStageError(t, err, testCase)
+	assertStageExecution(t, state, backend, testCase)
+	assertStageResult(t, got, testCase.want)
+}
+
+func assertStageError(t *testing.T, err error, testCase stageFailureCase) {
+	t.Helper()
+	if !errors.Is(err, testCase.wantErr) {
+		t.Errorf("error = %v, want errors.Is(%v)", err, testCase.wantErr)
+	}
+	if testCase.wantPrefix == "" {
+		return
+	}
+	if err == nil || !strings.HasPrefix(err.Error(), testCase.wantPrefix) {
+		t.Errorf("error = %v, want prefix %q", err, testCase.wantPrefix)
+	}
+}
+
+func assertStageExecution(t *testing.T, state *StateMachine, backend *failureBackend, testCase stageFailureCase) {
+	t.Helper()
+	if state.State() != testCase.wantState {
+		t.Errorf("state = %s, want %s", state.State(), testCase.wantState)
+	}
+	if !slices.Equal(backend.calls, testCase.wantCalls) {
+		t.Errorf("backend calls = %v, want %v", backend.calls, testCase.wantCalls)
+	}
+	writerCloses := closeCalls(backend.writer)
+	readerCloses := closeCalls(backend.reader)
+	if writerCloses != testCase.wantWriterCloses {
+		t.Errorf("writer close calls = %d, want %d", writerCloses, testCase.wantWriterCloses)
+	}
+	if readerCloses != testCase.wantReaderCloses {
+		t.Errorf("reader close calls = %d, want %d", readerCloses, testCase.wantReaderCloses)
+	}
+}
+
+func closeCalls(closer *recordingWriteCloser) int {
+	if closer == nil {
+		return 0
+	}
+	return closer.closeCalls
+}
+
+func assertStageResult(t *testing.T, got RunResult, want expectedStageResult) {
+	t.Helper()
+	if got.BytesWritten != want.written {
+		t.Errorf("bytes written = %d, want %d", got.BytesWritten, want.written)
+	}
+	if got.SourceSHA256 != want.sourceHash {
+		t.Errorf("source hash = %q, want %q", got.SourceSHA256, want.sourceHash)
+	}
+	if got.TargetSHA256 != want.targetHash {
+		t.Errorf("target hash = %q, want %q", got.TargetSHA256, want.targetHash)
+	}
+	if got.Verified != want.verified {
+		t.Errorf("verified = %v, want %v", got.Verified, want.verified)
+	}
+	if got.Ejected != want.ejected {
+		t.Errorf("ejected = %v, want %v", got.Ejected, want.ejected)
 	}
 }
 

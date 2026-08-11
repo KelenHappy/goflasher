@@ -54,9 +54,16 @@ macOS 主機**上執行，而不是指映像檔受限於主機平台。在上述
 指令；macOS 使用原生 Finder 選擇器與 `diskutil`。兩者的原始磁碟存取都需要
 提升權限。
 
-目前的後端會讀取 Linux 的 sysfs、procfs 與 udev 資訊，並使用 `udisksctl`
-執行卸載及關閉裝置電源。請勿以 root 身分執行 GUI；寫入、回讀與 flush 會透過
+目前的後端會讀取 Linux 的 sysfs、procfs 與 udev 資訊，並透過 system D-Bus 直接
+呼叫 UDisks2 執行卸載及關閉裝置電源，不需要 `udisksctl` CLI。請勿以 root 身分執行
+GUI；寫入、回讀與 flush 會透過
 polkit 呼叫由 root 擁有的專用權限提升輔助程式。
+
+這不表示所有平台都已完全不依賴主機指令。Linux 直接讀取 `/run/udev/data` 補充裝置
+分類，只以 `pkexec` 啟動權限提升輔助程式；Windows 使用 PowerShell Storage/CIM cmdlet；macOS
+使用 `diskutil`、`plutil` 與 `osascript`。三個平台的原生版本都會在 CI 中建置及測試，
+但 Windows/macOS 仍需要原生主機權限及實體媒體驗收才能發布。完整邊界及改用原生 API
+的方向請參閱 [BUILDING.md](BUILDING.md#native-api-and-command-dependencies)。
 
 ## 預先建置的下載套件
 

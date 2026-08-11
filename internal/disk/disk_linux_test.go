@@ -6,9 +6,28 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
+
+type fakeUDisks struct {
+	unmounted  []string
+	poweredOff []string
+	mountInfo  string
+	err        error
+}
+
+func (f *fakeUDisks) Unmount(_ context.Context, device string) error {
+	f.unmounted = append(f.unmounted, device)
+	if f.err != nil {
+		return f.err
+	}
+	return os.WriteFile(f.mountInfo, nil, 0600)
+}
+
+func (f *fakeUDisks) PowerOff(_ context.Context, device string) error {
+	f.poweredOff = append(f.poweredOff, device)
+	return f.err
+}
 
 func TestLinuxManagerListsWholeDiskFromSysfs(t *testing.T) {
 	root := t.TempDir()
@@ -78,13 +97,10 @@ func TestLinuxManagerUnmountsPartitionAndRechecksState(t *testing.T) {
 	if err := os.WriteFile(mountInfo, []byte("36 25 8:17 / /media/usb rw - vfat /dev/sdb1 rw\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	var command []string
+	service := &fakeUDisks{mountInfo: mountInfo}
 	m := &linuxManager{
 		sysClassBlock: class, mountInfo: mountInfo, devRoot: "/dev",
-		run: func(_ context.Context, name string, args ...string) ([]byte, error) {
-			command = append([]string{name}, args...)
-			return nil, os.WriteFile(mountInfo, nil, 0600)
-		},
+		udisks: service,
 	}
 	disks, err := m.List(context.Background())
 	if err != nil || len(disks) != 1 || !disks[0].Mounted {
@@ -93,9 +109,8 @@ func TestLinuxManagerUnmountsPartitionAndRechecksState(t *testing.T) {
 	if err := m.Unmount(context.Background(), disks[0]); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"udisksctl", "unmount", "--block-device", "/dev/sdb1"}
-	if !reflect.DeepEqual(command, want) {
-		t.Fatalf("command = %q, want %q", command, want)
+	if len(service.unmounted) != 1 || service.unmounted[0] != "/dev/sdb1" {
+		t.Fatalf("unmounted devices = %q, want /dev/sdb1", service.unmounted)
 	}
 }
 
