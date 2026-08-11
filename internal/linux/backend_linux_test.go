@@ -385,8 +385,8 @@ func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T
 	rootOffset := int64((32 + 2*uint64(fatSectors)) * 512)
 	root := readAt(t, file, 32, rootOffset)
 	assertRootVolumeLabel(t, root)
-	assertZeroedRegion(t, file, 4*512, 2*512, "primary")
-	assertZeroedRegion(t, file, 33*512, int64(size-33*512), "backup")
+	assertZeroedRegion(t, file, zeroedRegion{size: 4 * 512, offset: 2 * 512, description: "primary"})
+	assertZeroedRegion(t, file, zeroedRegion{size: 33 * 512, offset: int64(size - 33*512), description: "backup"})
 }
 
 func newDirtyDeviceFile(t *testing.T, size uint64) *os.File {
@@ -436,11 +436,17 @@ func assertRootVolumeLabel(t *testing.T, root []byte) {
 	}
 }
 
-func assertZeroedRegion(t *testing.T, file *os.File, size int, offset int64, description string) {
+type zeroedRegion struct {
+	size        int
+	offset      int64
+	description string
+}
+
+func assertZeroedRegion(t *testing.T, file *os.File, region zeroedRegion) {
 	t.Helper()
-	data := readAt(t, file, size, offset)
-	if !bytes.Equal(data, make([]byte, size)) {
-		t.Fatalf("stale %s partition metadata was not cleared", description)
+	data := readAt(t, file, region.size, region.offset)
+	if !bytes.Equal(data, make([]byte, region.size)) {
+		t.Fatalf("stale %s partition metadata was not cleared", region.description)
 	}
 }
 
