@@ -189,8 +189,11 @@ func TestUnmountRevalidatesAndTakesDiskOffline(t *testing.T) {
 	if err := backend.Unmount(context.Background(), devices[0]); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(runner.script, "Set-Disk -Number 4 -IsOffline $true") {
-		t.Fatalf("unexpected PowerShell script: %q", runner.script)
+	if len(runner.scripts) != 4 {
+		t.Fatalf("PowerShell scripts = %q, want select, revalidate, offline, verify", runner.scripts)
+	}
+	if !strings.Contains(runner.scripts[2], "Set-Disk -Number 4 -IsOffline $true") {
+		t.Fatalf("offline PowerShell script = %q", runner.scripts[2])
 	}
 }
 
