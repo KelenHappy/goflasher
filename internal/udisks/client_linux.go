@@ -8,6 +8,7 @@ package udisks
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -40,7 +41,7 @@ func (c *client) Unmount(ctx context.Context, device string) error {
 		return err
 	}
 	defer conn.Close()
-	path, _, err := blockForDevice(objects, device)
+	path, _, err := blockForDevice(objects, resolveDevicePath(device))
 	if err != nil {
 		return err
 	}
@@ -53,7 +54,7 @@ func (c *client) PowerOff(ctx context.Context, device string) error {
 		return err
 	}
 	defer conn.Close()
-	_, drive, err := blockForDevice(objects, device)
+	_, drive, err := blockForDevice(objects, resolveDevicePath(device))
 	if err != nil {
 		return err
 	}
@@ -61,6 +62,18 @@ func (c *client) PowerOff(ctx context.Context, device string) error {
 		return fmt.Errorf("UDisks2 block device %q has no drive", device)
 	}
 	return conn.Object(busName, drive).CallWithContext(ctx, drivePowerOff, 0, map[string]dbus.Variant{}).Err
+}
+
+// resolveDevicePath converts persistent aliases such as /dev/disk/by-uuid/*
+// to the canonical device node exposed by UDisks' Block.Device property. If
+// the path cannot be resolved, retain it so the normal lookup can still match
+// a Device property that already contains the supplied path.
+func resolveDevicePath(device string) string {
+	resolved, err := filepath.EvalSymlinks(device)
+	if err != nil {
+		return device
+	}
+	return resolved
 }
 
 type managedObjects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
