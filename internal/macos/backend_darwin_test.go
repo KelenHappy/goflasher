@@ -64,9 +64,22 @@ func TestListAllowedDevices(t *testing.T) {
 	if len(devices) != 1 {
 		t.Fatalf("got %d devices, want 1", len(devices))
 	}
-	got := devices[0]
-	if got.ID != "IOService:/USB/disk@1" || got.Path != "/dev/rdisk4" || !got.Mounted || !got.IsAllowed {
-		t.Fatalf("unexpected device: %+v", got)
+	assertAllowedDevice(t, devices[0])
+}
+
+func assertAllowedDevice(t *testing.T, got device.Device) {
+	t.Helper()
+	if got.ID != "IOService:/USB/disk@1" {
+		t.Fatalf("device ID = %q", got.ID)
+	}
+	if got.Path != "/dev/rdisk4" {
+		t.Fatalf("device path = %q", got.Path)
+	}
+	if !got.Mounted {
+		t.Fatal("device is not mounted")
+	}
+	if !got.IsAllowed {
+		t.Fatal("device is not allowed")
 	}
 }
 
@@ -131,30 +144,51 @@ func TestListAllowedDevicesFailsClosed(t *testing.T) {
 	for name, info := range unsafe {
 		t.Run(name, func(t *testing.T) {
 			devices, err := (&Backend{runner: sequencedRunner(info)}).ListAllowedDevices(context.Background())
-			if err != nil || len(devices) != 0 {
-				t.Fatalf("devices=%v err=%v", devices, err)
+			assertNoDevices(t, devices)
+			if err != nil {
+				t.Fatalf("unexpected enumeration error: %v", err)
 			}
 		})
 	}
-	t.Run("malformed list JSON", func(t *testing.T) {
-		runner := &fakeRunner{jsonResults: map[string][]runnerResult{"[list external physical]": {{output: []byte("{bad")}}}}
-		if devices, err := (&Backend{runner: runner}).ListAllowedDevices(context.Background()); err == nil || len(devices) != 0 {
-			t.Fatalf("devices=%v err=%v", devices, err)
-		}
-	})
-	t.Run("list command failure", func(t *testing.T) {
-		cause := errors.New("diskutil failed")
-		runner := &fakeRunner{jsonResults: map[string][]runnerResult{"[list external physical]": {{err: cause}}}}
-		if devices, err := (&Backend{runner: runner}).ListAllowedDevices(context.Background()); !errors.Is(err, cause) || len(devices) != 0 {
-			t.Fatalf("devices=%v err=%v", devices, err)
-		}
-	})
-	t.Run("malformed info JSON", func(t *testing.T) {
-		devices, err := (&Backend{runner: sequencedRunner("{bad")}).ListAllowedDevices(context.Background())
-		if err == nil || len(devices) != 0 {
-			t.Fatalf("devices=%v err=%v", devices, err)
-		}
-	})
+	t.Run("malformed list JSON", testMalformedListJSON)
+	t.Run("list command failure", testListCommandFailure)
+	t.Run("malformed info JSON", testMalformedInfoJSON)
+}
+
+func testMalformedListJSON(t *testing.T) {
+	runner := &fakeRunner{jsonResults: map[string][]runnerResult{"[list external physical]": {{output: []byte("{bad")}}}}
+	devices, err := (&Backend{runner: runner}).ListAllowedDevices(context.Background())
+	assertEnumerationFailure(t, devices, err)
+}
+
+func testListCommandFailure(t *testing.T) {
+	cause := errors.New("diskutil failed")
+	runner := &fakeRunner{jsonResults: map[string][]runnerResult{"[list external physical]": {{err: cause}}}}
+	devices, err := (&Backend{runner: runner}).ListAllowedDevices(context.Background())
+	assertNoDevices(t, devices)
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want cause %v", err, cause)
+	}
+}
+
+func testMalformedInfoJSON(t *testing.T) {
+	devices, err := (&Backend{runner: sequencedRunner("{bad")}).ListAllowedDevices(context.Background())
+	assertEnumerationFailure(t, devices, err)
+}
+
+func assertEnumerationFailure(t *testing.T, devices []device.Device, err error) {
+	t.Helper()
+	assertNoDevices(t, devices)
+	if err == nil {
+		t.Fatal("enumeration unexpectedly succeeded")
+	}
+}
+
+func assertNoDevices(t *testing.T, devices []device.Device) {
+	t.Helper()
+	if len(devices) != 0 {
+		t.Fatalf("devices = %v, want none", devices)
+	}
 }
 
 func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
@@ -175,10 +209,21 @@ func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
 			backend := &Backend{runner: runner}
 			selected, _ := backend.ListAllowedDevices(context.Background())
 			err := tt.run(backend, selected[0])
-			if !errors.Is(err, cause) || !strings.Contains(err.Error(), "diskutil output") || !strings.HasPrefix(err.Error(), tt.prefix) {
-				t.Fatalf("error = %v", err)
-			}
+			assertCommandError(t, err, cause, tt.prefix, "diskutil output")
 		})
+	}
+}
+
+func assertCommandError(t *testing.T, err, cause error, prefix, output string) {
+	t.Helper()
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want cause %v", err, cause)
+	}
+	if !strings.Contains(err.Error(), output) {
+		t.Fatalf("error = %v, want output %q", err, output)
+	}
+	if !strings.HasPrefix(err.Error(), prefix) {
+		t.Fatalf("error = %v, want prefix %q", err, prefix)
 	}
 }
 
@@ -242,8 +287,15 @@ func TestWholeDiskIdentifierValidation(t *testing.T) {
 func TestDeviceFromInfoRequiresMatchingStructuredIdentifiers(t *testing.T) {
 	listed := listedDisk{DeviceIdentifier: "disk4"}
 	base := infoJSON{DeviceIdentifier: "disk4", DeviceNode: "/dev/disk4", DeviceTreePath: "IOService:/USB/disk@1", BusProtocol: "USB", TotalSize: 1024, Whole: true, RemovableMedia: true}
-	if d, ok := deviceFromInfo(listed, base); !ok || d.Path != "/dev/rdisk4" || d.Major != 4 {
-		t.Fatalf("deviceFromInfo() = %+v, %v", d, ok)
+	d, ok := deviceFromInfo(listed, base)
+	if !ok {
+		t.Fatal("matching structured identifiers were rejected")
+	}
+	if d.Path != "/dev/rdisk4" {
+		t.Fatalf("device path = %q, want /dev/rdisk4", d.Path)
+	}
+	if d.Major != 4 {
+		t.Fatalf("device number = %d, want 4", d.Major)
 	}
 	changedIdentifier := base
 	changedIdentifier.DeviceIdentifier = "disk5"
@@ -260,9 +312,7 @@ func TestDeviceFromInfoRequiresMatchingStructuredIdentifiers(t *testing.T) {
 func TestCommandErrorIncludesStructuredCommandAndStderr(t *testing.T) {
 	cause := errors.New("exit status 1")
 	err := commandError("diskutil", cause, []byte(" permission denied\n"))
-	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "diskutil") || !strings.Contains(err.Error(), "permission denied") {
-		t.Fatalf("commandError() = %v", err)
-	}
+	assertCommandError(t, err, cause, "diskutil", "permission denied")
 }
 
 func TestFormatFAT32UsesWholeDeviceAndMBR(t *testing.T) {

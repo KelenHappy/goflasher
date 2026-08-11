@@ -86,9 +86,7 @@ func TestEnumerationFiltersAndMounts(t *testing.T) {
 	requireNoError(t, err)
 	requireDevicePaths(t, devices, "sdb", "sdc")
 	flash, _ := b.RefreshDevice(context.Background(), "FLASH123")
-	if !flash.Mounted || flash.PartitionCount != 1 || len(flash.MountPoints) != 1 || flash.MountPoints[0] != "/media/My USB" {
-		t.Fatalf("flash metadata = %+v", flash)
-	}
+	assertMountedFlashMetadata(t, flash)
 	card, _ := b.RefreshDevice(context.Background(), "CARD123")
 	if !card.IsCardReader {
 		t.Fatalf("card not identified: %+v", card)
@@ -97,6 +95,22 @@ func TestEnumerationFiltersAndMounts(t *testing.T) {
 	requireNoError(t, err)
 	for _, d := range all {
 		assertEnumerationSafety(t, d)
+	}
+}
+
+func assertMountedFlashMetadata(t *testing.T, flash device.Device) {
+	t.Helper()
+	if !flash.Mounted {
+		t.Fatalf("flash not mounted: %+v", flash)
+	}
+	if flash.PartitionCount != 1 {
+		t.Fatalf("flash partition count = %d, want 1: %+v", flash.PartitionCount, flash)
+	}
+	if len(flash.MountPoints) != 1 {
+		t.Fatalf("flash mount points = %q, want [/media/My USB]: %+v", flash.MountPoints, flash)
+	}
+	if flash.MountPoints[0] != "/media/My USB" {
+		t.Fatalf("flash mount point = %q, want /media/My USB: %+v", flash.MountPoints[0], flash)
 	}
 }
 
@@ -181,10 +195,21 @@ func TestRawOperationsUseIdentityOnlyHelper(t *testing.T) {
 	data, _ := io.ReadAll(r)
 	_ = r.Close()
 	requireNoError(t, b.Flush(context.Background(), selected))
-	if fake.writes.String() != "image" || string(data) != "verified" || len(fake.requests) != 3 {
-		t.Fatalf("helper calls = %+v, write=%q read=%q", fake.requests, fake.writes.String(), data)
-	}
+	assertRawOperationResults(t, fake, data)
 	assertHelperRequests(t, fake.requests, selected)
+}
+
+func assertRawOperationResults(t *testing.T, fake *fakePrivilegedHelper, data []byte) {
+	t.Helper()
+	if got := fake.writes.String(); got != "image" {
+		t.Fatalf("helper write = %q, want %q", got, "image")
+	}
+	if got := string(data); got != "verified" {
+		t.Fatalf("helper read = %q, want %q", got, "verified")
+	}
+	if got := len(fake.requests); got != 3 {
+		t.Fatalf("helper request count = %d, want 3: %+v", got, fake.requests)
+	}
 }
 
 func requireNoError(t *testing.T, err error) {
@@ -317,23 +342,56 @@ func TestProgressParserHandlesFragmentedLines(t *testing.T) {
 	updates := make(chan progress.Update, 1)
 	parser := &progressParser{builder: &diagnostics, updates: updates}
 	for _, chunk := range []string{"PROG", "RESS 25 100\ndiagnostic", " detail\nPROGRESS invalid\n"} {
-		if written, err := parser.Write([]byte(chunk)); err != nil || written != len(chunk) {
-			t.Fatalf("Write(%q) = %d, %v", chunk, written, err)
+		written, err := parser.Write([]byte(chunk))
+		if err != nil {
+			t.Fatalf("Write(%q) error = %v", chunk, err)
+		}
+		if written != len(chunk) {
+			t.Fatalf("Write(%q) = %d bytes, want %d", chunk, written, len(chunk))
 		}
 	}
 	update := <-updates
-	if update.Stage != progress.StageFormatting || update.BytesProcessed != 25 || update.TotalBytes != 100 {
-		t.Fatalf("progress update = %+v", update)
-	}
+	assertFormattingProgress(t, update, 25, 100)
 	if got, want := diagnostics.String(), "diagnostic detail\nPROGRESS invalid\n"; got != want {
 		t.Fatalf("diagnostics = %q, want %q", got, want)
 	}
 }
 
+func assertFormattingProgress(t *testing.T, update progress.Update, processed, total uint64) {
+	t.Helper()
+	if update.Stage != progress.StageFormatting {
+		t.Fatalf("progress stage = %v, want %v", update.Stage, progress.StageFormatting)
+	}
+	if update.BytesProcessed != processed {
+		t.Fatalf("processed bytes = %d, want %d", update.BytesProcessed, processed)
+	}
+	if update.TotalBytes != total {
+		t.Fatalf("total bytes = %d, want %d", update.TotalBytes, total)
+	}
+}
+
 func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T) {
 	const size = uint64(64 << 20)
-	path := filepath.Join(t.TempDir(), "device")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	file := newDirtyDeviceFile(t, size)
+	var formatProgress strings.Builder
+	requireNoError(t, formatFAT32(file, size, "GOFLASHER", &formatProgress))
+	if got, want := formatProgress.String(), "PROGRESS 10 100\nPROGRESS 15 100\nPROGRESS 25 100\nPROGRESS 80 100\nPROGRESS 90 100\nPROGRESS 100 100\n"; got != want {
+		t.Fatalf("format progress = %q, want %q", got, want)
+	}
+
+	boot := readAt(t, file, 512, 0)
+	assertFAT32BootSector(t, boot)
+	fatSectors := binary.LittleEndian.Uint32(boot[36:40])
+	rootOffset := int64((32 + 2*uint64(fatSectors)) * 512)
+	root := readAt(t, file, 32, rootOffset)
+	assertRootVolumeLabel(t, root)
+	assertZeroedRegion(t, file, 4*512, 2*512, "primary")
+	assertZeroedRegion(t, file, 33*512, int64(size-33*512), "backup")
+}
+
+func newDirtyDeviceFile(t *testing.T, size uint64) *os.File {
+	t.Helper()
+	file, err := os.OpenFile(filepath.Join(t.TempDir(), "device"), os.O_CREATE|os.O_RDWR, 0600)
 	requireNoError(t, err)
 	t.Cleanup(func() { _ = file.Close() })
 	requireNoError(t, file.Truncate(int64(size)))
@@ -341,37 +399,48 @@ func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T
 	requireNoError(t, err)
 	_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 32*512), 0)
 	requireNoError(t, err)
-	var formatProgress strings.Builder
-	requireNoError(t, formatFAT32(file, size, "GOFLASHER", &formatProgress))
-	if got, want := formatProgress.String(), "PROGRESS 10 100\nPROGRESS 15 100\nPROGRESS 25 100\nPROGRESS 80 100\nPROGRESS 90 100\nPROGRESS 100 100\n"; got != want {
-		t.Fatalf("format progress = %q, want %q", got, want)
-	}
+	return file
+}
 
-	boot := make([]byte, 512)
-	_, err = file.ReadAt(boot, 0)
+func readAt(t *testing.T, file *os.File, size int, offset int64) []byte {
+	t.Helper()
+	data := make([]byte, size)
+	_, err := file.ReadAt(data, offset)
 	requireNoError(t, err)
-	if string(boot[82:90]) != "FAT32   " || string(boot[71:82]) != "GOFLASHER  " || boot[510] != 0x55 || boot[511] != 0xaa {
-		t.Fatalf("invalid FAT32 boot sector: type=%q label=%q signature=%x", boot[82:90], boot[71:82], boot[510:512])
+	return data
+}
+
+func assertFAT32BootSector(t *testing.T, boot []byte) {
+	t.Helper()
+	if got := string(boot[82:90]); got != "FAT32   " {
+		t.Fatalf("filesystem type = %q, want FAT32", got)
 	}
-	fatSectors := binary.LittleEndian.Uint32(boot[36:40])
-	rootOffset := int64((32 + 2*uint64(fatSectors)) * 512)
-	root := make([]byte, 32)
-	_, err = file.ReadAt(root, rootOffset)
-	requireNoError(t, err)
-	if string(root[:11]) != "GOFLASHER  " || root[11] != 0x08 {
-		t.Fatalf("invalid root volume label: %q attribute=%x", root[:11], root[11])
+	if got := string(boot[71:82]); got != "GOFLASHER  " {
+		t.Fatalf("volume label = %q, want GOFLASHER", got)
 	}
-	reservedGap := make([]byte, 4*512)
-	_, err = file.ReadAt(reservedGap, 2*512)
-	requireNoError(t, err)
-	if !bytes.Equal(reservedGap, make([]byte, len(reservedGap))) {
-		t.Fatal("stale primary partition metadata was not cleared")
+	if boot[510] != 0x55 {
+		t.Fatalf("first boot signature byte = %x, want 55", boot[510])
 	}
-	tail := make([]byte, 33*512)
-	_, err = file.ReadAt(tail, int64(size)-int64(len(tail)))
-	requireNoError(t, err)
-	if !bytes.Equal(tail, make([]byte, len(tail))) {
-		t.Fatal("stale backup partition metadata was not cleared")
+	if boot[511] != 0xaa {
+		t.Fatalf("boot signature = %x, want 55aa", boot[510:512])
+	}
+}
+
+func assertRootVolumeLabel(t *testing.T, root []byte) {
+	t.Helper()
+	if got := string(root[:11]); got != "GOFLASHER  " {
+		t.Fatalf("root volume label = %q, want GOFLASHER", got)
+	}
+	if root[11] != 0x08 {
+		t.Fatalf("root volume label attribute = %x, want 08", root[11])
+	}
+}
+
+func assertZeroedRegion(t *testing.T, file *os.File, size int, offset int64, description string) {
+	t.Helper()
+	data := readAt(t, file, size, offset)
+	if !bytes.Equal(data, make([]byte, size)) {
+		t.Fatalf("stale %s partition metadata was not cleared", description)
 	}
 }
 
@@ -442,17 +511,34 @@ func TestUDisksOperationsUseDirectDBusClient(t *testing.T) {
 	requireNoError(t, err)
 	requireNoError(t, b.FormatFAT32(context.Background(), selected, "GOFLASHER", nil))
 
-	if len(service.unmounted) != 1 || service.unmounted[0] != filepath.Join(b.DevRoot, "sdb1") {
-		t.Fatalf("unmounted devices = %#v", service.unmounted)
-	}
+	assertSinglePath(t, "unmounted", service.unmounted, filepath.Join(b.DevRoot, "sdb1"))
 	selected, err = b.RefreshDevice(context.Background(), "CARD123")
 	requireNoError(t, err)
 	requireNoError(t, b.Eject(context.Background(), selected))
-	if len(service.poweredOff) != 1 || service.poweredOff[0] != selected.Path {
-		t.Fatalf("powered-off devices = %#v", service.poweredOff)
+	assertSinglePath(t, "powered-off", service.poweredOff, selected.Path)
+	assertFormatRequest(t, fake.requests, "GOFLASHER")
+}
+
+func assertSinglePath(t *testing.T, operation string, paths []string, want string) {
+	t.Helper()
+	if len(paths) != 1 {
+		t.Fatalf("%s device count = %d, want 1: %#v", operation, len(paths), paths)
 	}
-	if len(fake.requests) != 1 || fake.requests[0].Mode != modeFormatFAT32 || fake.requests[0].Label != "GOFLASHER" {
-		t.Fatalf("format helper request = %#v", fake.requests)
+	if paths[0] != want {
+		t.Fatalf("%s device = %q, want %q", operation, paths[0], want)
+	}
+}
+
+func assertFormatRequest(t *testing.T, requests []privilegedRequest, label string) {
+	t.Helper()
+	if len(requests) != 1 {
+		t.Fatalf("format helper request count = %d, want 1: %#v", len(requests), requests)
+	}
+	if requests[0].Mode != modeFormatFAT32 {
+		t.Fatalf("format helper mode = %q, want %q", requests[0].Mode, modeFormatFAT32)
+	}
+	if requests[0].Label != label {
+		t.Fatalf("format helper label = %q, want %q", requests[0].Label, label)
 	}
 }
 
@@ -529,41 +615,63 @@ func setUdevProperties(t *testing.T, b *Backend, name, properties string) {
 
 func addFixtureDevices(t *testing.T, class, devices, dev string) {
 	t.Helper()
-	addFixtureDisk(t, class, devices, dev, "sdb", "8:16", "FLASH123", true, true, "Thumb Drive")
-	addFixturePartition(t, class, dev, "sdb", "sdb1", "8:17")
-	addFixtureDisk(t, class, devices, dev, "sdc", "8:32", "CARD123", true, true, "Card Reader")
-	addFixtureDisk(t, class, devices, dev, "sdd", "8:48", "SSD123", true, true, "Portable SSD")
-	addFixtureDisk(t, class, devices, dev, "sde", "8:64", "SWAP123", true, true, "Thumb Drive")
-	addFixturePartition(t, class, dev, "sde", "sde1", "8:65")
-	addFixtureDisk(t, class, devices, dev, "nvme0n1", "259:0", "SYS123", false, false, "Internal")
-	addFixturePartition(t, class, dev, "nvme0n1", "nvme0n1p1", "259:1")
+	paths := fixturePaths{class: class, devices: devices, dev: dev}
+	addFixtureDisk(t, paths, fixtureDisk{name: "sdb", devno: "8:16", serial: "FLASH123", usb: true, removable: true, model: "Thumb Drive"})
+	addFixturePartition(t, paths, fixturePartition{parent: "sdb", name: "sdb1", devno: "8:17"})
+	addFixtureDisk(t, paths, fixtureDisk{name: "sdc", devno: "8:32", serial: "CARD123", usb: true, removable: true, model: "Card Reader"})
+	addFixtureDisk(t, paths, fixtureDisk{name: "sdd", devno: "8:48", serial: "SSD123", usb: true, removable: true, model: "Portable SSD"})
+	addFixtureDisk(t, paths, fixtureDisk{name: "sde", devno: "8:64", serial: "SWAP123", usb: true, removable: true, model: "Thumb Drive"})
+	addFixturePartition(t, paths, fixturePartition{parent: "sde", name: "sde1", devno: "8:65"})
+	addFixtureDisk(t, paths, fixtureDisk{name: "nvme0n1", devno: "259:0", serial: "SYS123", model: "Internal"})
+	addFixturePartition(t, paths, fixturePartition{parent: "nvme0n1", name: "nvme0n1p1", devno: "259:1"})
 }
 
-func addFixtureDisk(t *testing.T, class, devices, dev, name, devno, serial string, usb, removable bool, model string) {
+type fixturePaths struct {
+	class   string
+	devices string
+	dev     string
+}
+
+type fixtureDisk struct {
+	name      string
+	devno     string
+	serial    string
+	model     string
+	usb       bool
+	removable bool
+}
+
+func addFixtureDisk(t *testing.T, paths fixturePaths, disk fixtureDisk) {
 	t.Helper()
-	base := filepath.Join(devices, "pci0000:00")
-	if usb {
+	base := filepath.Join(paths.devices, "pci0000:00")
+	if disk.usb {
 		base = filepath.Join(base, "usb1", "1-1")
 	}
-	base = filepath.Join(base, "block", name)
+	base = filepath.Join(base, "block", disk.name)
 	requireNoError(t, os.MkdirAll(filepath.Join(base, "device"), 0755))
-	for path, value := range map[string]string{"dev": devno, "size": "65536", "removable": boolDigit(removable), "device/type": "0", "device/vendor": "Acme", "device/model": model, "device/serial": serial} {
+	for path, value := range map[string]string{"dev": disk.devno, "size": "65536", "removable": boolDigit(disk.removable), "device/type": "0", "device/vendor": "Acme", "device/model": disk.model, "device/serial": disk.serial} {
 		write(t, filepath.Join(base, path), value)
 	}
-	requireNoError(t, os.Symlink(base, filepath.Join(class, name)))
-	requireNoError(t, os.WriteFile(filepath.Join(dev, name), nil, 0600))
+	requireNoError(t, os.Symlink(base, filepath.Join(paths.class, disk.name)))
+	requireNoError(t, os.WriteFile(filepath.Join(paths.dev, disk.name), nil, 0600))
 }
 
-func addFixturePartition(t *testing.T, class, dev, parent, name, devno string) {
+type fixturePartition struct {
+	parent string
+	name   string
+	devno  string
+}
+
+func addFixturePartition(t *testing.T, paths fixturePaths, partition fixturePartition) {
 	t.Helper()
-	parentReal, err := filepath.EvalSymlinks(filepath.Join(class, parent))
+	parentReal, err := filepath.EvalSymlinks(filepath.Join(paths.class, partition.parent))
 	requireNoError(t, err)
-	base := filepath.Join(parentReal, name)
+	base := filepath.Join(parentReal, partition.name)
 	requireNoError(t, os.MkdirAll(base, 0755))
-	write(t, filepath.Join(base, "dev"), devno)
+	write(t, filepath.Join(base, "dev"), partition.devno)
 	write(t, filepath.Join(base, "partition"), "1")
-	requireNoError(t, os.Symlink(base, filepath.Join(class, name)))
-	requireNoError(t, os.WriteFile(filepath.Join(dev, name), nil, 0600))
+	requireNoError(t, os.Symlink(base, filepath.Join(paths.class, partition.name)))
+	requireNoError(t, os.WriteFile(filepath.Join(paths.dev, partition.name), nil, 0600))
 }
 func writeMountInfo(t *testing.T, path string) {
 	t.Helper()

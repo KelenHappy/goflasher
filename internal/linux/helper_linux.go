@@ -407,15 +407,22 @@ func (req privilegedRequest) valid() bool {
 }
 
 func validFATLabel(label string) bool {
-	if label == "" || len(label) > 11 {
+	if label == "" {
+		return false
+	}
+	if len(label) > 11 {
 		return false
 	}
 	for _, r := range label {
-		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+		if !validFATLabelCharacter(r) {
 			return false
 		}
 	}
 	return true
+}
+
+func validFATLabelCharacter(character rune) bool {
+	return strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-", character)
 }
 
 func makeFAT32(device *os.File, size uint64, label string, errOut io.Writer) error {
@@ -660,7 +667,13 @@ func supportedUSBDevice(class, real string) bool {
 
 func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, uint32, error) {
 	major, minor, err := readDeviceNumber(filepath.Join(class, "dev"))
-	if err != nil || major != req.Major || minor != req.Minor {
+	if err != nil {
+		return 0, 0, ErrDeviceChanged
+	}
+	if major != req.Major {
+		return 0, 0, ErrDeviceChanged
+	}
+	if minor != req.Minor {
 		return 0, 0, ErrDeviceChanged
 	}
 	if readUint(filepath.Join(class, "size"))*512 != req.Capacity {

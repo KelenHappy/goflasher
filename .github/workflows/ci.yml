@@ -53,6 +53,10 @@ jobs:
       - name: Reject udevadm CLI regressions
         run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udevadm|Output\([^)]*udevadm' internal || true)"
       - run: go vet ./...
+      - name: Scan Go dependencies for known vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
       - run: go test -race ./...
 
   package-linux:

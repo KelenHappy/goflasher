@@ -75,69 +75,168 @@ func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	critical := map[string]bool{"/": true, "/boot": true, "/boot/efi": true, "/home": true}
 	var result []device.Device
 	for _, entry := range entries {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		name := entry.Name()
-		link := filepath.Join(b.SysClassBlock, name)
-		if exists(filepath.Join(link, "partition")) {
-			continue
+		if d, ok := b.deviceFromEntry(entry, entries, mounts, swaps); ok {
+			result = append(result, d)
 		}
-		real, err := filepath.EvalSymlinks(link)
-		if err != nil {
-			continue
-		}
-		maj, min, err := readDeviceNumber(filepath.Join(link, "dev"))
-		if err != nil {
-			continue
-		}
-		props := b.udev(maj, min)
-		d := device.Device{Path: filepath.Join(b.DevRoot, name), Major: maj, Minor: min, SysfsPath: real, Vendor: readTrim(filepath.Join(link, "device/vendor")), Model: readTrim(filepath.Join(link, "device/model")), Serial: first(props["ID_SERIAL_SHORT"], readTrim(filepath.Join(link, "device/serial"))), WWN: props["ID_WWN"], Transport: strings.ToLower(props["ID_BUS"])}
-		d.Size = readUint(filepath.Join(link, "size")) * 512
-		d.PartitionCount = countPartitions(entries, name, b.SysClassBlock)
-		d.MountPoints = appendUnique(d.MountPoints, mounts[devNumber{maj, min}]...)
-		for key, points := range mounts {
-			if parentName(b.SysClassBlock, key) == name {
-				d.MountPoints = appendUnique(d.MountPoints, points...)
-			}
-		}
-		d.Mounted = len(d.MountPoints) > 0
-		for _, p := range d.MountPoints {
-			if critical[p] {
-				d.IsSystemDisk = true
-			}
-		}
-		for path := range swaps {
-			if filepath.Base(path) == name || strings.HasPrefix(parentForPath(b.SysClassBlock, path), name) {
-				d.IsSystemDisk = true
-			}
-		}
-		d.IsCardReader = isCardReader(props)
-		usb := d.Transport == "usb" && strings.Contains(real, "/usb")
-		removable := readTrim(filepath.Join(link, "removable")) == "1"
-		diskType := readTrim(filepath.Join(link, "device/type")) == "0"
-		isFlash := props["ID_DRIVE_THUMB"] == "1" || props["ID_DRIVE_FLASH"] == "1"
-		isSmallUSBStorage := props["ID_USB_DRIVER"] == "usb-storage" && d.Size <= maxGenericUSBFlashSize
-		suspicious := containsAny(strings.ToLower(strings.Join([]string{d.Vendor, d.Model, props["ID_MODEL"], props["ID_VENDOR"]}, " ")), "ssd", "hard disk", "hdd", "bridge", "sata", "nvme") || props["ID_ATA"] == "1" || props["ID_USB_DRIVER"] == "uas"
-		switch {
-		case d.IsSystemDisk:
-			d.RejectReason = ErrSystemDisk.Error()
-		case !usb || !removable || !diskType || d.Size == 0 || suspicious:
-			d.RejectReason = ErrUnsupportedDevice.Error()
-		case !isFlash && !d.IsCardReader && !isSmallUSBStorage:
-			d.RejectReason = "not positively identified as USB flash media"
-		default:
-			d.IsAllowed = true
-		}
-		d.ID = first(d.Serial, d.WWN, fmt.Sprintf("%d:%d@%s", maj, min, real))
-		result = append(result, d)
 	}
 	return result, nil
+}
+
+func (b *Backend) deviceFromEntry(entry os.DirEntry, entries []os.DirEntry, mounts map[devNumber][]string, swaps map[string]bool) (device.Device, bool) {
+	name := entry.Name()
+	link := filepath.Join(b.SysClassBlock, name)
+	if exists(filepath.Join(link, "partition")) {
+		return device.Device{}, false
+	}
+	real, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		return device.Device{}, false
+	}
+	major, minor, err := readDeviceNumber(filepath.Join(link, "dev"))
+	if err != nil {
+		return device.Device{}, false
+	}
+	properties := b.udev(major, minor)
+	candidate := sysfsDevice{name: name, link: link, real: real, major: major, minor: minor, properties: properties}
+	d := b.basicDevice(candidate)
+	d.PartitionCount = countPartitions(entries, name, b.SysClassBlock)
+	b.populateMountMetadata(&d, name, mounts)
+	b.populateSystemDiskMetadata(&d, name, swaps)
+	b.classifyDevice(&d, link, real, properties)
+	d.ID = first(d.Serial, d.WWN, fmt.Sprintf("%d:%d@%s", major, minor, real))
+	return d, true
+}
+
+type sysfsDevice struct {
+	name       string
+	link       string
+	real       string
+	major      uint32
+	minor      uint32
+	properties map[string]string
+}
+
+func (b *Backend) basicDevice(candidate sysfsDevice) device.Device {
+	return device.Device{
+		Path: filepath.Join(b.DevRoot, candidate.name), Major: candidate.major, Minor: candidate.minor, SysfsPath: candidate.real,
+		Vendor: readTrim(filepath.Join(candidate.link, "device/vendor")), Model: readTrim(filepath.Join(candidate.link, "device/model")),
+		Serial: first(candidate.properties["ID_SERIAL_SHORT"], readTrim(filepath.Join(candidate.link, "device/serial"))),
+		WWN:    candidate.properties["ID_WWN"], Transport: strings.ToLower(candidate.properties["ID_BUS"]), Size: readUint(filepath.Join(candidate.link, "size")) * 512,
+	}
+}
+
+func (b *Backend) populateMountMetadata(d *device.Device, name string, mounts map[devNumber][]string) {
+	d.MountPoints = appendUnique(d.MountPoints, mounts[devNumber{d.Major, d.Minor}]...)
+	for number, points := range mounts {
+		if parentName(b.SysClassBlock, number) == name {
+			d.MountPoints = appendUnique(d.MountPoints, points...)
+		}
+	}
+	d.Mounted = len(d.MountPoints) > 0
+}
+
+func (b *Backend) populateSystemDiskMetadata(d *device.Device, name string, swaps map[string]bool) {
+	critical := map[string]bool{"/": true, "/boot": true, "/boot/efi": true, "/home": true}
+	for _, mountPoint := range d.MountPoints {
+		if critical[mountPoint] {
+			d.IsSystemDisk = true
+		}
+	}
+	for path := range swaps {
+		if b.swapBelongsToDevice(path, name) {
+			d.IsSystemDisk = true
+		}
+	}
+}
+
+func (b *Backend) swapBelongsToDevice(path, name string) bool {
+	if filepath.Base(path) == name {
+		return true
+	}
+	return strings.HasPrefix(parentForPath(b.SysClassBlock, path), name)
+}
+
+func (b *Backend) classifyDevice(d *device.Device, link, real string, properties map[string]string) {
+	d.IsCardReader = isCardReader(properties)
+	usb := isUSBDevice(d.Transport, real)
+	removable := readTrim(filepath.Join(link, "removable")) == "1"
+	diskType := readTrim(filepath.Join(link, "device/type")) == "0"
+	isFlash := isFlashDevice(properties)
+	isSmallUSBStorage := isSmallUSBStorageDevice(properties, d.Size)
+	description := strings.ToLower(strings.Join([]string{d.Vendor, d.Model, properties["ID_MODEL"], properties["ID_VENDOR"]}, " "))
+	suspicious := suspiciousStorage(description, properties)
+	switch {
+	case d.IsSystemDisk:
+		d.RejectReason = ErrSystemDisk.Error()
+	case unsupportedDevice(usb, removable, diskType, d.Size, suspicious):
+		d.RejectReason = ErrUnsupportedDevice.Error()
+	case !positivelyIdentified(isFlash, d.IsCardReader, isSmallUSBStorage):
+		d.RejectReason = "not positively identified as USB flash media"
+	default:
+		d.IsAllowed = true
+	}
+}
+
+func isUSBDevice(transport, real string) bool {
+	if transport != "usb" {
+		return false
+	}
+	return strings.Contains(real, "/usb")
+}
+
+func isFlashDevice(properties map[string]string) bool {
+	if properties["ID_DRIVE_THUMB"] == "1" {
+		return true
+	}
+	return properties["ID_DRIVE_FLASH"] == "1"
+}
+
+func isSmallUSBStorageDevice(properties map[string]string, size uint64) bool {
+	if properties["ID_USB_DRIVER"] != "usb-storage" {
+		return false
+	}
+	return size <= maxGenericUSBFlashSize
+}
+
+func suspiciousStorage(description string, properties map[string]string) bool {
+	if containsAny(description, "ssd", "hard disk", "hdd", "bridge", "sata", "nvme") {
+		return true
+	}
+	if properties["ID_ATA"] == "1" {
+		return true
+	}
+	return properties["ID_USB_DRIVER"] == "uas"
+}
+
+func unsupportedDevice(usb, removable, diskType bool, size uint64, suspicious bool) bool {
+	if !usb {
+		return true
+	}
+	if !removable {
+		return true
+	}
+	if !diskType {
+		return true
+	}
+	if size == 0 {
+		return true
+	}
+	return suspicious
+}
+
+func positivelyIdentified(flash, cardReader, smallUSBStorage bool) bool {
+	if flash {
+		return true
+	}
+	if cardReader {
+		return true
+	}
+	return smallUSBStorage
 }
 
 func (b *Backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {

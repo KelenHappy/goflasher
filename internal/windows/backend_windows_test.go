@@ -50,9 +50,28 @@ func TestListAllowedDevices(t *testing.T) {
 	if len(devices) != 1 {
 		t.Fatalf("got %d allowed devices, want 1", len(devices))
 	}
-	got := devices[0]
-	if got.ID != "USB-ID" || got.Path != `\\.\PhysicalDrive4` || !got.Mounted || !got.IsAllowed || len(got.MountPoints) != 1 || got.MountPoints[0] != `E:\` {
-		t.Fatalf("unexpected allowed device: %+v", got)
+	assertAllowedDevice(t, devices[0])
+}
+
+func assertAllowedDevice(t *testing.T, got device.Device) {
+	t.Helper()
+	if got.ID != "USB-ID" {
+		t.Fatalf("device ID = %q, want USB-ID", got.ID)
+	}
+	if got.Path != `\\.\PhysicalDrive4` {
+		t.Fatalf("device path = %q", got.Path)
+	}
+	if !got.Mounted {
+		t.Fatal("device is not mounted")
+	}
+	if !got.IsAllowed {
+		t.Fatal("device is not allowed")
+	}
+	if len(got.MountPoints) != 1 {
+		t.Fatalf("mount points = %q, want one", got.MountPoints)
+	}
+	if got.MountPoints[0] != `E:\` {
+		t.Fatalf("mount point = %q, want E:\\", got.MountPoints[0])
 	}
 }
 
@@ -134,10 +153,21 @@ func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
 			backend := &Backend{runner: runner}
 			devices, _ := backend.ListAllowedDevices(context.Background())
 			err := tt.run(backend, devices[0])
-			if !errors.Is(err, cause) || !strings.Contains(err.Error(), "command output") || !strings.HasPrefix(err.Error(), tt.prefix) {
-				t.Fatalf("error = %v", err)
-			}
+			assertCommandError(t, err, cause, tt.prefix, "command output")
 		})
+	}
+}
+
+func assertCommandError(t *testing.T, err, cause error, prefix, output string) {
+	t.Helper()
+	if !errors.Is(err, cause) {
+		t.Fatalf("error = %v, want cause %v", err, cause)
+	}
+	if !strings.Contains(err.Error(), output) {
+		t.Fatalf("error = %v, want output %q", err, output)
+	}
+	if !strings.HasPrefix(err.Error(), prefix) {
+		t.Fatalf("error = %v, want prefix %q", err, prefix)
 	}
 }
 
