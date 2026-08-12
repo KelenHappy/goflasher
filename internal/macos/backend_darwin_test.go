@@ -20,6 +20,7 @@ type runnerResult struct {
 type fakeRunner struct {
 	json        map[string][]byte
 	runs        [][]string
+	jsonRuns    [][]string
 	jsonResults map[string][]runnerResult
 	runResults  []runnerResult
 	deadlines   []bool
@@ -28,6 +29,7 @@ type fakeRunner struct {
 func (f *fakeRunner) JSON(ctx context.Context, args ...string) ([]byte, error) {
 	_, hasDeadline := ctx.Deadline()
 	f.deadlines = append(f.deadlines, hasDeadline)
+	f.jsonRuns = append(f.jsonRuns, append([]string(nil), args...))
 	key := fmt.Sprint(args)
 	if results := f.jsonResults[key]; len(results) > 0 {
 		result := results[0]
@@ -205,12 +207,26 @@ func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runner := sequencedRunner(allowedInfo, allowedInfo)
+			// Selection enumerates once. Every operation enumerates again for
+			// identity revalidation; FormatFAT32 also revalidates before its
+			// nested unmount operation.
+			infos := []string{allowedInfo, allowedInfo}
+			if tt.name == "format" {
+				infos = append(infos, allowedInfo)
+			}
+			runner := sequencedRunner(infos...)
 			runner.runResults = []runnerResult{{output: []byte("diskutil output"), err: cause}}
 			backend := &Backend{runner: runner}
 			selected, _ := backend.ListAllowedDevices(context.Background())
 			err := tt.run(backend, selected[0])
 			assertCommandError(t, err, cause, tt.prefix, "diskutil output")
+			wantJSON := [][]string{{"list", "external", "physical"}, {"info", "disk4"}, {"list", "external", "physical"}, {"info", "disk4"}}
+			if tt.name == "format" {
+				wantJSON = append(wantJSON, []string{"list", "external", "physical"}, []string{"info", "disk4"})
+			}
+			if fmt.Sprint(runner.jsonRuns) != fmt.Sprint(wantJSON) {
+				t.Fatalf("JSON command sequence = %v, want %v", runner.jsonRuns, wantJSON)
+			}
 		})
 	}
 }
@@ -347,7 +363,9 @@ func TestFormatFAT32UsesSharedFormatter(t *testing.T) {
 }
 
 func TestBackendCommandsAlwaysHaveDeadlines(t *testing.T) {
-	runner := sequencedRunner(allowedInfo, allowedInfo)
+	// Selection, FormatFAT32 revalidation, Unmount revalidation, the
+	// post-unmount check, and the final pre-format revalidation.
+	runner := sequencedRunner(allowedInfo, allowedInfo, allowedInfo, allowedInfo, allowedInfo)
 	backend := &Backend{runner: runner, openFormat: testFormatOpener(t, 16000000000)}
 	devices, err := backend.ListAllowedDevices(context.Background())
 	if err != nil || len(devices) != 1 {
@@ -355,6 +373,16 @@ func TestBackendCommandsAlwaysHaveDeadlines(t *testing.T) {
 	}
 	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
 		t.Fatal(err)
+	}
+	wantJSON := make([][]string, 0, 10)
+	for range 5 {
+		wantJSON = append(wantJSON, []string{"list", "external", "physical"}, []string{"info", "disk4"})
+	}
+	if fmt.Sprint(runner.jsonRuns) != fmt.Sprint(wantJSON) {
+		t.Fatalf("JSON command sequence = %v, want %v", runner.jsonRuns, wantJSON)
+	}
+	if got, want := fmt.Sprint(runner.runs), fmt.Sprint([][]string{{"unmountDisk", "/dev/disk4"}}); got != want {
+		t.Fatalf("run command sequence = %v, want %v", runner.runs, want)
 	}
 	for i, hasDeadline := range runner.deadlines {
 		if !hasDeadline {

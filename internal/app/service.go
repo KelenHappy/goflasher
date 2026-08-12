@@ -61,6 +61,12 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if err = s.Backend.Unmount(ctx, target); err != nil {
 		return out, err
 	}
+	// Windows keeps dismounted-volume handles across writer close, flush,
+	// verification, and eject. Release them only when the complete operation
+	// leaves this scope.
+	if releaser, ok := s.Backend.(interface{ ReleaseDevice(device.Device) error }); ok {
+		defer releaser.ReleaseDevice(target)
+	}
 	source, err := image.Open(info)
 	if err != nil {
 		return out, err

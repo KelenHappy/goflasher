@@ -30,6 +30,7 @@ type fakeAPI struct {
 	locks            *fakeLocks
 	file             *fakeFile
 	opens, lockCalls int
+	openWrites       []bool
 }
 
 func (f *fakeAPI) list(context.Context) ([]diskRecord, error) {
@@ -40,8 +41,9 @@ func (f *fakeAPI) lockVolumes(context.Context, uint32) (volumeLocks, error) {
 	f.locks = &fakeLocks{}
 	return f.locks, nil
 }
-func (f *fakeAPI) openDisk(_ context.Context, _ diskRecord, _ bool) (nativeFile, error) {
+func (f *fakeAPI) openDisk(_ context.Context, _ diskRecord, write bool) (nativeFile, error) {
 	f.opens++
+	f.openWrites = append(f.openWrites, write)
 	if f.file == nil {
 		f.file = &fakeFile{}
 	}
@@ -100,7 +102,7 @@ func TestEveryOpenRevalidates(t *testing.T) {
 	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if api.opens != 1 || api.lockCalls != 1 || api.locks.closes != 1 {
+	if api.opens != 1 || api.lockCalls != 1 || api.locks.closes != 0 {
 		t.Fatalf("opens=%d locks=%d closes=%d", api.opens, api.lockCalls, api.locks.closes)
 	}
 }
@@ -115,15 +117,38 @@ func TestChangedIdentityFailsClosed(t *testing.T) {
 }
 func TestManagedFileCloseIsIdempotentAndFlushes(t *testing.T) {
 	f := &fakeFile{}
-	releases := 0
-	m := &managedFile{nativeFile: f, release: func() error { releases++; return nil }}
+	m := &managedFile{nativeFile: f, flushOnClose: true}
 	if _, err := io.Copy(m, bytes.NewBufferString("x")); err != nil {
 		t.Fatal(err)
 	}
 	_ = m.Close()
 	_ = m.Close()
-	if f.flushes != 1 || f.closes != 1 || releases != 1 {
-		t.Fatalf("flush=%d close=%d release=%d", f.flushes, f.closes, releases)
+	if f.flushes != 1 || f.closes != 1 {
+		t.Fatalf("flush=%d close=%d", f.flushes, f.closes)
+	}
+}
+
+func TestFlushOpensDiskForWriteAndRetainsLocks(t *testing.T) {
+	api := &fakeAPI{records: []diskRecord{candidate()}}
+	b := &Backend{api: api, locks: map[string]volumeLocks{}}
+	d := candidate().Device
+	if err := b.Unmount(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Flush(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.openWrites) != 1 || !api.openWrites[0] {
+		t.Fatalf("open write flags = %v, want [true]", api.openWrites)
+	}
+	if api.locks.closes != 0 {
+		t.Fatalf("locks closed during flush = %d", api.locks.closes)
+	}
+	if err := b.ReleaseDevice(d); err != nil {
+		t.Fatal(err)
+	}
+	if api.locks.closes != 1 {
+		t.Fatalf("locks closed after release = %d, want 1", api.locks.closes)
 	}
 }
 

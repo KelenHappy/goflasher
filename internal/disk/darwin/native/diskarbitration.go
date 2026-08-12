@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime"
 	"time"
+	"unsafe"
 
 	"github.com/ebitengine/purego"
 )
@@ -79,8 +80,24 @@ func (f *Frameworks) NewSession() (*Session, error) {
 }
 
 type Session struct {
-	f   *Frameworks
-	ref uintptr
+	f          *Frameworks
+	ref        uintptr
+	diagnostic func(descriptionDiagnostics)
+}
+
+type valueDiagnostic struct {
+	Found  bool
+	TypeID uintptr
+}
+
+type descriptionDiagnostics struct {
+	Disk              uintptr
+	BSDName           string
+	Description       uintptr
+	DescriptionTypeID uintptr
+	DictionaryTypeID  uintptr
+	DictionaryCount   int64
+	Values            map[string]valueDiagnostic
 }
 
 func (s *Session) Close() {
@@ -102,21 +119,75 @@ func (s *Session) DiskFromBSDName(name string) (DiskDescription, error) {
 	return s.describe(d)
 }
 func (s *Session) describe(d uintptr) (DiskDescription, error) {
+	if d == 0 {
+		return DiskDescription{}, errors.New("Disk Arbitration callback supplied NULL DADiskRef")
+	}
+	diagnostic := descriptionDiagnostics{Disk: d, Values: make(map[string]valueDiagnostic)}
+	if p := s.f.da.api.diskGetBSDName(d); p != nil {
+		diagnostic.BSDName = goCString(p)
+	}
 	x := s.f.da.api.diskCopyDescription(d)
 	if x == 0 {
+		s.emitDiagnostic(diagnostic)
 		return DiskDescription{}, errors.New("DADiskCopyDescription returned NULL")
 	}
 	defer s.f.cf.api.release(x)
-	get := func(k string) uintptr { return s.f.cf.dictionaryValue(x, s.f.da.keys[k]) }
+	diagnostic.Description = x
+	diagnostic.DescriptionTypeID = s.f.cf.api.getTypeID(x)
+	diagnostic.DictionaryTypeID = s.f.cf.api.dictionaryTypeID()
+	if diagnostic.DescriptionTypeID != diagnostic.DictionaryTypeID {
+		s.emitDiagnostic(diagnostic)
+		return DiskDescription{}, fmt.Errorf("DADiskCopyDescription returned CFTypeID %d, want CFDictionary type %d", diagnostic.DescriptionTypeID, diagnostic.DictionaryTypeID)
+	}
+	diagnostic.DictionaryCount = s.f.cf.api.dictionaryGetCount(x)
+	get := func(k string) uintptr {
+		v := s.f.cf.dictionaryValue(x, s.f.da.keys[k])
+		vd := valueDiagnostic{Found: v != 0}
+		if v != 0 {
+			vd.TypeID = s.f.cf.api.getTypeID(v)
+		}
+		diagnostic.Values[k] = vd
+		return v
+	}
 	var out DiskDescription
-	out.BSDName, _ = s.f.cf.goString(get("kDADiskDescriptionMediaBSDNameKey"))
+	out.BSDName = diagnostic.BSDName
+	if name, ok := s.f.cf.goString(get("kDADiskDescriptionMediaBSDNameKey")); ok {
+		out.BSDName = name
+	}
 	out.MediaName, _ = s.f.cf.goString(get("kDADiskDescriptionMediaNameKey"))
 	out.Size, _ = s.f.cf.goUint64(get("kDADiskDescriptionMediaSizeKey"))
 	out.Whole, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaWholeKey"))
 	out.Internal, _ = s.f.cf.goBool(get("kDADiskDescriptionDeviceInternalKey"))
 	out.Ejectable, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaEjectableKey"))
 	out.Removable, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaRemovableKey"))
+	// Look up every currently bound public key even where conversion (for
+	// example CFURL for VolumePath) belongs to a later phase.
+	get("kDADiskDescriptionVolumePathKey")
+	s.emitDiagnostic(diagnostic)
+	if out.BSDName == "" {
+		return DiskDescription{}, errors.New("DADiskGetBSDName and media BSD-name description were both empty")
+	}
 	return out, nil
+}
+
+func (s *Session) emitDiagnostic(d descriptionDiagnostics) {
+	if s.diagnostic != nil {
+		s.diagnostic(d)
+	}
+}
+
+func goCString(p *byte) string {
+	if p == nil {
+		return ""
+	}
+	const maxCString = 4096
+	b := unsafe.Slice(p, maxCString)
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i])
+		}
+	}
+	return ""
 }
 
 // WaitForDisk proves that a Disk Arbitration C callback can safely enter Go.
