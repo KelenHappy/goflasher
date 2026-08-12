@@ -28,24 +28,19 @@ type Service struct {
 
 // Run owns the destructive workflow. Safety checks are deliberately repeated
 // by the backend immediately before opening the block device.
-func (s *Service) Run(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (out RunResult, err error) {
+func (s *Service) Run(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (RunResult, error) {
+	start := time.Now()
 	if s.State == nil {
 		s.State = NewStateMachine()
 	}
-	start := time.Now()
-	defer func() {
-		out.Elapsed = time.Since(start)
-		if out.BytesWritten > 0 && out.Elapsed > 0 {
-			out.AverageBytesPerSecond = float64(out.BytesWritten) / out.Elapsed.Seconds()
-		}
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, writer.ErrCancelled) {
-				_ = s.State.Transition(Cancelled)
-			} else {
-				_ = s.State.Transition(Failed)
-			}
-		}
-	}()
+	out, err := s.runWorkflow(ctx, info, target, opts, updates)
+	s.finishRun(&out, err, time.Since(start))
+	return out, err
+}
+
+func (s *Service) runWorkflow(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (RunResult, error) {
+	var out RunResult
+	var err error
 	if info.UncompressedSize == 0 || info.SHA256 == "" {
 		info, err = image.InspectContext(ctx, info)
 		if err != nil {
@@ -67,17 +62,33 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if releaser, ok := s.Backend.(interface{ ReleaseDevice(device.Device) error }); ok {
 		defer releaser.ReleaseDevice(target)
 	}
+	if err = s.writeImage(ctx, info, target, updates, &out); err != nil {
+		return out, err
+	}
+	if err = s.verifyImage(ctx, target, opts.Verify, updates, &out); err != nil {
+		return out, err
+	}
+	if err = s.ejectDevice(ctx, target, opts.Eject, updates, &out); err != nil {
+		return out, err
+	}
+	if err = s.State.Transition(Completed); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (s *Service) writeImage(ctx context.Context, info image.Info, target device.Device, updates chan<- progress.Update, out *RunResult) error {
 	source, err := image.Open(info)
 	if err != nil {
-		return out, err
+		return err
 	}
 	defer source.Close()
 	if err = s.State.Transition(Writing); err != nil {
-		return out, err
+		return err
 	}
 	dst, err := s.Backend.OpenWriter(ctx, target)
 	if err != nil {
-		return out, err
+		return err
 	}
 	writeStage := progress.StageWriting
 	if info.Compression != image.CompressionNone {
@@ -90,57 +101,79 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if writeErr == nil {
 		if err = s.State.Transition(Flushing); err != nil {
 			_ = dst.Close()
-			return out, err
+			return err
 		}
 		sendStage(ctx, updates, progress.StageFlushing)
 	}
 	closeErr := dst.Close()
 	if writeErr != nil {
-		return out, writeErr
+		return writeErr
 	}
 	out.BytesWritten = wr.BytesWritten
 	out.SourceSHA256 = wr.SHA256
 	if closeErr != nil {
-		return out, closeErr
+		return closeErr
 	}
 	if wr.SHA256 != info.SHA256 {
-		return out, fmt.Errorf("%w: checksum no longer matches inspected image", writer.ErrSourceChanged)
+		return fmt.Errorf("%w: checksum no longer matches inspected image", writer.ErrSourceChanged)
 	}
 	if err = s.Backend.Flush(ctx, target); err != nil {
-		return out, fmt.Errorf("flush: %w", err)
+		return fmt.Errorf("flush: %w", err)
 	}
-	if opts.Verify {
-		if err = s.State.Transition(Verifying); err != nil {
-			return out, err
-		}
-		reader, openErr := s.Backend.OpenReader(ctx, target)
-		if openErr != nil {
-			return out, openErr
-		}
-		out.TargetSHA256, err = verify.ReadBack(ctx, reader, wr.BytesWritten, wr.SHA256, updates)
-		closeErr = reader.Close()
-		if err != nil {
-			return out, err
-		}
-		if closeErr != nil {
-			return out, closeErr
-		}
-		out.Verified = true
+	return nil
+}
+
+func (s *Service) verifyImage(ctx context.Context, target device.Device, enabled bool, updates chan<- progress.Update, out *RunResult) error {
+	if !enabled {
+		return nil
 	}
-	if opts.Eject {
-		if err = s.State.Transition(Ejecting); err != nil {
-			return out, err
-		}
-		sendStage(ctx, updates, progress.StageEjecting)
-		if err = s.Backend.Eject(ctx, target); err != nil {
-			return out, fmt.Errorf("eject: %w", err)
-		}
-		out.Ejected = true
+	if err := s.State.Transition(Verifying); err != nil {
+		return err
 	}
-	if err = s.State.Transition(Completed); err != nil {
-		return out, err
+	reader, err := s.Backend.OpenReader(ctx, target)
+	if err != nil {
+		return err
 	}
-	return out, nil
+	out.TargetSHA256, err = verify.ReadBack(ctx, reader, out.BytesWritten, out.SourceSHA256, updates)
+	closeErr := reader.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	out.Verified = true
+	return nil
+}
+
+func (s *Service) ejectDevice(ctx context.Context, target device.Device, enabled bool, updates chan<- progress.Update, out *RunResult) error {
+	if !enabled {
+		return nil
+	}
+	if err := s.State.Transition(Ejecting); err != nil {
+		return err
+	}
+	sendStage(ctx, updates, progress.StageEjecting)
+	if err := s.Backend.Eject(ctx, target); err != nil {
+		return fmt.Errorf("eject: %w", err)
+	}
+	out.Ejected = true
+	return nil
+}
+
+func (s *Service) finishRun(out *RunResult, runErr error, elapsed time.Duration) {
+	out.Elapsed = elapsed
+	if out.BytesWritten > 0 && elapsed > 0 {
+		out.AverageBytesPerSecond = float64(out.BytesWritten) / elapsed.Seconds()
+	}
+	if runErr == nil {
+		return
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, writer.ErrCancelled) {
+		_ = s.State.Transition(Cancelled)
+		return
+	}
+	_ = s.State.Transition(Failed)
 }
 
 func sendStage(ctx context.Context, updates chan<- progress.Update, stage progress.Stage) {
