@@ -102,6 +102,8 @@ type descriptionDiagnostics struct {
 	Values            map[string]valueDiagnostic
 }
 
+var errDiskWithoutBSDName = errors.New("DADiskGetBSDName and media BSD-name description were both empty")
+
 func (s *Session) Close() {
 	if s != nil && s.ref != 0 {
 		s.f.cf.api.release(s.ref)
@@ -167,7 +169,7 @@ func (s *Session) describe(d uintptr) (DiskDescription, error) {
 	get("kDADiskDescriptionVolumePathKey")
 	s.emitDiagnostic(diagnostic)
 	if out.BSDName == "" {
-		return DiskDescription{}, errors.New("DADiskGetBSDName and media BSD-name description were both empty")
+		return DiskDescription{}, errDiskWithoutBSDName
 	}
 	return out, nil
 }
