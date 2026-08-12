@@ -2,15 +2,10 @@
 
 package disk
 
-import (
-	"context"
-	"errors"
-	"testing"
-)
+import "testing"
 
-func TestWindowsManagerOutlineIsExplicitlyUnsupported(t *testing.T) {
-	manager := NewManager()
-	if _, err := manager.List(context.Background()); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("List error = %v, want ErrUnsupported", err)
+func TestPhysicalNumber(t *testing.T) {
+	if got := physicalNumber(`\\.\PhysicalDrive42`); got != 42 {
+		t.Fatalf("got %d", got)
 	}
 }

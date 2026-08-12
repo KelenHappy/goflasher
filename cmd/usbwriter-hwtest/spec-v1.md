@@ -1,5 +1,7 @@
 # GoFlasher hardware acceptance specification v1
 
+[Traditional Chinese / 繁體中文版](spec-v1.zh-TW.md)
+
 **Protocol identifier:** `goflasher-hwtest/v1`  
 **Status:** required for every stable release candidate  
 **Scope:** Linux, Windows, and macOS production backends on physical hardware
@@ -58,7 +60,7 @@ retain the complete stdout/stderr and the platform evidence listed below.
 | HW-06 | Run `write-remove` and physically unplug only the disposable target after writing progress begins. | I/O fails closed; no completion or verification is reported; reinsertion requires fresh enumeration and confirmation. |
 | HW-07 | Run `write-verify-eject` with the v1 image. | Unmount, complete write, explicit flush, byte-count-limited read-back SHA-256 verification, and platform eject/offline all succeed. |
 | HW-08 | Run `corruption-detect`; it writes/verifies, alters the first four bytes through the backend, flushes, then reads back against the original SHA-256. | `PASS: deliberate corruption detected`; a mismatch can never be reported as verified. |
-| HW-09 | After HW-07 eject/offline, inspect platform state and attempt safe physical removal. | Linux/macOS reports ejected or powered off; Windows reports the disk offline; no mounted partitions remain. |
+| HW-09 | After HW-07 eject, inspect platform state and attempt safe physical removal. | Linux/macOS reports ejected or powered off; Windows native safe removal succeeds; no mounted partitions remain. |
 
 `write-remove` intentionally prints its unplug instruction before starting. If
 the image completes first, the case fails and must be repeated with a larger
@@ -91,8 +93,9 @@ Get-Partition | Format-List DiskNumber,PartitionNumber,DriveLetter,IsBoot,IsSyst
 Get-Volume | Format-List DriveLetter,FileSystemLabel,Size
 ```
 
-Record the UAC/admin context and show that only the chosen disk transitions
-offline.
+These commands are optional test-evidence collection only; the production
+backend never invokes PowerShell. Record the UAC/admin context and show that
+only the chosen disk is locked, dismounted, and safely removed.
 
 ### macOS
 

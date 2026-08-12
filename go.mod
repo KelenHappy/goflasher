@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	fyne.io/fyne/v2 v2.8.0
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/ebitengine/purego v0.9.1
 	github.com/ulikunitz/xz v0.5.16
 	golang.org/x/sys v0.47.0
 )

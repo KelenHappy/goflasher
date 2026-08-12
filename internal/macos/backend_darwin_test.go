@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -250,17 +251,16 @@ func TestEveryOperationRevalidates(t *testing.T) {
 	}
 }
 
-func TestFormatLabelIsSingleArgument(t *testing.T) {
+func TestFormatRejectsInvalidLabelBeforeDiskOperations(t *testing.T) {
 	runner := sequencedRunner(allowedInfo, allowedInfo)
 	backend := &Backend{runner: runner}
 	selected, _ := backend.ListAllowedDevices(context.Background())
 	label := `name;$(touch /tmp/bad) "quoted" 'single'`
-	if err := backend.FormatFAT32(context.Background(), selected[0], label, nil); err != nil {
-		t.Fatal(err)
+	if err := backend.FormatFAT32(context.Background(), selected[0], label, nil); err == nil {
+		t.Fatal("invalid FAT32 label was accepted")
 	}
-	want := []string{"eraseDisk", "FAT32", label, "MBRFormat", "/dev/disk4"}
-	if fmt.Sprint(runner.runs) != fmt.Sprint([][]string{want}) {
-		t.Fatalf("commands = %v, want %v", runner.runs, want)
+	if len(runner.runs) != 0 {
+		t.Fatalf("disk commands executed for invalid label: %v", runner.runs)
 	}
 }
 
@@ -315,12 +315,24 @@ func TestCommandErrorIncludesStructuredCommandAndStderr(t *testing.T) {
 	assertCommandError(t, err, cause, "diskutil", "permission denied")
 }
 
-func TestFormatFAT32UsesWholeDeviceAndMBR(t *testing.T) {
+func testFormatOpener(t *testing.T, size int64) func(string) (formatTarget, error) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "disk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	return func(string) (formatTarget, error) { return f, nil }
+}
+
+func TestFormatFAT32UsesSharedFormatter(t *testing.T) {
 	runner := &fakeRunner{json: map[string][]byte{
 		"[list external physical]": []byte(`{"AllDisksAndPartitions":[{"DeviceIdentifier":"disk4"}]}`),
 		"[info disk4]":             []byte(`{"DeviceIdentifier":"disk4","DeviceNode":"/dev/disk4","DeviceTreePath":"IOService:/USB/disk@1","MediaName":"USB Flash","BusProtocol":"USB","TotalSize":16000000000,"Whole":true,"Internal":false,"RemovableMedia":true}`),
 	}}
-	backend := &Backend{runner: runner}
+	backend := &Backend{runner: runner, openFormat: testFormatOpener(t, 16000000000)}
 	devices, err := backend.ListAllowedDevices(context.Background())
 	if err != nil || len(devices) != 1 {
 		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
@@ -328,7 +340,7 @@ func TestFormatFAT32UsesWholeDeviceAndMBR(t *testing.T) {
 	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprint([]string{"eraseDisk", "FAT32", "GOFLASHER", "MBRFormat", "/dev/disk4"})
+	want := fmt.Sprint([]string{"unmountDisk", "/dev/disk4"})
 	if got := fmt.Sprint(runner.runs[0]); got != want {
 		t.Fatalf("format command = %s, want %s", got, want)
 	}
@@ -336,7 +348,7 @@ func TestFormatFAT32UsesWholeDeviceAndMBR(t *testing.T) {
 
 func TestBackendCommandsAlwaysHaveDeadlines(t *testing.T) {
 	runner := sequencedRunner(allowedInfo, allowedInfo)
-	backend := &Backend{runner: runner}
+	backend := &Backend{runner: runner, openFormat: testFormatOpener(t, 16000000000)}
 	devices, err := backend.ListAllowedDevices(context.Background())
 	if err != nil || len(devices) != 1 {
 		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)

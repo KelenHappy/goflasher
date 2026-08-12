@@ -141,7 +141,7 @@ candidate that will be published.
   state.
 - Confirm that no partition on drive A remains mounted.
 - On Linux or macOS, confirm that the drive is ejected or powered off.
-- On Windows, confirm that the disk is offline.
+- On Windows, confirm that native safe removal succeeds and no volume remains mounted.
 - Remove the drive only after the expected safe-removal state is visible.
 
 ## Evidence to keep

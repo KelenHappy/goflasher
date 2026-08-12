@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/fat32"
 	"github.com/goflasher/goflasher/internal/progress"
 )
 
@@ -71,11 +72,19 @@ const (
 	formatTimeout    = 10 * time.Minute
 )
 
-type Backend struct{ runner commandRunner }
+type formatTarget interface {
+	fat32.Device
+	io.Closer
+}
+type Backend struct {
+	runner     commandRunner
+	openFormat func(string) (formatTarget, error)
+}
 
 var _ device.Backend = (*Backend)(nil)
 
-func NewBackend() *Backend { return &Backend{runner: diskutilRunner{}} }
+func NewBackend() *Backend                               { return &Backend{runner: diskutilRunner{}, openFormat: openFormatTarget} }
+func openFormatTarget(path string) (formatTarget, error) { return os.OpenFile(path, os.O_RDWR, 0) }
 
 type listJSON struct {
 	Disks []listedDisk `json:"AllDisksAndPartitions"`
@@ -284,9 +293,37 @@ func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string
 	if label == "" {
 		label = "GOFLASHER"
 	}
-	out, err := b.runner.Run(ctx, "eraseDisk", "FAT32", label, "MBRFormat", wholeDevice(fresh.Path))
+	if !fat32.ValidLabel(label) {
+		return errors.New("format FAT32: invalid volume label")
+	}
+	if err := b.Unmount(ctx, fresh); err != nil {
+		return err
+	}
+	again, err := b.revalidate(ctx, fresh)
 	if err != nil {
-		return fmt.Errorf("format FAT32: %w: %s", err, strings.TrimSpace(string(out)))
+		return err
+	}
+	opener := b.openFormat
+	if opener == nil {
+		opener = openFormatTarget
+	}
+	target, err := opener(again.Path)
+	if err != nil {
+		return fmt.Errorf("format FAT32: %w", err)
+	}
+	defer target.Close()
+	err = fat32.Format(ctx, target, again.Size, label, func(percent uint64) {
+		if updates == nil {
+			return
+		}
+		select {
+		case updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: percent, TotalBytes: 100}:
+		case <-ctx.Done():
+		default:
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("format FAT32: %w", err)
 	}
 	return nil
 }

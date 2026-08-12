@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/fat32"
 	"github.com/goflasher/goflasher/internal/progress"
 	"golang.org/x/sys/unix"
 )
@@ -400,242 +400,14 @@ func (req privilegedRequest) valid() bool {
 	case modeWrite, modeRead, modeFlush:
 		return true
 	case modeFormatFAT32:
-		return validFATLabel(req.Label)
+		return fat32.ValidLabel(req.Label)
 	default:
 		return false
 	}
-}
-
-func validFATLabel(label string) bool {
-	if label == "" {
-		return false
-	}
-	if len(label) > 11 {
-		return false
-	}
-	for _, r := range label {
-		if !validFATLabelCharacter(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func validFATLabelCharacter(character rune) bool {
-	return strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-", character)
 }
 
 func makeFAT32(device *os.File, size uint64, label string, errOut io.Writer) error {
-	return formatFAT32(device, size, label, errOut)
-}
-
-type randomAccessSyncer interface {
-	io.WriterAt
-	Sync() error
-}
-
-// formatFAT32 creates a standards-compatible FAT32 "superfloppy" directly.
-// Keeping this small formatter in-process avoids executing distribution tools
-// as root and makes packaged formatting independent of dosfstools.
-func formatFAT32(device randomAccessSyncer, size uint64, label string, errOut io.Writer) error {
-	layout, err := newFAT32Layout(size)
-	if err != nil {
-		return err
-	}
-	formatter := fat32Formatter{device: device, layout: layout, label: label, progress: errOut}
-	return formatter.run()
-}
-
-const (
-	fat32SectorSize = uint64(512)
-	fat32Reserved   = uint64(32)
-	fat32FATCount   = uint64(2)
-)
-
-type fat32Layout struct {
-	totalSectors, sectorsPerCluster, fatSectors, clusters uint64
-}
-
-func newFAT32Layout(size uint64) (fat32Layout, error) {
-	if size < 64<<20 || size/fat32SectorSize > uint64(^uint32(0)) {
-		return fat32Layout{}, errors.New("device size is not supported by FAT32")
-	}
-	total := size / fat32SectorSize
-	clusterSize := fat32SectorsPerCluster(size)
-	fatSectors := requiredFATSectors(total, clusterSize)
-	dataSectors := total - fat32Reserved - fat32FATCount*fatSectors
-	clusters := dataSectors / clusterSize
-	if clusters < 65525 {
-		return fat32Layout{}, errors.New("device is too small for FAT32")
-	}
-	return fat32Layout{totalSectors: total, sectorsPerCluster: clusterSize, fatSectors: fatSectors, clusters: clusters}, nil
-}
-
-// requiredFATSectors uses a bounded monotonic search. The usual fixed-point
-// iteration can oscillate forever between adjacent values for valid sizes.
-func requiredFATSectors(totalSectors, sectorsPerCluster uint64) uint64 {
-	low := uint64(1)
-	high := (((totalSectors-fat32Reserved)/sectorsPerCluster+2)*4 + fat32SectorSize - 1) / fat32SectorSize
-	for low < high {
-		middle := low + (high-low)/2
-		clusters := (totalSectors - fat32Reserved - fat32FATCount*middle) / sectorsPerCluster
-		required := ((clusters+2)*4 + fat32SectorSize - 1) / fat32SectorSize
-		if required <= middle {
-			high = middle
-		} else {
-			low = middle + 1
-		}
-	}
-	return low
-}
-
-type fat32Formatter struct {
-	device   randomAccessSyncer
-	layout   fat32Layout
-	label    string
-	progress io.Writer
-}
-
-type formatPhase struct {
-	percent uint64
-	write   func() error
-}
-
-func (f *fat32Formatter) run() error {
-	phases := []formatPhase{
-		{10, f.clearPrimaryMetadata},
-		{15, f.clearBackupMetadata},
-		{25, f.writeHeaders},
-		{80, f.writeFATCopies},
-		{90, f.writeRootDirectory},
-		{100, f.device.Sync},
-	}
-	for _, phase := range phases {
-		if err := phase.write(); err != nil {
-			return err
-		}
-		fmt.Fprintf(f.progress, "PROGRESS %d 100\n", phase.percent)
-	}
-	return nil
-}
-
-// Clear both GPT metadata areas before creating the filesystem. The first 32
-// sectors are FAT32's reserved area; the final 33 sectors remain outside the
-// filesystem's allocated clusters.
-func (f *fat32Formatter) clearPrimaryMetadata() error {
-	return writeFullAt(f.device, make([]byte, fat32Reserved*fat32SectorSize), 0)
-}
-
-func (f *fat32Formatter) clearBackupMetadata() error {
-	offset := int64((f.layout.totalSectors - 33) * fat32SectorSize)
-	return writeFullAt(f.device, make([]byte, 33*fat32SectorSize), offset)
-}
-
-func (f *fat32Formatter) writeHeaders() error {
-	boot := fat32BootSector(uint32(f.layout.totalSectors), uint32(f.layout.fatSectors), byte(f.layout.sectorsPerCluster), f.label)
-	fsinfo := fat32FSInfo(uint32(f.layout.clusters))
-	writes := []struct {
-		offset int64
-		data   []byte
-	}{{0, boot}, {512, fsinfo}, {6 * 512, boot}, {7 * 512, fsinfo}}
-	for _, write := range writes {
-		if err := writeFullAt(f.device, write.data, write.offset); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *fat32Formatter) writeFATCopies() error {
-	fat := make([]byte, f.layout.fatSectors*fat32SectorSize)
-	binary.LittleEndian.PutUint32(fat[0:4], 0x0ffffff8)
-	binary.LittleEndian.PutUint32(fat[4:8], 0x0fffffff)
-	binary.LittleEndian.PutUint32(fat[8:12], 0x0fffffff)
-	for copyIndex := uint64(0); copyIndex < fat32FATCount; copyIndex++ {
-		offset := int64((fat32Reserved + copyIndex*f.layout.fatSectors) * fat32SectorSize)
-		if err := writeFullAt(f.device, fat, offset); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *fat32Formatter) writeRootDirectory() error {
-	root := make([]byte, f.layout.sectorsPerCluster*fat32SectorSize)
-	copy(root[:11], fatLabel(f.label))
-	root[11] = 0x08
-	offset := int64((fat32Reserved + fat32FATCount*f.layout.fatSectors) * fat32SectorSize)
-	return writeFullAt(f.device, root, offset)
-}
-
-func writeFullAt(target io.WriterAt, data []byte, offset int64) error {
-	for len(data) > 0 {
-		n, err := target.WriteAt(data, offset)
-		if err != nil {
-			return err
-		}
-		if n <= 0 || n > len(data) {
-			return io.ErrShortWrite
-		}
-		data = data[n:]
-		offset += int64(n)
-	}
-	return nil
-}
-
-func fat32SectorsPerCluster(size uint64) uint64 {
-	switch {
-	case size <= 260<<20:
-		return 1
-	case size <= 8<<30:
-		return 8
-	case size <= 16<<30:
-		return 16
-	case size <= 32<<30:
-		return 32
-	default:
-		return 64
-	}
-}
-
-func fatLabel(label string) []byte {
-	value := []byte("           ")
-	copy(value, label)
-	return value
-}
-
-func fat32BootSector(totalSectors, fatSectors uint32, sectorsPerCluster byte, label string) []byte {
-	b := make([]byte, 512)
-	copy(b[0:3], []byte{0xeb, 0x58, 0x90})
-	copy(b[3:11], "GOFLASH ")
-	binary.LittleEndian.PutUint16(b[11:13], 512)
-	b[13] = sectorsPerCluster
-	binary.LittleEndian.PutUint16(b[14:16], 32)
-	b[16] = 2
-	b[21] = 0xf8
-	binary.LittleEndian.PutUint16(b[24:26], 63)
-	binary.LittleEndian.PutUint16(b[26:28], 255)
-	binary.LittleEndian.PutUint32(b[32:36], totalSectors)
-	binary.LittleEndian.PutUint32(b[36:40], fatSectors)
-	binary.LittleEndian.PutUint32(b[44:48], 2)
-	binary.LittleEndian.PutUint16(b[48:50], 1)
-	binary.LittleEndian.PutUint16(b[50:52], 6)
-	b[64], b[66] = 0x80, 0x29
-	binary.LittleEndian.PutUint32(b[67:71], 0x47464c53)
-	copy(b[71:82], fatLabel(label))
-	copy(b[82:90], "FAT32   ")
-	b[510], b[511] = 0x55, 0xaa
-	return b
-}
-
-func fat32FSInfo(clusters uint32) []byte {
-	b := make([]byte, 512)
-	binary.LittleEndian.PutUint32(b[0:4], 0x41615252)
-	binary.LittleEndian.PutUint32(b[484:488], 0x61417272)
-	binary.LittleEndian.PutUint32(b[488:492], clusters-1)
-	binary.LittleEndian.PutUint32(b[492:496], 3)
-	binary.LittleEndian.PutUint32(b[508:512], 0xaa550000)
-	return b
+	return fat32.Format(context.Background(), device, size, label, func(percent uint64) { fmt.Fprintf(errOut, "PROGRESS %d 100\n", percent) })
 }
 
 func resolveDevice(req privilegedRequest, env helperEnvironment) (string, string, error) {

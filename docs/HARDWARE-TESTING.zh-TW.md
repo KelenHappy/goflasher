@@ -4,7 +4,7 @@
 
 本清單只說明發布硬體測試需要的實體設備與操作。命令、測試工具參數及正式的
 通過／失敗規則，仍以
-[`cmd/usbwriter-hwtest/spec-v1.md`](../cmd/usbwriter-hwtest/spec-v1.md) 為準。
+[`cmd/usbwriter-hwtest/spec-v1.zh-TW.md`](../cmd/usbwriter-hwtest/spec-v1.zh-TW.md) 為準。
 
 > **危險：**測試會清除選定 USB 裝置的全部內容。不可使用系統碟、備份碟，或
 > 存有任何資料唯一副本的裝置。
@@ -131,7 +131,7 @@ candidate。
 - 完成寫入及驗證後，檢查實體裝置和作業系統狀態。
 - 確認 A 上沒有任何 partition 仍處於 mounted 狀態。
 - Linux 或 macOS 必須顯示裝置已 eject 或 power off。
-- Windows 必須顯示 disk 已 offline。
+- Windows 必須確認原生安全退出成功，且沒有 volume 仍處於 mounted 狀態。
 - 看到預期的安全移除狀態後，才能拔除裝置。
 
 ## 必須保留的證據
