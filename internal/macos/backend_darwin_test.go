@@ -17,6 +17,11 @@ type runnerResult struct {
 	output []byte
 	err    error
 }
+
+type testCommandCause struct{}
+
+func (*testCommandCause) Error() string { return "command failed" }
+
 type fakeRunner struct {
 	json        map[string][]byte
 	runs        [][]string
@@ -195,7 +200,7 @@ func assertNoDevices(t *testing.T, devices []device.Device) {
 }
 
 func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
-	cause := errors.New("command failed")
+	cause := &testCommandCause{}
 	tests := []struct {
 		name   string
 		run    func(*Backend, device.Device) error
@@ -207,25 +212,45 @@ func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Selection enumerates once. Every operation enumerates again for
-			// identity revalidation; FormatFAT32 also revalidates before its
-			// nested unmount operation.
+			// Selection enumerates once. Every operation then enumerates again
+			// before touching the disk. Formatting additionally revalidates for
+			// its nested unmount, after unmount, and immediately before opening
+			// the raw device for formatting.
 			infos := []string{allowedInfo, allowedInfo}
 			if tt.name == "format" {
-				infos = append(infos, allowedInfo)
+				infos = append(infos, allowedInfo, allowedInfo, allowedInfo)
 			}
 			runner := sequencedRunner(infos...)
-			runner.runResults = []runnerResult{{output: []byte("diskutil output"), err: cause}}
 			backend := &Backend{runner: runner}
+			if tt.name == "format" {
+				// The only diskutil Run during shared formatting is unmountDisk;
+				// let it succeed, then fail the formatter opener with the original
+				// command cause and output.
+				runner.runResults = []runnerResult{{}}
+				backend.openFormat = func(string) (formatTarget, error) {
+					return nil, fmt.Errorf("format command: %w: diskutil output", cause)
+				}
+			} else {
+				runner.runResults = []runnerResult{{output: []byte("diskutil output"), err: cause}}
+			}
 			selected, _ := backend.ListAllowedDevices(context.Background())
 			err := tt.run(backend, selected[0])
 			assertCommandError(t, err, cause, tt.prefix, "diskutil output")
 			wantJSON := [][]string{{"list", "external", "physical"}, {"info", "disk4"}, {"list", "external", "physical"}, {"info", "disk4"}}
 			if tt.name == "format" {
-				wantJSON = append(wantJSON, []string{"list", "external", "physical"}, []string{"info", "disk4"})
+				for range 3 {
+					wantJSON = append(wantJSON, []string{"list", "external", "physical"}, []string{"info", "disk4"})
+				}
 			}
 			if fmt.Sprint(runner.jsonRuns) != fmt.Sprint(wantJSON) {
 				t.Fatalf("JSON command sequence = %v, want %v", runner.jsonRuns, wantJSON)
+			}
+			wantRun := [][]string{{"unmountDisk", "/dev/disk4"}}
+			if tt.name == "eject" {
+				wantRun = [][]string{{"eject", "/dev/disk4"}}
+			}
+			if got, want := fmt.Sprint(runner.runs), fmt.Sprint(wantRun); got != want {
+				t.Fatalf("run command sequence = %v, want %v", runner.runs, wantRun)
 			}
 		})
 	}
@@ -235,6 +260,10 @@ func assertCommandError(t *testing.T, err, cause error, prefix, output string) {
 	t.Helper()
 	if !errors.Is(err, cause) {
 		t.Fatalf("error = %v, want cause %v", err, cause)
+	}
+	var typedCause *testCommandCause
+	if !errors.As(err, &typedCause) || typedCause != cause {
+		t.Fatalf("error = %v, want typed cause %T", err, cause)
 	}
 	if !strings.Contains(err.Error(), output) {
 		t.Fatalf("error = %v, want output %q", err, output)
@@ -326,7 +355,7 @@ func TestDeviceFromInfoRequiresMatchingStructuredIdentifiers(t *testing.T) {
 }
 
 func TestCommandErrorIncludesStructuredCommandAndStderr(t *testing.T) {
-	cause := errors.New("exit status 1")
+	cause := &testCommandCause{}
 	err := commandError("diskutil", cause, []byte(" permission denied\n"))
 	assertCommandError(t, err, cause, "diskutil", "permission denied")
 }
