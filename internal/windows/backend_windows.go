@@ -1,20 +1,17 @@
 //go:build windows
 
-// Package windows implements conservative removable USB disk discovery and
-// raw access using Windows PowerShell storage cmdlets.
+// Package windows implements Windows disk access directly through the Win32
+// storage APIs. It intentionally never invokes a command interpreter.
 package windows
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"strconv"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/progress"
@@ -24,219 +21,236 @@ var (
 	ErrUnsupportedDevice = errors.New("unsupported device")
 	ErrSystemDisk        = errors.New("system disk")
 	ErrDeviceChanged     = errors.New("device identity changed")
-	ErrUnmountFailed     = errors.New("could not take disk offline; run GoFlasher as administrator")
+	ErrUnmountFailed     = errors.New("could not lock and dismount every volume; run GoFlasher as administrator")
 )
 
-type commandRunner interface {
-	Output(context.Context, string) ([]byte, error)
+// diskRecord is deliberately free of Win32 handles. A snapshot can safely be
+// passed to policy code and tests; handles remain owned by nativeAPI.
+type diskRecord struct {
+	device.Device
+	deviceHotplug, mediaHotplug, usbAncestor bool
+	deviceNumber                             uint32
+	devInst                                  uint32
 }
 
-type powerShellRunner struct{}
-
-func (powerShellRunner) Output(ctx context.Context, script string) ([]byte, error) {
-	return exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script).CombinedOutput()
+type nativeAPI interface {
+	list(context.Context) ([]diskRecord, error)
+	lockVolumes(context.Context, uint32) (volumeLocks, error)
+	openDisk(context.Context, diskRecord, bool) (nativeFile, error)
+	eject(context.Context, diskRecord) error
+	formatFAT32(context.Context, diskRecord, string, chan<- progress.Update) error
 }
+type nativeFile interface {
+	io.ReadWriteCloser
+	Flush() error
+}
+type volumeLocks interface{ Close() error }
 
-const (
-	queryTimeout     = 30 * time.Second
-	operationTimeout = 2 * time.Minute
-	formatTimeout    = 10 * time.Minute
-)
-
-type Backend struct{ runner commandRunner }
+type Backend struct {
+	api   nativeAPI
+	mu    sync.Mutex
+	locks map[string]volumeLocks
+}
 
 var _ device.Backend = (*Backend)(nil)
+var _ device.FAT32Formatter = (*Backend)(nil)
 
-func NewBackend() *Backend { return &Backend{runner: powerShellRunner{}} }
-
-type diskJSON struct {
-	Number         uint32   `json:"Number"`
-	FriendlyName   string   `json:"FriendlyName"`
-	SerialNumber   string   `json:"SerialNumber"`
-	UniqueID       string   `json:"UniqueId"`
-	Size           uint64   `json:"Size"`
-	BusType        string   `json:"BusType"`
-	IsBoot         bool     `json:"IsBoot"`
-	IsSystem       bool     `json:"IsSystem"`
-	IsOffline      bool     `json:"IsOffline"`
-	PartitionCount int      `json:"PartitionCount"`
-	MountPoints    []string `json:"MountPoints"`
-	IsRemovable    bool     `json:"IsRemovable"`
+func NewBackend() *Backend { return &Backend{api: newWinAPI(), locks: make(map[string]volumeLocks)} }
+func (b *Backend) native() nativeAPI {
+	if b.api == nil {
+		b.api = newWinAPI()
+	}
+	return b.api
 }
 
-const listScript = `$ErrorActionPreference='Stop'; $disks=@(
-Get-Disk | ForEach-Object {
-  $parts=@(Get-Partition -DiskNumber $_.Number -ErrorAction SilentlyContinue)
-  $volumes=@($parts | Get-Volume -ErrorAction SilentlyContinue)
-  $cim=Get-CimInstance Win32_DiskDrive -Filter ("Index=" + $_.Number) -ErrorAction SilentlyContinue
-  [pscustomobject]@{
-    Number=$_.Number; FriendlyName=$_.FriendlyName; SerialNumber=$_.SerialNumber
-    UniqueId=$_.UniqueId; Size=$_.Size; BusType=[string]$_.BusType
-    IsBoot=$_.IsBoot; IsSystem=$_.IsSystem; IsOffline=$_.IsOffline
-    PartitionCount=$parts.Count
-    MountPoints=@($volumes | Where-Object DriveLetter | ForEach-Object { ([string]$_.DriveLetter) + ':\' })
-    IsRemovable=[bool]($cim.MediaType -match 'Removable')
-  }
-}); ConvertTo-Json -InputObject $disks -Compress`
+func classify(r *diskRecord) {
+	d := &r.Device
+	d.IsAllowed = false
+	d.RejectReason = ErrUnsupportedDevice.Error()
+	if d.IsSystemDisk {
+		d.RejectReason = ErrSystemDisk.Error()
+		return
+	}
+	// Bus type is corroborating evidence, never the sole admission criterion.
+	external := r.usbAncestor || strings.EqualFold(d.Transport, "usb")
+	hotplug := r.deviceHotplug || r.mediaHotplug
+	identity := d.Serial != "" || d.WWN != ""
+	if external && hotplug && identity && d.Size != 0 && d.Path != "" &&
+		!strings.EqualFold(d.Transport, "virtual") && !strings.EqualFold(d.Transport, "filebackedvirtual") {
+		d.IsAllowed = true
+		d.RejectReason = ""
+	}
+}
 
-func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
-	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
-	defer cancel()
-	out, err := b.runner.Output(ctx, listScript)
+func (b *Backend) records(ctx context.Context) ([]diskRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rs, err := b.native().list(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("enumerate Windows disks: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("enumerate Windows disks: %w", err)
 	}
-	if strings.TrimSpace(string(out)) == "" {
-		return nil, nil
+	for i := range rs {
+		classify(&rs[i])
 	}
-	var raw []diskJSON
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("decode Windows disks: %w", err)
-	}
-	result := make([]device.Device, 0, len(raw))
-	for _, disk := range raw {
-		serial := strings.TrimSpace(disk.SerialNumber)
-		uniqueID := strings.TrimSpace(disk.UniqueID)
-		path := `\\.\PhysicalDrive` + strconv.FormatUint(uint64(disk.Number), 10)
-		id := uniqueID
-		if id == "" {
-			id = serial
-		}
-		d := device.Device{
-			ID: id, Path: path, Model: strings.TrimSpace(disk.FriendlyName),
-			Serial: serial, WWN: uniqueID, Transport: strings.ToLower(disk.BusType),
-			SysfsPath: uniqueID, Major: disk.Number, Size: disk.Size,
-			// Treat every online disk as mounted/unsafe for raw access. Set-Disk must
-			// report it offline before OpenWriter/OpenReader can proceed.
-			Mounted: !disk.IsOffline, MountPoints: disk.MountPoints, IsSystemDisk: disk.IsBoot || disk.IsSystem,
-			PartitionCount: disk.PartitionCount,
-		}
-		switch {
-		case d.IsSystemDisk:
-			d.RejectReason = ErrSystemDisk.Error()
-		case !strings.EqualFold(disk.BusType, "USB") || !disk.IsRemovable || disk.Size == 0 || id == "":
-			d.RejectReason = ErrUnsupportedDevice.Error()
-		default:
-			d.IsAllowed = true
-		}
-		result = append(result, d)
-	}
-	return result, nil
+	return rs, nil
 }
-
 func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
-	all, err := b.list(ctx)
+	rs, err := b.records(ctx)
 	if err != nil {
 		return nil, err
 	}
-	allowed := make([]device.Device, 0, len(all))
-	for _, d := range all {
-		if d.IsAllowed {
-			allowed = append(allowed, d)
+	var out []device.Device
+	for _, r := range rs {
+		if r.IsAllowed {
+			out = append(out, r.Device)
 		}
 	}
-	return allowed, nil
+	return out, nil
 }
-
+func (b *Backend) record(ctx context.Context, id string) (diskRecord, error) {
+	rs, err := b.records(ctx)
+	if err != nil {
+		return diskRecord{}, err
+	}
+	for _, r := range rs {
+		if r.ID == id {
+			return r, nil
+		}
+	}
+	return diskRecord{}, os.ErrNotExist
+}
 func (b *Backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {
-	all, err := b.list(ctx)
-	if err != nil {
-		return device.Device{}, err
-	}
-	for _, d := range all {
-		if d.ID == id {
-			return d, nil
-		}
-	}
-	return device.Device{}, os.ErrNotExist
+	r, err := b.record(ctx, id)
+	return r.Device, err
 }
-
-func (b *Backend) revalidate(ctx context.Context, selected device.Device) (device.Device, error) {
-	fresh, err := b.RefreshDevice(ctx, selected.ID)
+func (b *Backend) revalidate(ctx context.Context, selected device.Device) (diskRecord, error) {
+	r, err := b.record(ctx, selected.ID)
 	if err != nil {
-		return device.Device{}, fmt.Errorf("%w: %w", ErrDeviceChanged, err)
+		return diskRecord{}, fmt.Errorf("%w: %v", ErrDeviceChanged, err)
 	}
-	if !fresh.IsAllowed {
-		return device.Device{}, fmt.Errorf("%w: %s", ErrUnsupportedDevice, fresh.RejectReason)
+	if !r.IsAllowed {
+		return diskRecord{}, fmt.Errorf("%w: %s", ErrUnsupportedDevice, r.RejectReason)
 	}
-	if !device.SameIdentity(selected, fresh) || selected.Size != fresh.Size || selected.Model != fresh.Model {
-		return device.Device{}, ErrDeviceChanged
+	if !device.SameIdentity(selected, r.Device) || selected.Size != r.Size || selected.Model != r.Model {
+		return diskRecord{}, ErrDeviceChanged
 	}
-	return fresh, nil
+	return r, nil
 }
-
-func (b *Backend) Unmount(ctx context.Context, selected device.Device) error {
-	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
-	defer cancel()
-	fresh, err := b.revalidate(ctx, selected)
-	if err != nil {
-		return err
-	}
-	script := fmt.Sprintf("$ErrorActionPreference='Stop'; Set-Disk -Number %d -IsOffline $true", fresh.Major)
-	if out, err := b.runner.Output(ctx, script); err != nil {
-		return fmt.Errorf("%w: %w: %s", ErrUnmountFailed, err, strings.TrimSpace(string(out)))
-	}
-	again, err := b.revalidate(ctx, fresh)
-	if err != nil {
-		return err
-	}
-	if again.Mounted {
-		return ErrUnmountFailed
+func (b *Backend) release(id string) error {
+	b.mu.Lock()
+	l := b.locks[id]
+	delete(b.locks, id)
+	b.mu.Unlock()
+	if l != nil {
+		return l.Close()
 	}
 	return nil
 }
 
-func (b *Backend) open(ctx context.Context, selected device.Device, flag int) (*os.File, error) {
-	fresh, err := b.revalidate(ctx, selected)
+// ReleaseDevice releases volume locks after the service has completed flush,
+// optional verification, and eject processing.
+func (b *Backend) ReleaseDevice(d device.Device) error { return b.release(d.ID) }
+func (b *Backend) Unmount(ctx context.Context, d device.Device) error {
+	r, err := b.revalidate(ctx, d)
+	if err != nil {
+		return err
+	}
+	_ = b.release(d.ID)
+	l, err := b.native().lockVolumes(ctx, r.deviceNumber)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnmountFailed, err)
+	}
+	b.mu.Lock()
+	b.locks[d.ID] = l
+	b.mu.Unlock()
+	return nil
+}
+
+type managedFile struct {
+	nativeFile
+	once         sync.Once
+	flushOnClose bool
+	closeErr     error
+}
+
+func (f *managedFile) Close() error {
+	f.once.Do(func() {
+		if f.flushOnClose {
+			if err := f.nativeFile.Flush(); err != nil {
+				f.closeErr = err
+			}
+		}
+		if err := f.nativeFile.Close(); f.closeErr == nil {
+			f.closeErr = err
+		}
+	})
+	return f.closeErr
+}
+func (b *Backend) open(ctx context.Context, d device.Device, write bool) (*managedFile, error) {
+	r, err := b.revalidate(ctx, d)
 	if err != nil {
 		return nil, err
 	}
-	if !fresh.Mounted {
-		return os.OpenFile(fresh.Path, flag, 0)
+	b.mu.Lock()
+	l := b.locks[d.ID]
+	b.mu.Unlock()
+	if write && l == nil {
+		return nil, ErrUnmountFailed
 	}
-	return nil, ErrUnmountFailed
+	// native open performs identity IOCTLs on the returned handle, closing the
+	// disk-number reuse window between validation and destructive access.
+	f, err := b.native().openDisk(ctx, r, write)
+	if err != nil {
+		return nil, err
+	}
+	return &managedFile{nativeFile: f, flushOnClose: write}, nil
 }
-
 func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
-	return b.open(ctx, d, os.O_WRONLY)
+	return b.open(ctx, d, true)
 }
 func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadCloser, error) {
-	return b.open(ctx, d, os.O_RDONLY)
+	return b.open(ctx, d, false)
 }
 func (b *Backend) Flush(ctx context.Context, d device.Device) error {
-	f, err := b.open(ctx, d, os.O_WRONLY)
+	// FlushFileBuffers requires a handle opened with write access.
+	f, err := b.open(ctx, d, true)
 	if err != nil {
 		return err
 	}
+	// Flush explicitly below; Close only owns the handle for this short-lived
+	// flush operation and must not issue a duplicate FlushFileBuffers call.
+	f.flushOnClose = false
 	defer f.Close()
-	return f.Sync()
+	return f.Flush()
 }
 func (b *Backend) Eject(ctx context.Context, d device.Device) error {
-	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
-	defer cancel()
-	fresh, err := b.revalidate(ctx, d)
+	r, err := b.revalidate(ctx, d)
 	if err != nil {
 		return err
 	}
-	if fresh.Mounted {
+	defer b.release(d.ID)
+	return b.native().eject(ctx, r)
+}
+func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string, updates chan<- progress.Update) error {
+	r, err := b.revalidate(ctx, d)
+	if err != nil {
+		return err
+	}
+	if err := b.Unmount(ctx, r.Device); err != nil {
+		return err
+	}
+	r, err = b.revalidate(ctx, r.Device)
+	if err != nil {
+		_ = b.release(d.ID)
+		return err
+	}
+	b.mu.Lock()
+	l := b.locks[d.ID]
+	b.mu.Unlock()
+	if l == nil {
 		return ErrUnmountFailed
 	}
-	return nil // An offline disk is in Windows' safe-removal state.
-}
-
-func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string, updates chan<- progress.Update) error {
-	ctx, cancel := context.WithTimeout(ctx, formatTimeout)
-	defer cancel()
-	fresh, err := b.revalidate(ctx, d)
-	if err != nil {
-		return err
-	}
-	// Literal labels are escaped before interpolation. Clear-Disk and the
-	// explicit MBR initialization make this a full-device, Rufus-style format.
-	label = strings.ReplaceAll(label, "'", "''")
-	script := fmt.Sprintf("$ErrorActionPreference='Stop'; Set-Disk -Number %d -IsOffline $false; Clear-Disk -Number %d -RemoveData -RemoveOEM -Confirm:$false; Initialize-Disk -Number %d -PartitionStyle MBR; $p=New-Partition -DiskNumber %d -UseMaximumSize -AssignDriveLetter; Format-Volume -Partition $p -FileSystem FAT32 -NewFileSystemLabel '%s' -Confirm:$false -Force | Out-Null", fresh.Major, fresh.Major, fresh.Major, fresh.Major, label)
-	if out, err := b.runner.Output(ctx, script); err != nil {
-		return fmt.Errorf("format FAT32: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	defer b.release(d.ID)
+	return b.native().formatFAT32(ctx, r, label, updates)
 }

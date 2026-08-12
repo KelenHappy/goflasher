@@ -11,6 +11,32 @@ permissions:
   contents: read
 
 jobs:
+  macos-native-phase1:
+    name: macOS native framework Phase 1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: amd64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download purego binding dependency
+        run: go mod download github.com/ebitengine/purego
+      - name: Verify native architecture
+        run: test "$(go env GOARCH)" = "${{ matrix.arch }}"
+      - name: Test CoreFoundation, Disk Arbitration, IOKit, and callback ABI
+        run: go test -v ./internal/disk/darwin/native -run '^TestPhase1'
+      - name: Build Darwin native adapter
+        run: go test -v ./internal/disk/darwin
+
   test:
     strategy:
       fail-fast: false
@@ -23,6 +49,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Download Darwin-only binding dependency
+        if: runner.os == 'macOS'
+        run: go mod download github.com/ebitengine/purego
       - name: Test built-in XZ streaming
         run: go test ./internal/image -run XZ
       - name: Test native disk manager

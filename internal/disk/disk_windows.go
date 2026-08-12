@@ -1,28 +1,59 @@
 //go:build windows
 
-// Windows is intentionally a compile-safe outline while the Linux manager is
-// brought to production readiness. Keep the common API intact so the native
-// Win32 implementation can be added without changing callers.
 package disk
 
-import "context"
+import (
+	"context"
+	"errors"
+	"os"
 
-type windowsManager struct{}
+	"github.com/goflasher/goflasher/internal/device"
+	win "github.com/goflasher/goflasher/internal/windows"
+)
 
-func NewManager() Manager { return &windowsManager{} }
+type windowsManager struct{ backend device.Backend }
 
-func (*windowsManager) List(context.Context) ([]Disk, error) {
-	return nil, ErrUnsupported
+func NewManager() Manager { return &windowsManager{backend: win.NewBackend()} }
+func fromDevice(d device.Device) Disk {
+	return Disk{ID: d.ID, Device: d.Path, Vendor: d.Vendor, Model: d.Model, Serial: d.Serial, Bus: d.Transport, Size: d.Size, Removable: d.IsAllowed, External: d.IsAllowed, System: d.IsSystemDisk, Mounted: d.Mounted, MountPoints: d.MountPoints}
 }
-
-func (*windowsManager) Refresh(context.Context, string) (Disk, error) {
-	return Disk{}, ErrUnsupported
+func toDevice(d Disk) device.Device {
+	return device.Device{ID: d.ID, Path: d.Device, Vendor: d.Vendor, Model: d.Model, Serial: d.Serial, WWN: d.ID, Transport: d.Bus, Major: physicalNumber(d.Device), Size: d.Size, IsSystemDisk: d.System, IsAllowed: d.External && d.Removable, Mounted: d.Mounted, MountPoints: d.MountPoints}
 }
-
-func (*windowsManager) Unmount(context.Context, Disk) error {
-	return ErrUnsupported
+func physicalNumber(path string) uint32 {
+	var n uint32
+	for i := len(`\\.\PhysicalDrive`); i < len(path); i++ {
+		if path[i] < '0' || path[i] > '9' {
+			return 0
+		}
+		n = n*10 + uint32(path[i]-'0')
+	}
+	return n
 }
-
-func (*windowsManager) Eject(context.Context, Disk) error {
-	return ErrUnsupported
+func (m *windowsManager) List(ctx context.Context) ([]Disk, error) {
+	ds, err := m.backend.ListAllowedDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Disk, len(ds))
+	for i, d := range ds {
+		out[i] = fromDevice(d)
+	}
+	return out, nil
+}
+func (m *windowsManager) Refresh(ctx context.Context, id string) (Disk, error) {
+	d, err := m.backend.RefreshDevice(ctx, id)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Disk{}, ErrNotFound
+		}
+		return Disk{}, err
+	}
+	return fromDevice(d), nil
+}
+func (m *windowsManager) Unmount(ctx context.Context, d Disk) error {
+	return m.backend.Unmount(ctx, toDevice(d))
+}
+func (m *windowsManager) Eject(ctx context.Context, d Disk) error {
+	return m.backend.Eject(ctx, toDevice(d))
 }

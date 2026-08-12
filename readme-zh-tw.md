@@ -33,16 +33,16 @@
   儲存裝置橋接器、UAS 裝置及容量較大且無法明確辨識的 USB 儲存裝置。
 - 在卸載前及開啟原始裝置前，重新驗證裝置身分。
 - 提供跨平台且不洩漏原生 handle 或常數的 `disk.Manager` 統一介面，上層只需呼叫
-  `disk.NewManager()`。Linux 的 sysfs/udisks 實作已啟用；Windows 與 macOS 目前先
-  保留可編譯的雛形，日後再分別接上 Win32 API 與 Disk Arbitration/IOKit。
+  `disk.NewManager()`。Linux 的 sysfs/udisks 與 Windows 原生實作已啟用；macOS
+  目前保留可編譯的雛形，日後再接上 Disk Arbitration/IOKit。
 
 GoFlasher 不會分析、辨識或限制映像檔內含的作業系統。因此，在每個支援的主機
 平台上，都可以燒錄 Linux ISO 或其他支援格式的 raw disk image；目前接受
 `.iso`、`.img`、`.raw`，以及以 gzip（`.gz`）或 XZ（`.xz`）壓縮的映像檔。
 
 GoFlasher 主要是映像檔寫入工具，也可以清除已選取且受支援的 USB 裝置並建立
-名為 `GOFLASHER` 的 FAT32 檔案系統。Linux 使用內建格式化器建立全裝置 FAT32；
-Windows 與 macOS 則建立含單一 FAT32 volume 的 MBR 配置。它不會下載作業系統
+名為 `GOFLASHER` 的全裝置 FAT32 檔案系統。Linux、Windows 與 macOS 都使用同一個
+內建純 Go 格式化器，不會啟動作業系統格式化工具。它不會下載作業系統
 映像檔、建立 Windows 安裝替代方案、建立持久化分割區或執行壞軌測試。
 
 ## 主機平台支援
@@ -50,8 +50,9 @@ Windows 與 macOS 則建立含單一 FAT32 volume 的 MBR 配置。它不會下�
 「跨平台」是指 GoFlasher 程式與原始裝置後端可以在 **Linux、Windows 與
 macOS 主機**上執行，而不是指映像檔受限於主機平台。在上述三種平台中的任何
 一種主機上，GoFlasher 都能將 Linux ISO 或其他支援的 raw disk image 寫入核准的
-可移除式媒體。Windows 使用原生 Explorer 檔案選擇器與 PowerShell 儲存裝置
-指令；macOS 使用原生 Finder 選擇器與 `diskutil`。兩者的原始磁碟存取都需要
+可移除式媒體。Windows 使用原生 Explorer 檔案選擇器，以及 Win32 SetupAPI、
+Configuration Manager、volume-control 與 storage IOCTL；macOS 使用原生 Finder
+選擇器與 `diskutil` 執行探索、卸載及退出。兩者的原始磁碟存取都需要
 提升權限。
 
 目前的後端會讀取 Linux 的 sysfs、procfs 與 udev 資訊，並透過 system D-Bus 直接
@@ -60,8 +61,9 @@ GUI；寫入、回讀與 flush 會透過
 polkit 呼叫由 root 擁有的專用權限提升輔助程式。
 
 這不表示所有平台都已完全不依賴主機指令。Linux 直接讀取 `/run/udev/data` 補充裝置
-分類，只以 `pkexec` 啟動權限提升輔助程式；Windows 使用 PowerShell Storage/CIM cmdlet；macOS
-使用 `diskutil`、`plutil` 與 `osascript`。三個平台的原生版本都會在 CI 中建置及測試，
+分類，只以 `pkexec` 啟動權限提升輔助程式。Windows 的磁碟探索、身分驗證、raw I/O、
+volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動 CLI；macOS 仍使用
+`diskutil` 管理裝置及 `osascript` 開啟原生選擇器，但格式化在程式內完成。三個平台的原生版本都會在 CI 中建置及測試，
 但 Windows/macOS 仍需要原生主機權限及實體媒體驗收才能發布。完整邊界及改用原生 API
 的方向請參閱 [BUILDING.md](BUILDING.md#native-api-and-command-dependencies)。
 

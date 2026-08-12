@@ -1,5 +1,7 @@
 # Security policy
 
+[Traditional Chinese / 繁體中文版](SECURITY.zh-TW.md)
+
 GoFlasher writes directly to block devices, so security and device-selection
 bugs can cause irreversible data loss.
 

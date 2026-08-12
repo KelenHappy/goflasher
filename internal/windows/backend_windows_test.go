@@ -3,272 +3,163 @@
 package windows
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"strings"
+	"io"
 	"testing"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/progress"
 )
 
-type runnerResult struct {
-	output []byte
-	err    error
-}
-type fakeRunner struct {
-	output    []byte
-	err       error
-	script    string
-	results   []runnerResult
-	scripts   []string
-	deadlines []bool
+type fakeLocks struct{ closes int }
+
+func (f *fakeLocks) Close() error { f.closes++; return nil }
+
+type fakeFile struct {
+	bytes.Buffer
+	flushes, closes int
 }
 
-func (f *fakeRunner) Output(ctx context.Context, script string) ([]byte, error) {
-	_, hasDeadline := ctx.Deadline()
-	f.deadlines = append(f.deadlines, hasDeadline)
-	f.script = script
-	f.scripts = append(f.scripts, script)
-	if len(f.results) > 0 {
-		result := f.results[0]
-		f.results = f.results[1:]
-		return result.output, result.err
+func (f *fakeFile) Close() error { f.closes++; return nil }
+func (f *fakeFile) Flush() error { f.flushes++; return nil }
+
+type fakeAPI struct {
+	records          []diskRecord
+	locks            *fakeLocks
+	file             *fakeFile
+	opens, lockCalls int
+	openWrites       []bool
+}
+
+func (f *fakeAPI) list(context.Context) ([]diskRecord, error) {
+	return append([]diskRecord(nil), f.records...), nil
+}
+func (f *fakeAPI) lockVolumes(context.Context, uint32) (volumeLocks, error) {
+	f.lockCalls++
+	f.locks = &fakeLocks{}
+	return f.locks, nil
+}
+func (f *fakeAPI) openDisk(_ context.Context, _ diskRecord, write bool) (nativeFile, error) {
+	f.opens++
+	f.openWrites = append(f.openWrites, write)
+	if f.file == nil {
+		f.file = &fakeFile{}
 	}
-	return f.output, f.err
+	return f.file, nil
+}
+func (*fakeAPI) eject(context.Context, diskRecord) error { return nil }
+func (*fakeAPI) formatFAT32(context.Context, diskRecord, string, chan<- progress.Update) error {
+	return nil
 }
 
-func TestListAllowedDevices(t *testing.T) {
-	runner := &fakeRunner{output: []byte(`[
-{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true,"PartitionCount":1,"MountPoints":["E:\\"]},
-{"Number":0,"FriendlyName":"System SSD","UniqueId":"SYSTEM","Size":1000000000000,"BusType":"NVMe","IsBoot":true,"IsSystem":true}
-]`)}
-	backend := &Backend{runner: runner}
-	devices, err := backend.ListAllowedDevices(context.Background())
+func candidate() diskRecord {
+	return diskRecord{Device: device.Device{ID: "storage:SERIAL", Path: `\\.\PhysicalDrive4`, Model: "Flash", Serial: "SERIAL", WWN: "storage:SERIAL", Transport: "usb", Major: 4, Size: 16 << 30}, deviceNumber: 4, usbAncestor: true, deviceHotplug: true}
+}
+
+func TestPolicyRequiresCorroboratingSignals(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*diskRecord)
+		allowed bool
+	}{
+		{"safe", func(*diskRecord) {}, true},
+		{"bus alone", func(r *diskRecord) { r.deviceHotplug = false; r.mediaHotplug = false }, false},
+		{"hotplug alone", func(r *diskRecord) { r.usbAncestor = false; r.Transport = "sata" }, false},
+		{"no identity", func(r *diskRecord) { r.ID = ""; r.Serial = ""; r.WWN = "" }, false},
+		{"system", func(r *diskRecord) { r.IsSystemDisk = true }, false},
+		{"virtual", func(r *diskRecord) { r.Transport = "virtual" }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := candidate()
+			tt.mutate(&r)
+			classify(&r)
+			if r.IsAllowed != tt.allowed {
+				t.Fatalf("allowed=%v", r.IsAllowed)
+			}
+		})
+	}
+}
+func TestEveryOpenRevalidates(t *testing.T) {
+	api := &fakeAPI{records: []diskRecord{candidate()}}
+	b := &Backend{api: api, locks: map[string]volumeLocks{}}
+	ds, err := b.ListAllowedDevices(context.Background())
+	if err != nil || len(ds) != 1 {
+		t.Fatal(ds, err)
+	}
+	if _, err = b.OpenWriter(context.Background(), ds[0]); !errors.Is(err, ErrUnmountFailed) {
+		t.Fatal(err)
+	}
+	if err = b.Unmount(context.Background(), ds[0]); err != nil {
+		t.Fatal(err)
+	}
+	w, err := b.OpenWriter(context.Background(), ds[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(devices) != 1 {
-		t.Fatalf("got %d allowed devices, want 1", len(devices))
-	}
-	assertAllowedDevice(t, devices[0])
-}
-
-func assertAllowedDevice(t *testing.T, got device.Device) {
-	t.Helper()
-	if got.ID != "USB-ID" {
-		t.Fatalf("device ID = %q, want USB-ID", got.ID)
-	}
-	if got.Path != `\\.\PhysicalDrive4` {
-		t.Fatalf("device path = %q", got.Path)
-	}
-	if !got.Mounted {
-		t.Fatal("device is not mounted")
-	}
-	if !got.IsAllowed {
-		t.Fatal("device is not allowed")
-	}
-	if len(got.MountPoints) != 1 {
-		t.Fatalf("mount points = %q, want one", got.MountPoints)
-	}
-	if got.MountPoints[0] != `E:\` {
-		t.Fatalf("mount point = %q, want E:\\", got.MountPoints[0])
-	}
-}
-
-const allowedDisk = `[{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true}]`
-
-func TestDestructiveOperationsRejectChangedDevice(t *testing.T) {
-	changes := map[string]string{
-		"identity":    strings.Replace(allowedDisk, "USB-ID", "OTHER-ID", 1),
-		"serial":      strings.Replace(allowedDisk, "SERIAL", "OTHER-SERIAL", 1),
-		"capacity":    strings.Replace(allowedDisk, "16000000000", "32000000000", 1),
-		"model":       strings.Replace(allowedDisk, "USB Flash", "Replacement", 1),
-		"disk number": strings.Replace(allowedDisk, `"Number":4`, `"Number":5`, 1),
-	}
-	operations := map[string]func(*Backend, device.Device) error{
-		"Unmount":     func(b *Backend, d device.Device) error { return b.Unmount(context.Background(), d) },
-		"OpenWriter":  func(b *Backend, d device.Device) error { _, err := b.OpenWriter(context.Background(), d); return err },
-		"FormatFAT32": func(b *Backend, d device.Device) error { return b.FormatFAT32(context.Background(), d, "TEST", nil) },
-	}
-	for change, changed := range changes {
-		for operation, run := range operations {
-			t.Run(change+"/"+operation, func(t *testing.T) {
-				runner := &fakeRunner{results: []runnerResult{{output: []byte(allowedDisk)}, {output: []byte(changed)}}}
-				backend := &Backend{runner: runner}
-				selected, err := backend.ListAllowedDevices(context.Background())
-				if err != nil || len(selected) != 1 {
-					t.Fatalf("select device: %v, %v", selected, err)
-				}
-				if err := run(backend, selected[0]); !errors.Is(err, ErrDeviceChanged) {
-					t.Fatalf("error = %v, want ErrDeviceChanged", err)
-				}
-				if len(runner.scripts) != 2 {
-					t.Fatalf("commands = %v; destructive command was executed", runner.scripts)
-				}
-			})
-		}
-	}
-}
-
-func TestListAllowedDevicesFailsClosed(t *testing.T) {
-	rejected := `[
-{"Number":0,"UniqueId":"system","Size":1,"BusType":"USB","IsRemovable":true,"IsSystem":true},
-{"Number":1,"UniqueId":"boot","Size":1,"BusType":"USB","IsRemovable":true,"IsBoot":true},
-{"Number":2,"UniqueId":"internal","Size":1,"BusType":"NVMe","IsRemovable":false},
-{"Number":3,"UniqueId":"fixed","Size":1,"BusType":"USB","IsRemovable":false},
-{"Number":4,"UniqueId":"sata","Size":1,"BusType":"SATA","IsRemovable":true},
-{"Number":5,"Size":1,"BusType":"USB","IsRemovable":true}]`
-	tests := []struct {
-		name    string
-		result  runnerResult
-		wantErr bool
-	}{
-		{name: "unsafe devices", result: runnerResult{output: []byte(rejected)}},
-		{name: "malformed JSON", result: runnerResult{output: []byte(`{bad`)}, wantErr: true},
-		{name: "enumeration failure", result: runnerResult{output: []byte("denied"), err: errors.New("exit")}, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			devices, err := (&Backend{runner: &fakeRunner{results: []runnerResult{tt.result}}}).ListAllowedDevices(context.Background())
-			if (err != nil) != tt.wantErr || len(devices) != 0 {
-				t.Fatalf("devices=%v err=%v", devices, err)
-			}
-		})
-	}
-}
-
-func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
-	cause := errors.New("command failed")
-	tests := []struct {
-		name   string
-		run    func(*Backend, device.Device) error
-		prefix string
-	}{
-		{name: "offline", run: func(b *Backend, d device.Device) error { return b.Unmount(context.Background(), d) }, prefix: "could not take disk offline"},
-		{name: "format", run: func(b *Backend, d device.Device) error { return b.FormatFAT32(context.Background(), d, "LABEL", nil) }, prefix: "format FAT32"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runner := &fakeRunner{results: []runnerResult{{output: []byte(allowedDisk)}, {output: []byte(allowedDisk)}, {output: []byte("command output"), err: cause}}}
-			backend := &Backend{runner: runner}
-			devices, _ := backend.ListAllowedDevices(context.Background())
-			err := tt.run(backend, devices[0])
-			assertCommandError(t, err, cause, tt.prefix, "command output")
-		})
-	}
-}
-
-func assertCommandError(t *testing.T, err, cause error, prefix, output string) {
-	t.Helper()
-	if !errors.Is(err, cause) {
-		t.Fatalf("error = %v, want cause %v", err, cause)
-	}
-	if !strings.Contains(err.Error(), output) {
-		t.Fatalf("error = %v, want output %q", err, output)
-	}
-	if !strings.HasPrefix(err.Error(), prefix) {
-		t.Fatalf("error = %v, want prefix %q", err, prefix)
-	}
-}
-
-func TestEveryOperationRevalidates(t *testing.T) {
-	operations := map[string]func(*Backend, device.Device) error{
-		"OpenReader": func(b *Backend, d device.Device) error { _, err := b.OpenReader(context.Background(), d); return err },
-		"OpenWriter": func(b *Backend, d device.Device) error { _, err := b.OpenWriter(context.Background(), d); return err },
-		"Flush":      func(b *Backend, d device.Device) error { return b.Flush(context.Background(), d) },
-		"Eject":      func(b *Backend, d device.Device) error { return b.Eject(context.Background(), d) },
-	}
-	changed := strings.Replace(allowedDisk, "16000000000", "1", 1)
-	for name, operation := range operations {
-		t.Run(name, func(t *testing.T) {
-			runner := &fakeRunner{results: []runnerResult{{output: []byte(allowedDisk)}, {output: []byte(changed)}}}
-			backend := &Backend{runner: runner}
-			devices, _ := backend.ListAllowedDevices(context.Background())
-			if err := operation(backend, devices[0]); !errors.Is(err, ErrDeviceChanged) {
-				t.Fatalf("error = %v", err)
-			}
-			if len(runner.scripts) != 2 || runner.scripts[1] != listScript {
-				t.Fatalf("commands = %v", runner.scripts)
-			}
-		})
-	}
-}
-
-func TestFormatLabelCannotChangePowerShellStructure(t *testing.T) {
-	runner := &fakeRunner{output: []byte(allowedDisk)}
-	backend := &Backend{runner: runner}
-	devices, _ := backend.ListAllowedDevices(context.Background())
-	if err := backend.FormatFAT32(context.Background(), devices[0], `A'; Clear-Disk -Number 0; 'B`, nil); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	format := runner.scripts[len(runner.scripts)-1]
-	if strings.Count(format, "Clear-Disk") != 2 || !strings.Contains(format, `A''; Clear-Disk -Number 0; ''B`) {
-		t.Fatalf("label was not kept inside the quoted literal: %s", format)
+	if api.opens != 1 || api.lockCalls != 1 || api.locks.closes != 0 {
+		t.Fatalf("opens=%d locks=%d closes=%d", api.opens, api.lockCalls, api.locks.closes)
 	}
 }
-
-func TestUnmountRevalidatesAndTakesDiskOffline(t *testing.T) {
-	online := `[{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true,"IsOffline":false}]`
-	offline := strings.Replace(online, `"IsOffline":false`, `"IsOffline":true`, 1)
-	runner := &fakeRunner{results: []runnerResult{{output: []byte(online)}, {output: []byte(online)}, {}, {output: []byte(offline)}}}
-	backend := &Backend{runner: runner}
-	devices, err := backend.ListAllowedDevices(context.Background())
-	if err != nil || len(devices) != 1 {
-		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
+func TestChangedIdentityFailsClosed(t *testing.T) {
+	r := candidate()
+	b := &Backend{api: &fakeAPI{records: []diskRecord{r}}, locks: map[string]volumeLocks{}}
+	selected := r.Device
+	selected.Size--
+	if _, err := b.OpenReader(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("%v", err)
 	}
-	if err := backend.Unmount(context.Background(), devices[0]); err != nil {
+}
+func TestManagedFileCloseIsIdempotentAndFlushes(t *testing.T) {
+	f := &fakeFile{}
+	m := &managedFile{nativeFile: f, flushOnClose: true}
+	if _, err := io.Copy(m, bytes.NewBufferString("x")); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.scripts) != 4 {
-		t.Fatalf("PowerShell scripts = %q, want select, revalidate, offline, verify", runner.scripts)
-	}
-	if !strings.Contains(runner.scripts[2], "Set-Disk -Number 4 -IsOffline $true") {
-		t.Fatalf("offline PowerShell script = %q", runner.scripts[2])
-	}
-}
-
-func TestUnmountFailsIfDiskRemainsOnline(t *testing.T) {
-	runner := &fakeRunner{output: []byte(allowedDisk)}
-	backend := &Backend{runner: runner}
-	devices, err := backend.ListAllowedDevices(context.Background())
-	if err != nil || len(devices) != 1 {
-		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
-	}
-	if err := backend.Unmount(context.Background(), devices[0]); !errors.Is(err, ErrUnmountFailed) {
-		t.Fatalf("Unmount() error = %v, want %v", err, ErrUnmountFailed)
+	_ = m.Close()
+	_ = m.Close()
+	if f.flushes != 1 || f.closes != 1 {
+		t.Fatalf("flush=%d close=%d", f.flushes, f.closes)
 	}
 }
 
-func TestFormatFAT32RevalidatesAndCreatesMBRVolume(t *testing.T) {
-	runner := &fakeRunner{output: []byte(`[{"Number":4,"FriendlyName":"USB Flash","SerialNumber":"SERIAL","UniqueId":"USB-ID","Size":16000000000,"BusType":"USB","IsRemovable":true}]`)}
-	backend := &Backend{runner: runner}
-	devices, err := backend.ListAllowedDevices(context.Background())
-	if err != nil || len(devices) != 1 {
-		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
-	}
-	if err := backend.FormatFAT32(context.Background(), devices[0], "GO'FLASHER", nil); err != nil {
+func TestFlushOpensDiskForWriteAndRetainsLocks(t *testing.T) {
+	api := &fakeAPI{records: []diskRecord{candidate()}}
+	b := &Backend{api: api, locks: map[string]volumeLocks{}}
+	d := candidate().Device
+	if err := b.Unmount(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Clear-Disk -Number 4", "Initialize-Disk -Number 4 -PartitionStyle MBR", "Format-Volume", "-FileSystem FAT32", "GO''FLASHER"} {
-		if !strings.Contains(runner.script, want) {
-			t.Fatalf("format script %q does not contain %q", runner.script, want)
-		}
+	if err := b.Flush(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.openWrites) != 1 || !api.openWrites[0] {
+		t.Fatalf("open write flags = %v, want [true]", api.openWrites)
+	}
+	if api.locks.closes != 0 {
+		t.Fatalf("locks closed during flush = %d", api.locks.closes)
+	}
+	if err := b.ReleaseDevice(d); err != nil {
+		t.Fatal(err)
+	}
+	if api.locks.closes != 1 {
+		t.Fatalf("locks closed after release = %d, want 1", api.locks.closes)
 	}
 }
 
-func TestBackendCommandsAlwaysHaveDeadlines(t *testing.T) {
-	runner := &fakeRunner{output: []byte(allowedDisk)}
-	backend := &Backend{runner: runner}
-	devices, err := backend.ListAllowedDevices(context.Background())
-	if err != nil || len(devices) != 1 {
-		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
-	}
-	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
+func TestFormatLocksAndRevalidates(t *testing.T) {
+	api := &fakeAPI{records: []diskRecord{candidate()}}
+	b := &Backend{api: api, locks: map[string]volumeLocks{}}
+	d := candidate().Device
+	if err := b.FormatFAT32(context.Background(), d, "GOFLASHER", nil); err != nil {
 		t.Fatal(err)
 	}
-	for i, hasDeadline := range runner.deadlines {
-		if !hasDeadline {
-			t.Errorf("command %d had no context deadline", i)
-		}
+	if api.lockCalls != 1 || api.locks.closes != 1 {
+		t.Fatalf("lock calls=%d closes=%d", api.lockCalls, api.locks.closes)
 	}
 }

@@ -1,19 +1,24 @@
 # Building GoFlasher
 
+[Traditional Chinese / 繁體中文版](BUILDING.zh-TW.md)
+
+The isolated native macOS proof of concept and its CI validation boundary are
+documented in [docs/MACOS-NATIVE-PHASE1.md](docs/MACOS-NATIVE-PHASE1.md).
+
 ## Supported build targets
 
 The raw-device backend and Fyne GUI build on Linux, Windows, and macOS. Windows uses
-PowerShell storage cmdlets for conservative removable-USB discovery and taking
-the target disk offline; run the Windows GUI as Administrator for raw access.
+native Win32 SetupAPI, Configuration Manager, volume-control, and storage IOCTL
+calls; run the Windows GUI as Administrator for raw access.
 macOS uses `diskutil` for removable-USB discovery, unmount, and eject operations.
 
 The reusable `internal/disk` abstraction is separate from the existing writer
 backends. Its common `Manager` API contains no native handles or platform
 constants. `disk.NewManager()` is selected by build tags. The Linux manager is
-implemented with sysfs, mountinfo, swap inspection, and udisks2. Windows and
-macOS intentionally return `disk.ErrUnsupported` from compile-safe outlines;
-their future implementations will use Win32 and Disk Arbitration/IOKit without
-changing callers. This keeps the current work focused on making Linux reliable.
+implemented with sysfs, mountinfo, swap inspection, and udisks2. Windows uses
+the native Win32 backend. macOS still returns `disk.ErrUnsupported` from its
+compile-safe `disk.Manager` outline; a future Disk Arbitration/IOKit manager can
+replace it without changing callers.
 
 ## Requirements
 
@@ -46,21 +51,20 @@ dependencies. The current runtime boundary is:
 | Host | Device management | Remaining commands | Status |
 |---|---|---|---|
 | Linux | sysfs, procfs, `/run/udev/data`, and the UDisks2 system D-Bus API | `pkexec` starts the narrowly scoped privileged helper | GUI and backend are active |
-| Windows | PowerShell Storage and CIM cmdlets | `powershell.exe` | GUI and backend are active; run as Administrator |
-| macOS | `diskutil` plist output and raw `/dev/rdisk*` access | `diskutil` and `plutil`; `osascript` opens the native file chooser | GUI and backend are active; raw access requires elevation |
+| Windows | SetupAPI, cfgmgr32, `DeviceIoControl`, volume FSCTLs, and raw `\\.\PhysicalDriveN` access | None for disk operations | GUI and backend are active; run as Administrator |
+| macOS | `diskutil` plist output and raw `/dev/rdisk*` access; shared in-process FAT32 formatter | `diskutil`; `osascript` opens the native file chooser | GUI and backend are active; raw access requires elevation |
 
-The commands listed for Windows and macOS are part of those operating systems;
-end users do not install Visual Studio, an SDK, PowerShell, `diskutil`, `plutil`,
-or `osascript` to run a packaged GoFlasher binary. Source builds are different:
+The commands listed for macOS are part of the operating system; end users do not
+install Visual Studio, an SDK, `diskutil`, or `osascript` to run a packaged
+GoFlasher binary. The Windows storage backend has no CLI runtime dependency.
+Source builds are different:
 the Go and Fyne/CGo build toolchains are required on the build machine, but they
 are not runtime dependencies and should not be bundled into the application.
 
 UDisks2 D-Bus removes the Linux `udisksctl` client process, not the UDisks2
-daemon or its polkit authorization policy. Likewise, the Windows and macOS
-backends currently compile and run on their native hosts but are not yet native
-API-only implementations. Replacing the remaining commands requires separate
-platform work: SetupAPI/Configuration Manager and Virtual Disk/volume-control
-APIs on Windows, and Disk Arbitration plus IOKit on macOS. Such replacements
+daemon or its polkit authorization policy. Windows disk operations are native
+API-only; replacing the remaining macOS device-management commands requires
+Disk Arbitration plus IOKit work. Such replacements
 must preserve the existing repeated identity, system-disk, mount, capacity, and
 removability checks before raw access.
 
@@ -224,8 +228,9 @@ release.
 ## Windows work remaining
 
 The Windows GUI, native Explorer chooser, removable-device discovery, repeated
-identity checks, offline operation, raw writing, and read-back verification are
-implemented. A public Windows release still needs hardware-isolated tests,
+identity checks, volume lock/dismount, raw writing, and read-back verification are
+implemented. Native in-process FAT32 formatting, volume locking/dismount, flush,
+and safe eject are also implemented without PowerShell. A public Windows release still needs hardware-isolated tests,
 signed packaging, and release jobs. The current backend requires Administrator
 rights; a dedicated privileged helper would provide a better privilege boundary.
 
@@ -233,5 +238,7 @@ rights; a dedicated privileged helper would provide a better privilege boundary.
 
 The macOS GUI, native Finder chooser, conservative removable-USB backend, raw
 writing, read-back verification, and `diskutil` eject operation are implemented.
+A shared in-process formatter writes FAT32 directly to the validated raw device;
+`diskutil` is not used for formatting.
 A public macOS release still needs hardware-isolated tests, a dedicated
 privileged helper, signed and notarized packaging, and release jobs.

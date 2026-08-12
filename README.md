@@ -35,9 +35,9 @@ on Linux, Windows, and macOS.**
 - Revalidate device identity before unmounting and on both sides of the
   privileged raw-device boundary.
 - Provide a platform-neutral `disk.Manager` abstraction; callers only construct
-  `disk.NewManager()`. The Linux sysfs/udisks implementation is active, while
-  Windows and macOS currently provide compile-safe outlines for later native
-  Win32 and Disk Arbitration/IOKit implementations.
+  `disk.NewManager()`. The Linux sysfs/udisks and native Windows implementations
+  are active; macOS currently retains a compile-safe outline for a future Disk
+  Arbitration/IOKit manager.
 
 GoFlasher does not inspect, identify, or restrict the operating system contained
 inside an image. On every supported host it can therefore write a Linux ISO or
@@ -45,9 +45,9 @@ any other raw disk image in a supported format: `.iso`, `.img`, `.raw`,
 `.iso.gz`, `.img.gz`, `.iso.xz`, or `.img.xz`.
 
 GoFlasher is primarily an image writer. It can also erase a selected supported
-USB device and create a FAT32 filesystem named `GOFLASHER`. Linux creates a
-whole-device FAT32 filesystem with its bundled formatter; Windows and macOS
-create an MBR layout containing a FAT32 volume. It does **not** download operating-
+USB device and create a whole-device FAT32 filesystem named `GOFLASHER`. All
+three backends use the same bundled, in-process Go formatter and do not invoke
+an operating-system formatting utility. It does **not** download operating-
 system images, create Windows installation workarounds, create persistent
 partitions, or perform bad-block tests.
 
@@ -57,8 +57,9 @@ partitions, or perform bad-block tests.
 on **Linux, Windows, and macOS hosts**. It does not mean an image is tied to its
 host: GoFlasher on any of those three platforms can write a Linux ISO, or any
 other supported raw disk image, to approved removable media. Windows uses its
-native Explorer chooser and PowerShell storage cmdlets; raw disk access requires
-an Administrator session. macOS uses its native Finder chooser and `diskutil`;
+native Explorer chooser and Win32 SetupAPI, Configuration Manager, volume-control,
+and storage IOCTL APIs; raw disk access requires an Administrator session. macOS
+uses its native Finder chooser and `diskutil` for discovery, unmount, and eject;
 raw disk access requires elevated rights.
 
 The Linux backend reads sysfs, procfs, and udev information. It calls the
@@ -73,8 +74,10 @@ operation.
 
 This does not yet make every platform command-free. Linux reads supplementary
 udev properties directly from `/run/udev/data` and only uses `pkexec` as its
-privilege broker; Windows uses PowerShell Storage/CIM cmdlets; macOS uses `diskutil`, `plutil`, and
-`osascript`. All three native builds are exercised by CI, but Windows and macOS
+privilege broker. Windows disk discovery, identity validation, raw I/O, volume
+lock/dismount, flush, format, and eject are native and invoke no CLI. macOS still
+uses `diskutil` for device management and `osascript` for the native chooser,
+but formatting is performed in process. All three native builds are exercised by CI, but Windows and macOS
 still require native-host privileges and physical-media acceptance before a
 release. See [BUILDING.md](BUILDING.md#native-api-and-command-dependencies) for
 the exact boundary and the native-API migration direction.
