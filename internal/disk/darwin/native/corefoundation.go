@@ -21,12 +21,14 @@ type cfAPI struct {
 	stringCreate       func(uintptr, *byte, uint32) uintptr
 	stringLength       func(uintptr) int64
 	stringMaxSize      func(int64, uint32) int64
-	stringGetCString   func(uintptr, *byte, int64, uint32) bool
-	numberGetValue     func(uintptr, int32, unsafe.Pointer) bool
+	stringGetCString   func(uintptr, *byte, int64, uint32) uint8
+	numberGetValue     func(uintptr, int32, unsafe.Pointer) uint8
 	numberCreate       func(uintptr, int32, unsafe.Pointer) uintptr
-	booleanGetValue    func(uintptr) bool
+	booleanGetValue    func(uintptr) uint8
 	dictionaryGetValue func(uintptr, uintptr) uintptr
+	dictionaryGetCount func(uintptr) int64
 	getTypeID          func(uintptr) uintptr
+	dictionaryTypeID   func() uintptr
 	stringTypeID       func() uintptr
 	numberTypeID       func() uintptr
 	booleanTypeID      func() uintptr
@@ -50,7 +52,9 @@ func bindCF(lib uintptr) (cfBindings, error) {
 	purego.RegisterLibFunc(&b.api.numberCreate, lib, "CFNumberCreate")
 	purego.RegisterLibFunc(&b.api.booleanGetValue, lib, "CFBooleanGetValue")
 	purego.RegisterLibFunc(&b.api.dictionaryGetValue, lib, "CFDictionaryGetValue")
+	purego.RegisterLibFunc(&b.api.dictionaryGetCount, lib, "CFDictionaryGetCount")
 	purego.RegisterLibFunc(&b.api.getTypeID, lib, "CFGetTypeID")
+	purego.RegisterLibFunc(&b.api.dictionaryTypeID, lib, "CFDictionaryGetTypeID")
 	purego.RegisterLibFunc(&b.api.stringTypeID, lib, "CFStringGetTypeID")
 	purego.RegisterLibFunc(&b.api.numberTypeID, lib, "CFNumberGetTypeID")
 	purego.RegisterLibFunc(&b.api.booleanTypeID, lib, "CFBooleanGetTypeID")
@@ -78,7 +82,7 @@ func (c cfBindings) goString(v uintptr) (string, bool) {
 		return "", false
 	}
 	b := make([]byte, n)
-	if !c.api.stringGetCString(v, &b[0], n, cfStringEncodingUTF8) {
+	if c.api.stringGetCString(v, &b[0], n, cfStringEncodingUTF8) == 0 {
 		return "", false
 	}
 	for i, x := range b {
@@ -93,7 +97,7 @@ func (c cfBindings) goUint64(v uintptr) (uint64, bool) {
 		return 0, false
 	}
 	var n int64
-	if !c.api.numberGetValue(v, cfNumberSInt64Type, unsafe.Pointer(&n)) || n < 0 {
+	if c.api.numberGetValue(v, cfNumberSInt64Type, unsafe.Pointer(&n)) == 0 || n < 0 {
 		return 0, false
 	}
 	return uint64(n), true
@@ -102,7 +106,7 @@ func (c cfBindings) goBool(v uintptr) (bool, bool) {
 	if v == 0 || c.api.getTypeID(v) != c.api.booleanTypeID() {
 		return false, false
 	}
-	return c.api.booleanGetValue(v), true
+	return c.api.booleanGetValue(v) != 0, true
 }
 func (c cfBindings) dictionaryValue(d, key uintptr) uintptr {
 	if d == 0 || key == 0 {

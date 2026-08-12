@@ -102,8 +102,9 @@ func inspectHandle(h windows.Handle, number uint32) (diskRecord, error) {
 	if returned < 36 {
 		return diskRecord{}, errors.New("short STORAGE_DEVICE_DESCRIPTOR")
 	}
-	// STORAGE_HOTPLUG_INFO starts with Version and Size (two DWORDs),
-	// followed by the four BOOLEAN capability fields.
+	// STORAGE_HOTPLUG_INFO starts with Size (one DWORD), followed by the
+	// MediaRemovable, MediaHotplug, DeviceHotplug, and WriteCacheEnableOverride
+	// BOOLEAN fields.
 	hot := make([]byte, 12)
 	_ = ioctl(h, ioctlStorageGetHotplugInfo, hot)
 	serial := descriptorString(q, binary.LittleEndian.Uint32(q[24:28]))
@@ -118,9 +119,9 @@ func inspectHandle(h windows.Handle, number uint32) (diskRecord, error) {
 	}
 	path := `\\.\PhysicalDrive` + strconv.FormatUint(uint64(number), 10)
 	r := diskRecord{Device: device.Device{ID: id, Path: path, Vendor: vendor, Model: model, Serial: serial, WWN: id, Transport: busName(bus), Major: number, Size: binary.LittleEndian.Uint64(length)}, deviceNumber: number, usbAncestor: bus == busTypeUSB}
-	if len(hot) >= 12 {
-		r.mediaHotplug = hot[9] != 0
-		r.deviceHotplug = hot[10] != 0
+	if len(hot) >= 7 {
+		r.mediaHotplug = hot[5] != 0
+		r.deviceHotplug = hot[6] != 0
 	}
 	return r, nil
 }

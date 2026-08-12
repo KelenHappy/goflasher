@@ -147,6 +147,10 @@ func (b *Backend) release(id string) error {
 	}
 	return nil
 }
+
+// ReleaseDevice releases volume locks after the service has completed flush,
+// optional verification, and eject processing.
+func (b *Backend) ReleaseDevice(d device.Device) error { return b.release(d.ID) }
 func (b *Backend) Unmount(ctx context.Context, d device.Device) error {
 	r, err := b.revalidate(ctx, d)
 	if err != nil {
@@ -165,20 +169,19 @@ func (b *Backend) Unmount(ctx context.Context, d device.Device) error {
 
 type managedFile struct {
 	nativeFile
-	once     sync.Once
-	release  func() error
-	closeErr error
+	once         sync.Once
+	flushOnClose bool
+	closeErr     error
 }
 
 func (f *managedFile) Close() error {
 	f.once.Do(func() {
-		if err := f.nativeFile.Flush(); err != nil {
-			f.closeErr = err
+		if f.flushOnClose {
+			if err := f.nativeFile.Flush(); err != nil {
+				f.closeErr = err
+			}
 		}
 		if err := f.nativeFile.Close(); f.closeErr == nil {
-			f.closeErr = err
-		}
-		if err := f.release(); f.closeErr == nil {
 			f.closeErr = err
 		}
 	})
@@ -201,7 +204,7 @@ func (b *Backend) open(ctx context.Context, d device.Device, write bool) (*manag
 	if err != nil {
 		return nil, err
 	}
-	return &managedFile{nativeFile: f, release: func() error { return b.release(d.ID) }}, nil
+	return &managedFile{nativeFile: f, flushOnClose: write}, nil
 }
 func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
 	return b.open(ctx, d, true)
@@ -210,10 +213,14 @@ func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadClose
 	return b.open(ctx, d, false)
 }
 func (b *Backend) Flush(ctx context.Context, d device.Device) error {
-	f, err := b.open(ctx, d, false)
+	// FlushFileBuffers requires a handle opened with write access.
+	f, err := b.open(ctx, d, true)
 	if err != nil {
 		return err
 	}
+	// Flush explicitly below; Close only owns the handle for this short-lived
+	// flush operation and must not issue a duplicate FlushFileBuffers call.
+	f.flushOnClose = false
 	defer f.Close()
 	return f.Flush()
 }

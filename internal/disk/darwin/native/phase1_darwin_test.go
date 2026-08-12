@@ -70,6 +70,13 @@ func TestPhase1DiskArbitrationCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	s.diagnostic = func(d descriptionDiagnostics) {
+		t.Logf("DADiskRef=%#x DADiskGetBSDName=%q description=%#x description CFTypeID=%d CFDictionary type ID=%d dictionary count=%d", d.Disk, d.BSDName, d.Description, d.DescriptionTypeID, d.DictionaryTypeID, d.DictionaryCount)
+		for _, key := range []string{"kDADiskDescriptionMediaBSDNameKey", "kDADiskDescriptionMediaNameKey", "kDADiskDescriptionMediaSizeKey", "kDADiskDescriptionMediaWholeKey", "kDADiskDescriptionDeviceInternalKey", "kDADiskDescriptionMediaEjectableKey", "kDADiskDescriptionMediaRemovableKey", "kDADiskDescriptionVolumePathKey"} {
+			v := d.Values[key]
+			t.Logf("%s: found=%t value CFTypeID=%d", key, v.Found, v.TypeID)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	d, err := s.WaitForDisk(ctx)
