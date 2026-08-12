@@ -19,6 +19,7 @@ type daAPI struct {
 	diskCopyDescription func(uintptr) uintptr
 	diskGetBSDName      func(uintptr) *byte
 	registerAppeared    func(uintptr, uintptr, uintptr, uintptr)
+	unregisterCallback  func(uintptr, uintptr, uintptr)
 	scheduleRunLoop     func(uintptr, uintptr, uintptr)
 	unscheduleRunLoop   func(uintptr, uintptr, uintptr)
 }
@@ -34,6 +35,7 @@ func bindDA(lib uintptr) (daBindings, error) {
 	purego.RegisterLibFunc(&d.api.diskCopyDescription, lib, "DADiskCopyDescription")
 	purego.RegisterLibFunc(&d.api.diskGetBSDName, lib, "DADiskGetBSDName")
 	purego.RegisterLibFunc(&d.api.registerAppeared, lib, "DARegisterDiskAppearedCallback")
+	purego.RegisterLibFunc(&d.api.unregisterCallback, lib, "DAUnregisterCallback")
 	purego.RegisterLibFunc(&d.api.scheduleRunLoop, lib, "DASessionScheduleWithRunLoop")
 	purego.RegisterLibFunc(&d.api.unscheduleRunLoop, lib, "DASessionUnscheduleFromRunLoop")
 	d.keys = map[string]uintptr{}
@@ -100,6 +102,8 @@ type descriptionDiagnostics struct {
 	Values            map[string]valueDiagnostic
 }
 
+var errDiskWithoutBSDName = errors.New("DADiskGetBSDName and media BSD-name description were both empty")
+
 func (s *Session) Close() {
 	if s != nil && s.ref != 0 {
 		s.f.cf.api.release(s.ref)
@@ -165,7 +169,7 @@ func (s *Session) describe(d uintptr) (DiskDescription, error) {
 	get("kDADiskDescriptionVolumePathKey")
 	s.emitDiagnostic(diagnostic)
 	if out.BSDName == "" {
-		return DiskDescription{}, errors.New("DADiskGetBSDName and media BSD-name description were both empty")
+		return DiskDescription{}, errDiskWithoutBSDName
 	}
 	return out, nil
 }
@@ -200,12 +204,25 @@ func (s *Session) WaitForDisk(ctx context.Context) (DiskDescription, error) {
 var appearedCallback = purego.NewCallback(func(disk, context uintptr) { dispatchAppeared(context, disk) })
 
 func waitForDisk(ctx context.Context, s *Session) (DiskDescription, error) {
+	// Do not install a native callback for work that has already been
+	// cancelled. Apart from making the result deterministic when a disk is
+	// already present, this ensures that the callback context never outlives a
+	// Session which returns immediately.
+	if err := ctx.Err(); err != nil {
+		return DiskDescription{}, err
+	}
 	state := newCallbackState(s)
 	defer state.close()
 	loop := s.f.cf.api.runLoopGetCurrent()
 	s.f.da.api.registerAppeared(s.ref, 0, appearedCallback, state.token)
 	s.f.da.api.scheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
-	defer s.f.da.api.unscheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	defer func() {
+		// DA retains callback registrations until they are explicitly removed.
+		// Remove the registration before releasing its callback state or the
+		// Session so a later run-loop delivery cannot use either one.
+		s.f.da.api.unregisterCallback(s.ref, appearedCallback, state.token)
+		s.f.da.api.unscheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	}()
 	for {
 		select {
 		case r := <-state.result:

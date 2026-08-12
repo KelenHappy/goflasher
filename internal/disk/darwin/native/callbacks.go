@@ -3,6 +3,7 @@
 package native
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 )
@@ -38,6 +39,12 @@ func dispatchAppeared(token, disk uintptr) {
 	}
 	s := v.(*callbackState)
 	d, e := s.session.describe(disk)
+	// Disk Arbitration can report volume-only objects which have a volume URL
+	// but no BSD device name. They are not usable disks, so keep waiting for a
+	// callback that describes an actual BSD device instead of failing the wait.
+	if errors.Is(e, errDiskWithoutBSDName) {
+		return
+	}
 	select {
 	case s.result <- callbackResult{d, e}:
 	default:
