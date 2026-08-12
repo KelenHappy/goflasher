@@ -71,15 +71,43 @@ func classify(r *diskRecord) {
 		d.RejectReason = ErrSystemDisk.Error()
 		return
 	}
-	// Bus type is corroborating evidence, never the sole admission criterion.
-	external := r.usbAncestor || strings.EqualFold(d.Transport, "usb")
-	hotplug := r.deviceHotplug || r.mediaHotplug
-	identity := d.Serial != "" || d.WWN != ""
-	if external && hotplug && identity && d.Size != 0 && d.Path != "" &&
-		!strings.EqualFold(d.Transport, "virtual") && !strings.EqualFold(d.Transport, "filebackedvirtual") {
-		d.IsAllowed = true
-		d.RejectReason = ""
+	if !isSupportedDisk(*r) {
+		return
 	}
+	d.IsAllowed = true
+	d.RejectReason = ""
+}
+
+func isSupportedDisk(r diskRecord) bool {
+	if !hasUSBConnection(r) || !isHotplugDisk(r) {
+		return false
+	}
+	if !hasPersistentIdentity(r.Device) || !hasUsableLocation(r.Device) {
+		return false
+	}
+	return isPhysicalTransport(r.Transport)
+}
+
+// Bus type is corroborating evidence, never the sole admission criterion.
+func hasUSBConnection(r diskRecord) bool {
+	return r.usbAncestor || strings.EqualFold(r.Transport, "usb")
+}
+
+func isHotplugDisk(r diskRecord) bool {
+	return r.deviceHotplug || r.mediaHotplug
+}
+
+func hasPersistentIdentity(d device.Device) bool {
+	return d.Serial != "" || d.WWN != ""
+}
+
+func hasUsableLocation(d device.Device) bool {
+	return d.Size != 0 && d.Path != ""
+}
+
+func isPhysicalTransport(transport string) bool {
+	return !strings.EqualFold(transport, "virtual") &&
+		!strings.EqualFold(transport, "filebackedvirtual")
 }
 
 func (b *Backend) records(ctx context.Context) ([]diskRecord, error) {
@@ -132,10 +160,17 @@ func (b *Backend) revalidate(ctx context.Context, selected device.Device) (diskR
 	if !r.IsAllowed {
 		return diskRecord{}, fmt.Errorf("%w: %s", ErrUnsupportedDevice, r.RejectReason)
 	}
-	if !device.SameIdentity(selected, r.Device) || selected.Size != r.Size || selected.Model != r.Model {
+	if deviceChanged(selected, r.Device) {
 		return diskRecord{}, ErrDeviceChanged
 	}
 	return r, nil
+}
+
+func deviceChanged(selected, current device.Device) bool {
+	if !device.SameIdentity(selected, current) {
+		return true
+	}
+	return selected.Size != current.Size || selected.Model != current.Model
 }
 func (b *Backend) release(id string) error {
 	b.mu.Lock()

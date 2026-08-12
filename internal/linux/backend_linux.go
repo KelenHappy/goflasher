@@ -141,17 +141,26 @@ func (b *Backend) populateMountMetadata(d *device.Device, name string, mounts ma
 }
 
 func (b *Backend) populateSystemDiskMetadata(d *device.Device, name string, swaps map[string]bool) {
+	d.IsSystemDisk = containsCriticalMount(d.MountPoints) || b.deviceHasSwap(name, swaps)
+}
+
+func containsCriticalMount(mountPoints []string) bool {
 	critical := map[string]bool{"/": true, "/boot": true, "/boot/efi": true, "/home": true}
-	for _, mountPoint := range d.MountPoints {
+	for _, mountPoint := range mountPoints {
 		if critical[mountPoint] {
-			d.IsSystemDisk = true
+			return true
 		}
 	}
+	return false
+}
+
+func (b *Backend) deviceHasSwap(name string, swaps map[string]bool) bool {
 	for path := range swaps {
 		if b.swapBelongsToDevice(path, name) {
-			d.IsSystemDisk = true
+			return true
 		}
 	}
+	return false
 }
 
 func (b *Backend) swapBelongsToDevice(path, name string) bool {
@@ -173,7 +182,10 @@ func (b *Backend) classifyDevice(d *device.Device, link, real string, properties
 	switch {
 	case d.IsSystemDisk:
 		d.RejectReason = ErrSystemDisk.Error()
-	case unsupportedDevice(usb, removable, diskType, d.Size, suspicious):
+	case unsupportedDevice(deviceCharacteristics{
+		usb: usb, removable: removable, diskType: diskType,
+		size: d.Size, suspicious: suspicious,
+	}):
 		d.RejectReason = ErrUnsupportedDevice.Error()
 	case !positivelyIdentified(isFlash, d.IsCardReader, isSmallUSBStorage):
 		d.RejectReason = "not positively identified as USB flash media"
@@ -213,20 +225,20 @@ func suspiciousStorage(description string, properties map[string]string) bool {
 	return properties["ID_USB_DRIVER"] == "uas"
 }
 
-func unsupportedDevice(usb, removable, diskType bool, size uint64, suspicious bool) bool {
-	if !usb {
-		return true
-	}
-	if !removable {
-		return true
-	}
-	if !diskType {
-		return true
-	}
-	if size == 0 {
-		return true
-	}
-	return suspicious
+type deviceCharacteristics struct {
+	usb        bool
+	removable  bool
+	diskType   bool
+	size       uint64
+	suspicious bool
+}
+
+func unsupportedDevice(characteristics deviceCharacteristics) bool {
+	return !characteristics.usb ||
+		!characteristics.removable ||
+		!characteristics.diskType ||
+		characteristics.size == 0 ||
+		characteristics.suspicious
 }
 
 func positivelyIdentified(flash, cardReader, smallUSBStorage bool) bool {

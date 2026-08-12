@@ -93,9 +93,10 @@ func TestEnumerationFiltersAndMounts(t *testing.T) {
 	}
 	all, err := b.list(context.Background())
 	requireNoError(t, err)
-	for _, d := range all {
-		assertEnumerationSafety(t, d)
-	}
+	devicesByName := indexDevicesByName(all)
+	assertSystemDisk(t, requireIndexedDevice(t, devicesByName, "nvme0n1"), "root disk")
+	assertRejected(t, requireIndexedDevice(t, devicesByName, "sdd"), "USB SSD")
+	assertSystemDisk(t, requireIndexedDevice(t, devicesByName, "sde"), "swap disk")
 }
 
 func assertMountedFlashMetadata(t *testing.T, flash device.Device) {
@@ -150,21 +151,34 @@ func requireDevicePaths(t *testing.T, devices []device.Device, paths ...string) 
 	}
 }
 
-func assertEnumerationSafety(t *testing.T, d device.Device) {
+func indexDevicesByName(devices []device.Device) map[string]device.Device {
+	indexed := make(map[string]device.Device, len(devices))
+	for _, d := range devices {
+		indexed[filepath.Base(d.Path)] = d
+	}
+	return indexed
+}
+
+func requireIndexedDevice(t *testing.T, devices map[string]device.Device, name string) device.Device {
 	t.Helper()
-	switch filepath.Base(d.Path) {
-	case "nvme0n1":
-		if !d.IsSystemDisk {
-			t.Fatal("root disk not marked system")
-		}
-	case "sdd":
-		if d.IsAllowed {
-			t.Fatal("USB SSD allowed")
-		}
-	case "sde":
-		if !d.IsSystemDisk || d.IsAllowed {
-			t.Fatal("swap disk was not rejected as a system disk")
-		}
+	d, ok := devices[name]
+	if !ok {
+		t.Fatalf("device %q was not enumerated", name)
+	}
+	return d
+}
+
+func assertSystemDisk(t *testing.T, d device.Device, description string) {
+	t.Helper()
+	if !d.IsSystemDisk || d.IsAllowed {
+		t.Fatalf("%s was not rejected as a system disk: %+v", description, d)
+	}
+}
+
+func assertRejected(t *testing.T, d device.Device, description string) {
+	t.Helper()
+	if d.IsAllowed {
+		t.Fatalf("%s was allowed: %+v", description, d)
 	}
 }
 
