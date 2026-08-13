@@ -1,12 +1,12 @@
 <div align="center">
-  <img src="packaging/org.goflasher.usbwriter.svg" width="128" height="128" alt="GoFlasher 標誌">
+  <img src="../../packaging/org.goflasher.usbwriter.svg" width="128" height="128" alt="GoFlasher 標誌">
 
 # GoFlasher：以安全為優先的 USB 映像檔寫入工具
 
 **GoFlasher 可在 Linux、Windows 與 macOS 將未壓縮或壓縮的磁碟映像檔寫入
 可移除式 USB 隨身碟。**
 
-[English README](README.md)
+[English README](../../README.md)
 </div>
 
 > [!WARNING]
@@ -65,13 +65,13 @@ polkit 呼叫由 root 擁有的專用權限提升輔助程式。
 volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動 CLI；macOS 仍使用
 `diskutil` 管理裝置及 `osascript` 開啟原生選擇器，但格式化在程式內完成。三個平台的原生版本都會在 CI 中建置及測試，
 但 Windows/macOS 仍需要原生主機權限及實體媒體驗收才能發布。完整邊界及改用原生 API
-的方向請參閱 [BUILDING.md](BUILDING.md#native-api-and-command-dependencies)。
+的方向請參閱 [BUILDING.md](../development/BUILDING.md#native-api-and-command-dependencies)。
 
 ## 預先建置的下載套件
 
 程式碼支援的平台與目前提供預先建置套件的平台是兩件不同的事。目前 release
 workflow 只發布預先建置的 **Linux** artifacts：x86-64 AppImage、amd64 Debian
-套件與 x86-64 RPM。Windows 與 macOS 的實作已包含在原始碼中，可依 [BUILDING.md](BUILDING.md)
+套件與 x86-64 RPM。Windows 與 macOS 的實作已包含在原始碼中，可依 [BUILDING.md](../development/BUILDING.md)
 從原始碼建置；在完成程式碼簽署前，尚未提供已簽署的 Windows 安裝程式，以及
 已簽署並完成公證（notarization）的 macOS 套件。
 
@@ -134,9 +134,9 @@ sudo dnf install ./goflasher-*.x86_64.rpm
 
 ## 建置
 
-GoFlasher 需要 [`go.mod`](go.mod) 指定的 Go 版本。建置 Fyne GUI 還需要 Linux
+GoFlasher 需要 [`go.mod`](../../go.mod) 指定的 Go 版本。建置 Fyne GUI 還需要 Linux
 的 OpenGL、X11 與 Wayland 開發套件。相依套件安裝、從原始碼建置、AppImage、
-Debian/RPM 封裝方式及目前的 Windows/macOS 限制，請參閱 **[BUILDING.md](BUILDING.md)**。
+Debian/RPM 封裝方式及目前的 Windows/macOS 限制，請參閱 **[BUILDING.md](../development/BUILDING.md)**。
 
 開發用 GUI 可使用下列指令啟動：
 
@@ -190,19 +190,19 @@ go test ./...
 ```
 
 競態檢查、GUI 檢查、套件煙霧測試，以及刻意加入防護措施的實體裝置測試指令，
-請參閱 **[TESTING.md](TESTING.md)**。執行發布驗收時，可依照
-[繁體中文實體硬體測試手冊](docs/HARDWARE-TESTING.zh-TW.md)操作，或參考
-[英文版](docs/HARDWARE-TESTING.md)。
+請參閱 **[TESTING.md](../development/TESTING.md)**。執行發布驗收時，可依照
+[繁體中文實體硬體測試手冊](../development/HARDWARE-TESTING.zh-TW.md)操作，或參考
+[英文版](../development/HARDWARE-TESTING.md)。
 
 ## 安全性
 
-回報安全漏洞前，請先閱讀 **[SECURITY.md](SECURITY.md)**。請勿在公開 Issue
+回報安全漏洞前，請先閱讀 **[SECURITY.md](../../SECURITY.md)**。請勿在公開 Issue
 揭露裝置選取或原始寫入相關的安全漏洞。
 
 GoFlasher 是依 **GNU General Public License version 3** 授權的自由軟體。
-詳情請參閱 [LICENSE](LICENSE)。編譯後的發行版本亦包含 BSD 授權的第三方元件；
+詳情請參閱 [LICENSE](../../LICENSE)。編譯後的發行版本亦包含 BSD 授權的第三方元件；
 其著作權聲明與再散布資訊請參閱
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+[THIRD_PARTY_NOTICES.md](../legal/THIRD_PARTY_NOTICES.md)。
 
 ## 尚待完成的項目
 

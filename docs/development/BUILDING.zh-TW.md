@@ -3,7 +3,7 @@
 [English](BUILDING.md)
 
 隔離的macOS native proof of concept及CI驗證邊界記錄於
-[docs/MACOS-NATIVE-PHASE1.zh-TW.md](docs/MACOS-NATIVE-PHASE1.zh-TW.md)。
+[docs/MACOS-NATIVE-PHASE1.zh-TW.md](../architecture/MACOS-NATIVE-PHASE1.zh-TW.md)。
 
 ## 支援的建置目標
 

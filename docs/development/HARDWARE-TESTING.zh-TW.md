@@ -4,7 +4,7 @@
 
 本清單只說明發布硬體測試需要的實體設備與操作。命令、測試工具參數及正式的
 通過／失敗規則，仍以
-[`cmd/usbwriter-hwtest/spec-v1.zh-TW.md`](../cmd/usbwriter-hwtest/spec-v1.zh-TW.md) 為準。
+[`cmd/usbwriter-hwtest/spec-v1.zh-TW.md`](../../cmd/usbwriter-hwtest/spec-v1.zh-TW.md) 為準。
 
 > **危險：**測試會清除選定 USB 裝置的全部內容。不可使用系統碟、備份碟，或
 > 存有任何資料唯一副本的裝置。
