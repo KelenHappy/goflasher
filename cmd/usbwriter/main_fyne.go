@@ -32,6 +32,7 @@ func main() {
 
 func runApplication(tr i18n.Localizer) {
 	controller := newGUIController(tr)
+	tr = controller.tr
 	controller.bindActions()
 	controller.view.window.SetContent(container.NewVScroll(windowContent(tr, controller.view)))
 	controller.appendLog(tr.T("log.launched"))
@@ -56,17 +57,32 @@ type applicationView struct {
 }
 
 type guiController struct {
-	tr       i18n.Localizer
-	view     *applicationView
-	backend  device.Backend
-	machine  *core.StateMachine
-	devices  []device.Device
-	selected device.Device
-	info     image.Info
-	cancel   context.CancelFunc
-	logLines []string
-	app      fyne.App
+	tr                i18n.Localizer
+	view              *applicationView
+	backend           device.Backend
+	machine           *core.StateMachine
+	devices           []device.Device
+	selected          device.Device
+	info              image.Info
+	cancel            context.CancelFunc
+	logLines          []string
+	app               fyne.App
+	operation         operation
+	formatProgress    progress.Update
+	refreshGeneration uint64
+	refreshCancel     context.CancelFunc
+	closing           bool
+	shutdownDone      chan struct{}
 }
+
+type operation uint8
+
+const (
+	operationNone operation = iota
+	// operationFormatting is separate from the image-write state machine so the
+	// two destructive workflows remain mutually exclusive.
+	operationFormatting
+)
 
 const languagePreference = "language"
 
@@ -121,6 +137,33 @@ func (c *guiController) bindActions() {
 	c.view.format.OnTapped = c.formatDevice
 	c.view.start.OnTapped = c.startWrite
 	c.view.settings.OnTapped = c.showSettings
+	c.view.window.SetCloseIntercept(c.closeWindow)
+}
+
+func (c *guiController) closeWindow() {
+	if c.cancel != nil {
+		if !c.closing {
+			c.closing = true
+			c.shutdownDone = make(chan struct{})
+		}
+		c.cancel()
+		c.view.status.SetText(c.tr.T("status.cancelling"))
+		return
+	}
+	c.closeNow()
+}
+
+func (c *guiController) closeNow() {
+	if c.refreshCancel != nil {
+		c.refreshCancel()
+		c.refreshCancel = nil
+	}
+	c.view.window.SetCloseIntercept(nil)
+	c.view.window.Close()
+	if c.shutdownDone != nil {
+		close(c.shutdownDone)
+		c.shutdownDone = nil
+	}
 }
 
 func (c *guiController) showSettings() {
@@ -148,14 +191,7 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 	c.view.window.SetTitle(tr.T("window.title"))
 	c.view.verifyCheck.SetText(tr.T("option.verify"))
 	c.view.ejectCheck.SetText(tr.T("option.eject"))
-	switch c.machine.State() {
-	case core.Completed:
-		c.view.start.SetText(tr.T("action.restart"))
-	case core.Cancelled, core.Failed:
-		c.view.start.SetText(tr.T("action.retry"))
-	default:
-		c.view.start.SetText(tr.T("action.start"))
-	}
+	c.view.start.SetText(tr.T(startActionKey(c.machine.State())))
 	c.view.format.SetText(tr.T("action.format_fat32"))
 	c.view.choose.SetText(tr.T("action.choose"))
 	c.view.refresh.SetText(tr.T("action.rescan"))
@@ -171,17 +207,26 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 	if c.selected.Path == "" {
 		c.view.deviceDetail.SetText(tr.T("device.none"))
 	} else {
-		c.selectDevice(deviceDisplay(c.selected))
+		c.updateDeviceDetail()
 	}
 	if c.info.Path == "" {
 		c.view.imageInfo.SetText(tr.T("image.empty"))
 	} else {
 		c.view.imageInfo.SetText(tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
 	}
-	switch c.machine.State() {
-	case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
-		c.view.status.SetText(tr.T("status.ready"))
+	if c.operation == operationFormatting {
+		c.view.status.SetText(tr.T("status.formatting"))
 		c.view.metrics.SetText(tr.T("metrics.empty"))
+		if c.formatProgress.Stage != "" {
+			c.view.status.SetText(tr.T("stage." + string(c.formatProgress.Stage)))
+			c.view.metrics.SetText(tr.T("metrics.formatting", int(c.formatProgress.BytesProcessed)))
+		}
+	} else {
+		switch c.machine.State() {
+		case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
+			c.view.status.SetText(tr.T("status.ready"))
+			c.view.metrics.SetText(tr.T("metrics.empty"))
+		}
 	}
 	c.view.window.Content().Refresh()
 }
@@ -203,13 +248,32 @@ func deviceDisplay(d device.Device) string {
 }
 
 func (c *guiController) refresh() {
+	// A generation makes the most recently requested scan authoritative; device
+	// enumeration can otherwise complete out of order.
+	c.refreshGeneration++
+	generation := c.refreshGeneration
+	if c.refreshCancel != nil {
+		c.refreshCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.refreshCancel = cancel
 	go func() {
-		list, err := c.backend.ListAllowedDevices(context.Background())
+		list, err := c.backend.ListAllowedDevices(ctx)
 		if err != nil {
-			fyne.Do(func() { c.view.status.SetText(c.tr.T("error.devices", err)) })
+			fyne.Do(func() {
+				if generation == c.refreshGeneration {
+					c.refreshCancel = nil
+				}
+				if generation == c.refreshGeneration && !errors.Is(err, context.Canceled) {
+					c.view.status.SetText(c.tr.T("error.devices", err))
+				}
+			})
 			return
 		}
 		fyne.Do(func() {
+			if generation != c.refreshGeneration {
+				return
+			}
 			c.devices = list
 			options := make([]string, len(list))
 			for i, d := range list {
@@ -217,8 +281,9 @@ func (c *guiController) refresh() {
 			}
 			c.view.deviceSelect.Options = options
 			c.view.deviceSelect.Refresh()
+			c.appendLog(c.tr.T("log.devices", len(list)))
+			c.refreshCancel = nil
 		})
-		c.appendLog(c.tr.T("log.devices", len(list)))
 	}()
 }
 
@@ -228,11 +293,18 @@ func (c *guiController) selectDevice(value string) {
 			continue
 		}
 		c.selected = d
-		c.view.deviceDetail.SetText(c.tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(c.tr, d.IsCardReader), localBool(c.tr, d.Mounted), d.PartitionCount))
+		c.updateDeviceDetail()
 		advanceSelection(c.machine, c.info.Path != "", core.ImageSelected, core.DeviceSelected)
 		c.view.format.Enable()
 		return
 	}
+}
+
+// updateDeviceDetail deliberately avoids selectDevice: changing presentation
+// must not alter the state machine or unlock formatting during an operation.
+func (c *guiController) updateDeviceDetail() {
+	d := c.selected
+	c.view.deviceDetail.SetText(c.tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(c.tr, d.IsCardReader), localBool(c.tr, d.Mounted), d.PartitionCount))
 }
 
 func (c *guiController) chooseImage() {
@@ -261,8 +333,8 @@ func (c *guiController) detectImage(path string) {
 			c.view.imagePath.SetText(path)
 			c.view.imageInfo.SetText(c.tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
 			advanceSelection(c.machine, c.selected.Path != "", core.DeviceSelected, core.ImageSelected)
+			c.appendLog(c.tr.T("log.image", filepath.Base(path)))
 		})
-		c.appendLog(c.tr.T("log.image", filepath.Base(path)))
 	}()
 }
 
@@ -300,17 +372,30 @@ func (c *guiController) formatDevice() {
 }
 
 func (c *guiController) runFormat(formatter device.FAT32Formatter, target device.Device) {
+	if c.operation != operationNone || writingState(c.machine.State()) {
+		return
+	}
+	c.operation = operationFormatting
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	c.formatProgress = progress.Update{}
 	c.lock(true)
+	c.view.start.Disable()
 	c.view.status.SetText(c.tr.T("status.formatting"))
 	c.view.bar.SetValue(0)
 	c.view.bar.Show()
 	c.view.metrics.SetText(c.tr.T("metrics.empty"))
 	c.appendLog(c.tr.T("log.format.start", target.Path))
 	updates := make(chan progress.Update, 100)
-	go c.consumeFormatProgress(updates)
+	progressDone := make(chan struct{})
 	go func() {
-		err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER", updates)
+		c.consumeFormatProgress(updates)
+		close(progressDone)
+	}()
+	go func() {
+		err := formatter.FormatFAT32(ctx, target, "GOFLASHER", updates)
 		close(updates)
+		<-progressDone
 		fyne.Do(func() { c.finishFormat(err) })
 	}()
 }
@@ -319,6 +404,7 @@ func (c *guiController) consumeFormatProgress(updates <-chan progress.Update) {
 	for update := range updates {
 		u := update
 		fyne.Do(func() {
+			c.formatProgress = u
 			c.view.bar.SetValue(overallProgress(u, false))
 			c.view.status.SetText(c.tr.T("stage." + string(u.Stage)))
 			c.view.metrics.SetText(c.tr.T("metrics.formatting", int(u.BytesProcessed)))
@@ -327,7 +413,15 @@ func (c *guiController) consumeFormatProgress(updates <-chan progress.Update) {
 }
 
 func (c *guiController) finishFormat(err error) {
+	c.cancel = nil
+	c.operation = operationNone
+	c.formatProgress = progress.Update{}
 	c.lock(false)
+	c.view.start.Enable()
+	if c.closing {
+		c.closeNow()
+		return
+	}
 	c.view.bar.Show()
 	if err != nil {
 		c.view.status.SetText(c.tr.T("status.failed", err))
@@ -343,6 +437,9 @@ func (c *guiController) finishFormat(err error) {
 }
 
 func (c *guiController) startWrite() {
+	if c.operation != operationNone {
+		return
+	}
 	resetFinishedState(c.machine)
 	if writingState(c.machine.State()) {
 		c.cancelWrite()
@@ -370,6 +467,19 @@ func writingState(state core.State) bool {
 	}
 }
 
+func startActionKey(state core.State) string {
+	switch {
+	case writingState(state):
+		return "action.cancel"
+	case state == core.Completed:
+		return "action.restart"
+	case state == core.Cancelled || state == core.Failed:
+		return "action.retry"
+	default:
+		return "action.start"
+	}
+}
+
 func (c *guiController) cancelWrite() {
 	if c.cancel != nil {
 		c.cancel()
@@ -392,10 +502,15 @@ func (c *guiController) confirmWrite(ok bool) {
 	c.view.bar.SetValue(0)
 	c.appendLog(c.tr.T("log.start"))
 	updates := make(chan progress.Update, 32)
-	go c.consumeWriteProgress(updates)
+	progressDone := make(chan struct{})
+	go func() {
+		c.consumeWriteProgress(updates)
+		close(progressDone)
+	}()
 	go func() {
 		result, err := (&core.Service{Backend: c.backend, State: c.machine}).Run(ctx, c.info, c.selected, core.RunOptions{Verify: c.view.verifyCheck.Checked, Eject: c.view.ejectCheck.Checked}, updates)
 		close(updates)
+		<-progressDone
 		fyne.Do(func() { c.finishWrite(result, err) })
 	}()
 }
@@ -417,6 +532,10 @@ func (c *guiController) consumeWriteProgress(updates <-chan progress.Update) {
 
 func (c *guiController) finishWrite(result core.RunResult, runErr error) {
 	c.cancel = nil
+	if c.closing {
+		c.closeNow()
+		return
+	}
 	if runErr != nil {
 		c.view.status.SetText(c.tr.T("status.failed", userError(c.tr, runErr)))
 		c.appendLog(c.tr.T("log.error", runErr))

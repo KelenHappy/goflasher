@@ -13,7 +13,11 @@ import (
 	"github.com/goflasher/goflasher/internal/writer"
 )
 
+// RunOptions controls optional post-write safety steps.
 type RunOptions struct{ Verify, Eject bool }
+
+// RunResult summarizes work completed by Service.Run. A failed run may return
+// partial values, allowing callers to report how far destructive work got.
 type RunResult struct {
 	BytesWritten               uint64
 	SourceSHA256, TargetSHA256 string
@@ -21,6 +25,8 @@ type RunResult struct {
 	AverageBytesPerSecond      float64
 	Verified, Ejected          bool
 }
+
+// Service coordinates the device workflow and its state transitions.
 type Service struct {
 	Backend device.Backend
 	State   *StateMachine
@@ -38,9 +44,7 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	return out, err
 }
 
-func (s *Service) runWorkflow(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (RunResult, error) {
-	var out RunResult
-	var err error
+func (s *Service) runWorkflow(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (out RunResult, err error) {
 	if info.UncompressedSize == 0 || info.SHA256 == "" {
 		info, err = image.InspectContext(ctx, info)
 		if err != nil {
@@ -59,8 +63,16 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 	// Windows keeps dismounted-volume handles across writer close, flush,
 	// verification, and eject. Release them only when the complete operation
 	// leaves this scope.
+	var releaseDevice func() error
 	if releaser, ok := s.Backend.(interface{ ReleaseDevice(device.Device) error }); ok {
-		defer releaser.ReleaseDevice(target)
+		releaseDevice = func() error { return releaser.ReleaseDevice(target) }
+		defer func() {
+			if releaseDevice != nil {
+				if releaseErr := releaseDevice(); releaseErr != nil {
+					err = errors.Join(err, fmt.Errorf("release device: %w", releaseErr))
+				}
+			}
+		}()
 	}
 	if err = s.writeImage(ctx, info, target, updates, &out); err != nil {
 		return out, err
@@ -70,6 +82,13 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 	}
 	if err = s.ejectDevice(ctx, target, opts.Eject, updates, &out); err != nil {
 		return out, err
+	}
+	if releaseDevice != nil {
+		releaseErr := releaseDevice()
+		releaseDevice = nil
+		if releaseErr != nil {
+			return out, fmt.Errorf("release device: %w", releaseErr)
+		}
 	}
 	if err = s.State.Transition(Completed); err != nil {
 		return out, err
