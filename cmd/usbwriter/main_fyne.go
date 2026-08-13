@@ -72,6 +72,7 @@ type guiController struct {
 	refreshGeneration uint64
 	refreshCancel     context.CancelFunc
 	closing           bool
+	shutdownDone      chan struct{}
 }
 
 type operation uint8
@@ -141,7 +142,10 @@ func (c *guiController) bindActions() {
 
 func (c *guiController) closeWindow() {
 	if c.cancel != nil {
-		c.closing = true
+		if !c.closing {
+			c.closing = true
+			c.shutdownDone = make(chan struct{})
+		}
 		c.cancel()
 		c.view.status.SetText(c.tr.T("status.cancelling"))
 		return
@@ -156,6 +160,10 @@ func (c *guiController) closeNow() {
 	}
 	c.view.window.SetCloseIntercept(nil)
 	c.view.window.Close()
+	if c.shutdownDone != nil {
+		close(c.shutdownDone)
+		c.shutdownDone = nil
+	}
 }
 
 func (c *guiController) showSettings() {
