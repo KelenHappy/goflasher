@@ -47,6 +47,29 @@ type closeStateBackend struct {
 	stateAtClose State
 }
 
+type releaseErrorBackend struct {
+	*fileBackend
+	err error
+}
+
+func (b *releaseErrorBackend) ReleaseDevice(device.Device) error { return b.err }
+
+func TestServiceReportsDeviceReleaseFailure(t *testing.T) {
+	payload := []byte("image payload")
+	fixture := newFileServiceFixture(t, payload, 2)
+	releaseErr := errors.New("release failed")
+	backend := &releaseErrorBackend{fileBackend: fixture.backend, err: releaseErr}
+	fixture.service.Backend = backend
+
+	_, err := fixture.service.Run(context.Background(), fixture.info, fixture.device, RunOptions{}, nil)
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("Run() error = %v, want release error", err)
+	}
+	if got := fixture.state.State(); got != Failed {
+		t.Fatalf("state = %s, want Failed", got)
+	}
+}
+
 func (b *closeStateBackend) OpenWriter(context.Context, device.Device) (io.WriteCloser, error) {
 	f, err := os.OpenFile(b.path, os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {

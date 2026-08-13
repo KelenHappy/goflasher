@@ -30,6 +30,45 @@ func (f *blockingFormatter) FormatFAT32(_ context.Context, _ device.Device, _ st
 	return errors.New("test format stopped")
 }
 
+type cancellableFormatter struct {
+	started chan struct{}
+}
+
+func (f *cancellableFormatter) FormatFAT32(ctx context.Context, _ device.Device, _ string, _ chan<- progress.Update) error {
+	close(f.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestCloseCancelsActiveFormatAndWaits(t *testing.T) {
+	c := newTestController(t)
+	c.selected = device.Device{Path: "/dev/test", Size: 1 << 30}
+	formatter := &cancellableFormatter{started: make(chan struct{})}
+	c.runFormat(formatter, c.selected)
+	<-formatter.started
+
+	c.closeWindow()
+	if !c.closing || c.operation != operationFormatting {
+		t.Fatal("window closed before formatting worker exited")
+	}
+	waitFor(t, func() bool { return c.operation == operationNone && c.cancel == nil })
+}
+
+func TestCloseCancelsActiveWrite(t *testing.T) {
+	c := newTestController(t)
+	cancelled := make(chan struct{})
+	c.cancel = func() { close(cancelled) }
+	c.closeWindow()
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("active write was not cancelled")
+	}
+	if !c.closing {
+		t.Fatal("window did not wait for active write")
+	}
+}
+
 func TestFormattingExcludesWritingAndPreservesLocalizedStatus(t *testing.T) {
 	c := newTestController(t)
 	c.selected = device.Device{Path: "/dev/test", Size: 1 << 30}

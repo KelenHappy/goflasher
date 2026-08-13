@@ -70,6 +70,8 @@ type guiController struct {
 	operation         operation
 	formatProgress    progress.Update
 	refreshGeneration uint64
+	refreshCancel     context.CancelFunc
+	closing           bool
 }
 
 type operation uint8
@@ -134,6 +136,26 @@ func (c *guiController) bindActions() {
 	c.view.format.OnTapped = c.formatDevice
 	c.view.start.OnTapped = c.startWrite
 	c.view.settings.OnTapped = c.showSettings
+	c.view.window.SetCloseIntercept(c.closeWindow)
+}
+
+func (c *guiController) closeWindow() {
+	if c.cancel != nil {
+		c.closing = true
+		c.cancel()
+		c.view.status.SetText(c.tr.T("status.cancelling"))
+		return
+	}
+	c.closeNow()
+}
+
+func (c *guiController) closeNow() {
+	if c.refreshCancel != nil {
+		c.refreshCancel()
+		c.refreshCancel = nil
+	}
+	c.view.window.SetCloseIntercept(nil)
+	c.view.window.Close()
 }
 
 func (c *guiController) showSettings() {
@@ -222,11 +244,19 @@ func (c *guiController) refresh() {
 	// enumeration can otherwise complete out of order.
 	c.refreshGeneration++
 	generation := c.refreshGeneration
+	if c.refreshCancel != nil {
+		c.refreshCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.refreshCancel = cancel
 	go func() {
-		list, err := c.backend.ListAllowedDevices(context.Background())
+		list, err := c.backend.ListAllowedDevices(ctx)
 		if err != nil {
 			fyne.Do(func() {
 				if generation == c.refreshGeneration {
+					c.refreshCancel = nil
+				}
+				if generation == c.refreshGeneration && !errors.Is(err, context.Canceled) {
 					c.view.status.SetText(c.tr.T("error.devices", err))
 				}
 			})
@@ -244,6 +274,7 @@ func (c *guiController) refresh() {
 			c.view.deviceSelect.Options = options
 			c.view.deviceSelect.Refresh()
 			c.appendLog(c.tr.T("log.devices", len(list)))
+			c.refreshCancel = nil
 		})
 	}()
 }
@@ -337,6 +368,8 @@ func (c *guiController) runFormat(formatter device.FAT32Formatter, target device
 		return
 	}
 	c.operation = operationFormatting
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
 	c.formatProgress = progress.Update{}
 	c.lock(true)
 	c.view.start.Disable()
@@ -352,7 +385,7 @@ func (c *guiController) runFormat(formatter device.FAT32Formatter, target device
 		close(progressDone)
 	}()
 	go func() {
-		err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER", updates)
+		err := formatter.FormatFAT32(ctx, target, "GOFLASHER", updates)
 		close(updates)
 		<-progressDone
 		fyne.Do(func() { c.finishFormat(err) })
@@ -372,10 +405,15 @@ func (c *guiController) consumeFormatProgress(updates <-chan progress.Update) {
 }
 
 func (c *guiController) finishFormat(err error) {
+	c.cancel = nil
 	c.operation = operationNone
 	c.formatProgress = progress.Update{}
 	c.lock(false)
 	c.view.start.Enable()
+	if c.closing {
+		c.closeNow()
+		return
+	}
 	c.view.bar.Show()
 	if err != nil {
 		c.view.status.SetText(c.tr.T("status.failed", err))
@@ -486,6 +524,10 @@ func (c *guiController) consumeWriteProgress(updates <-chan progress.Update) {
 
 func (c *guiController) finishWrite(result core.RunResult, runErr error) {
 	c.cancel = nil
+	if c.closing {
+		c.closeNow()
+		return
+	}
 	if runErr != nil {
 		c.view.status.SetText(c.tr.T("status.failed", userError(c.tr, runErr)))
 		c.appendLog(c.tr.T("log.error", runErr))
