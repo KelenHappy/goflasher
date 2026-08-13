@@ -2,17 +2,27 @@ package progress
 
 import "time"
 
+// Stage identifies the operation represented by an Update.
 type Stage string
 
 const (
-	StageFormatting        Stage = "formatting"
-	StageWriting           Stage = "writing"
+	// StageFormatting reports creation of a new filesystem.
+	StageFormatting Stage = "formatting"
+	// StageWriting reports an uncompressed image write.
+	StageWriting Stage = "writing"
+	// StageDecompressWriting reports decompression directly into the target.
 	StageDecompressWriting Stage = "decompress_writing"
-	StageFlushing          Stage = "flushing"
-	StageVerifying         Stage = "verifying"
-	StageEjecting          Stage = "ejecting"
+	// StageFlushing reports that buffered writes are becoming durable.
+	StageFlushing Stage = "flushing"
+	// StageVerifying reports a target read-back pass.
+	StageVerifying Stage = "verifying"
+	// StageEjecting reports release of the target for safe removal.
+	StageEjecting Stage = "ejecting"
 )
 
+// Update is an immutable progress snapshot passed from a worker to its owner.
+// Producers do not close the channel carrying updates; the goroutine that
+// created that channel owns its lifecycle.
 type Update struct {
 	Stage          Stage
 	BytesProcessed uint64

@@ -13,7 +13,11 @@ import (
 	"github.com/goflasher/goflasher/internal/writer"
 )
 
+// RunOptions controls optional post-write safety steps.
 type RunOptions struct{ Verify, Eject bool }
+
+// RunResult summarizes work completed by Service.Run. A failed run may return
+// partial values, allowing callers to report how far destructive work got.
 type RunResult struct {
 	BytesWritten               uint64
 	SourceSHA256, TargetSHA256 string
@@ -21,6 +25,8 @@ type RunResult struct {
 	AverageBytesPerSecond      float64
 	Verified, Ejected          bool
 }
+
+// Service coordinates the device workflow and its state transitions.
 type Service struct {
 	Backend device.Backend
 	State   *StateMachine

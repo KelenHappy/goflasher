@@ -54,6 +54,32 @@ func TestWritingState(t *testing.T) {
 	}
 }
 
+func TestStartActionKey(t *testing.T) {
+	tests := []struct {
+		state core.State
+		want  string
+	}{
+		{state: core.Idle, want: "action.start"},
+		{state: core.Ready, want: "action.start"},
+		{state: core.Completed, want: "action.restart"},
+		{state: core.Cancelled, want: "action.retry"},
+		{state: core.Failed, want: "action.retry"},
+		{state: core.Unmounting, want: "action.cancel"},
+		{state: core.Writing, want: "action.cancel"},
+		{state: core.Flushing, want: "action.cancel"},
+		{state: core.Verifying, want: "action.cancel"},
+		{state: core.Ejecting, want: "action.cancel"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			if got := startActionKey(tt.state); got != tt.want {
+				t.Fatalf("startActionKey(%s) = %q, want %q", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProgressRatio(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -5,22 +5,36 @@ import (
 	"sync"
 )
 
+// State identifies a user-visible phase of the destructive write workflow.
 type State string
 
 const (
-	Idle           State = "Idle"
-	ImageSelected  State = "ImageSelected"
+	// Idle indicates that neither a usable image nor a target is ready.
+	Idle State = "Idle"
+	// ImageSelected indicates that an image is ready but no target is selected.
+	ImageSelected State = "ImageSelected"
+	// DeviceSelected indicates that a target is ready but no image is selected.
 	DeviceSelected State = "DeviceSelected"
-	Ready          State = "Ready"
-	Confirming     State = "Confirming"
-	Unmounting     State = "Unmounting"
-	Writing        State = "Writing"
-	Flushing       State = "Flushing"
-	Verifying      State = "Verifying"
-	Ejecting       State = "Ejecting"
-	Completed      State = "Completed"
-	Cancelled      State = "Cancelled"
-	Failed         State = "Failed"
+	// Ready indicates that both an image and target are available.
+	Ready State = "Ready"
+	// Confirming indicates that destructive work is awaiting user confirmation.
+	Confirming State = "Confirming"
+	// Unmounting indicates that mounted target filesystems are being detached.
+	Unmounting State = "Unmounting"
+	// Writing indicates that image data is being copied to the target.
+	Writing State = "Writing"
+	// Flushing indicates that buffered target writes are becoming durable.
+	Flushing State = "Flushing"
+	// Verifying indicates that target data is being read back and checked.
+	Verifying State = "Verifying"
+	// Ejecting indicates that the target is being released for safe removal.
+	Ejecting State = "Ejecting"
+	// Completed indicates that all requested workflow steps succeeded.
+	Completed State = "Completed"
+	// Cancelled indicates that context cancellation interrupted the workflow.
+	Cancelled State = "Cancelled"
+	// Failed indicates that a non-cancellation error stopped the workflow.
+	Failed State = "Failed"
 )
 
 var transitions = map[State]map[State]bool{
@@ -39,13 +53,20 @@ var transitions = map[State]map[State]bool{
 	Failed:         {Idle: true, Ready: true},
 }
 
+// StateMachine serializes workflow transitions because the GUI and worker
+// goroutines can observe or advance the same operation concurrently.
 type StateMachine struct {
 	mu    sync.RWMutex
 	state State
 }
 
+// NewStateMachine returns a state machine in Idle.
 func NewStateMachine() *StateMachine { return &StateMachine{state: Idle} }
+
+// State returns a concurrency-safe snapshot of the current state.
 func (s *StateMachine) State() State { s.mu.RLock(); defer s.mu.RUnlock(); return s.state }
+
+// Transition advances to next only when the workflow permits that edge.
 func (s *StateMachine) Transition(next State) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

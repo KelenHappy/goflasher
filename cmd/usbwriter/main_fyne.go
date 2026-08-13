@@ -32,6 +32,7 @@ func main() {
 
 func runApplication(tr i18n.Localizer) {
 	controller := newGUIController(tr)
+	tr = controller.tr
 	controller.bindActions()
 	controller.view.window.SetContent(container.NewVScroll(windowContent(tr, controller.view)))
 	controller.appendLog(tr.T("log.launched"))
@@ -148,14 +149,7 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 	c.view.window.SetTitle(tr.T("window.title"))
 	c.view.verifyCheck.SetText(tr.T("option.verify"))
 	c.view.ejectCheck.SetText(tr.T("option.eject"))
-	switch c.machine.State() {
-	case core.Completed:
-		c.view.start.SetText(tr.T("action.restart"))
-	case core.Cancelled, core.Failed:
-		c.view.start.SetText(tr.T("action.retry"))
-	default:
-		c.view.start.SetText(tr.T("action.start"))
-	}
+	c.view.start.SetText(tr.T(startActionKey(c.machine.State())))
 	c.view.format.SetText(tr.T("action.format_fat32"))
 	c.view.choose.SetText(tr.T("action.choose"))
 	c.view.refresh.SetText(tr.T("action.rescan"))
@@ -171,7 +165,7 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 	if c.selected.Path == "" {
 		c.view.deviceDetail.SetText(tr.T("device.none"))
 	} else {
-		c.selectDevice(deviceDisplay(c.selected))
+		c.updateDeviceDetail()
 	}
 	if c.info.Path == "" {
 		c.view.imageInfo.SetText(tr.T("image.empty"))
@@ -228,11 +222,18 @@ func (c *guiController) selectDevice(value string) {
 			continue
 		}
 		c.selected = d
-		c.view.deviceDetail.SetText(c.tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(c.tr, d.IsCardReader), localBool(c.tr, d.Mounted), d.PartitionCount))
+		c.updateDeviceDetail()
 		advanceSelection(c.machine, c.info.Path != "", core.ImageSelected, core.DeviceSelected)
 		c.view.format.Enable()
 		return
 	}
+}
+
+// updateDeviceDetail deliberately avoids selectDevice: changing presentation
+// must not alter the state machine or unlock formatting during an operation.
+func (c *guiController) updateDeviceDetail() {
+	d := c.selected
+	c.view.deviceDetail.SetText(c.tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(c.tr, d.IsCardReader), localBool(c.tr, d.Mounted), d.PartitionCount))
 }
 
 func (c *guiController) chooseImage() {
@@ -367,6 +368,19 @@ func writingState(state core.State) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func startActionKey(state core.State) string {
+	switch {
+	case writingState(state):
+		return "action.cancel"
+	case state == core.Completed:
+		return "action.restart"
+	case state == core.Cancelled || state == core.Failed:
+		return "action.retry"
+	default:
+		return "action.start"
 	}
 }
 
