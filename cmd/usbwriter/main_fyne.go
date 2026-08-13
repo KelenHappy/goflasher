@@ -50,6 +50,9 @@ type applicationView struct {
 	logPanel                                 *widget.Accordion
 	start, format, choose, refresh, copyLog  *widget.Button
 	copyError                                *widget.Button
+	settings                                 *widget.Button
+	deviceCard, imageCard, imageInfoCard     *widget.Card
+	optionsCard, progressCard                *widget.Card
 }
 
 type guiController struct {
@@ -62,16 +65,22 @@ type guiController struct {
 	info     image.Info
 	cancel   context.CancelFunc
 	logLines []string
+	app      fyne.App
 }
 
+const languagePreference = "language"
+
 func newGUIController(tr i18n.Localizer) *guiController {
-	configureFyneTranslations(string(tr.Locale()))
 	a := app.NewWithID("org.goflasher.usbwriter")
 	a.Settings().SetTheme(newReadableTheme())
+	if saved := a.Preferences().String(languagePreference); saved != "" {
+		tr = i18n.New(saved)
+	}
+	configureFyneTranslations(string(tr.Locale()))
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(fyne.NewSize(720, 620))
 	view := newApplicationView(tr, w)
-	return &guiController{tr: tr, view: view, backend: newBackend(), machine: core.NewStateMachine()}
+	return &guiController{tr: tr, view: view, backend: newBackend(), machine: core.NewStateMachine(), app: a}
 }
 
 func newApplicationView(tr i18n.Localizer, w fyne.Window) *applicationView {
@@ -101,6 +110,7 @@ func newApplicationView(tr i18n.Localizer, w fyne.Window) *applicationView {
 	v.copyError = widget.NewButton(tr.T("action.copy_error"), func() { w.Clipboard().SetContent(v.logs.Text) })
 	v.copyError.Hide()
 	v.copyLog = widget.NewButton(tr.T("action.copy_log"), func() { w.Clipboard().SetContent(v.logs.Text) })
+	v.settings = widget.NewButton(tr.T("action.settings"), nil)
 	return v
 }
 
@@ -110,6 +120,70 @@ func (c *guiController) bindActions() {
 	c.view.choose.OnTapped = c.chooseImage
 	c.view.format.OnTapped = c.formatDevice
 	c.view.start.OnTapped = c.startWrite
+	c.view.settings.OnTapped = c.showSettings
+}
+
+func (c *guiController) showSettings() {
+	languages := []string{"English", "繁體中文", "简体中文", "日本語"}
+	locales := map[string]i18n.Locale{"English": i18n.English, "繁體中文": i18n.TraditionalChinese, "简体中文": i18n.SimplifiedChinese, "日本語": i18n.Japanese}
+	selected := widget.NewSelect(languages, func(name string) {
+		locale := locales[name]
+		c.app.Preferences().SetString(languagePreference, string(locale))
+		c.setLanguage(locale)
+	})
+	for name, locale := range locales {
+		if locale == c.tr.Locale() {
+			selected.SetSelected(name)
+			break
+		}
+	}
+	content := container.NewBorder(nil, nil, widget.NewLabel(c.tr.T("settings.language")), nil, selected)
+	dialog.NewCustom(c.tr.T("settings.title"), c.tr.T("settings.close"), content, c.view.window).Show()
+}
+
+func (c *guiController) setLanguage(locale i18n.Locale) {
+	c.tr = i18n.New(string(locale))
+	configureFyneTranslations(string(locale))
+	tr := c.tr
+	c.view.window.SetTitle(tr.T("window.title"))
+	c.view.verifyCheck.SetText(tr.T("option.verify"))
+	c.view.ejectCheck.SetText(tr.T("option.eject"))
+	switch c.machine.State() {
+	case core.Completed:
+		c.view.start.SetText(tr.T("action.restart"))
+	case core.Cancelled, core.Failed:
+		c.view.start.SetText(tr.T("action.retry"))
+	default:
+		c.view.start.SetText(tr.T("action.start"))
+	}
+	c.view.format.SetText(tr.T("action.format_fat32"))
+	c.view.choose.SetText(tr.T("action.choose"))
+	c.view.refresh.SetText(tr.T("action.rescan"))
+	c.view.copyError.SetText(tr.T("action.copy_error"))
+	c.view.copyLog.SetText(tr.T("action.copy_log"))
+	c.view.settings.SetText(tr.T("action.settings"))
+	c.view.logPanel.Items[0].Title = tr.T("log.details")
+	c.view.deviceCard.SetTitle(tr.T("card.device"))
+	c.view.imageCard.SetTitle(tr.T("card.image"))
+	c.view.imageInfoCard.SetTitle(tr.T("card.image_info"))
+	c.view.optionsCard.SetTitle(tr.T("card.options"))
+	c.view.progressCard.SetTitle(tr.T("card.progress"))
+	if c.selected.Path == "" {
+		c.view.deviceDetail.SetText(tr.T("device.none"))
+	} else {
+		c.selectDevice(deviceDisplay(c.selected))
+	}
+	if c.info.Path == "" {
+		c.view.imageInfo.SetText(tr.T("image.empty"))
+	} else {
+		c.view.imageInfo.SetText(tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
+	}
+	switch c.machine.State() {
+	case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
+		c.view.status.SetText(tr.T("status.ready"))
+		c.view.metrics.SetText(tr.T("metrics.empty"))
+	}
+	c.view.window.Content().Refresh()
 }
 
 func (c *guiController) appendLog(message string) {
@@ -426,12 +500,13 @@ func resetFinishedState(machine *core.StateMachine) {
 }
 
 func windowContent(tr i18n.Localizer, v *applicationView) *fyne.Container {
-	deviceCard := widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, container.NewHBox(v.refresh, v.format), v.deviceSelect), v.deviceDetail))
-	imageCard := widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, v.choose, v.imagePath))
-	optionsCard := widget.NewCard(tr.T("card.options"), "", container.NewVBox(v.verifyCheck, v.ejectCheck))
-	progressCard := widget.NewCard(tr.T("card.progress"), "", container.NewVBox(v.status, v.bar, v.metrics))
+	v.deviceCard = widget.NewCard(tr.T("card.device"), "", container.NewVBox(container.NewBorder(nil, nil, nil, container.NewHBox(v.refresh, v.format), v.deviceSelect), v.deviceDetail))
+	v.imageCard = widget.NewCard(tr.T("card.image"), "", container.NewBorder(nil, nil, nil, v.choose, v.imagePath))
+	v.imageInfoCard = widget.NewCard(tr.T("card.image_info"), "", v.imageInfo)
+	v.optionsCard = widget.NewCard(tr.T("card.options"), "", container.NewVBox(v.verifyCheck, v.ejectCheck))
+	v.progressCard = widget.NewCard(tr.T("card.progress"), "", container.NewVBox(v.status, v.bar, v.metrics))
 	actions := container.NewBorder(nil, nil, container.NewHBox(v.copyLog, v.copyError), v.start, v.logPanel)
-	return container.NewVBox(deviceCard, imageCard, widget.NewCard(tr.T("card.image_info"), "", v.imageInfo), optionsCard, progressCard, actions)
+	return container.NewVBox(container.NewHBox(v.settings), v.deviceCard, v.imageCard, v.imageInfoCard, v.optionsCard, v.progressCard, actions)
 }
 
 func userError(tr i18n.Localizer, err error) string {

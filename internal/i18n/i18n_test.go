@@ -3,7 +3,7 @@ package i18n
 import "testing"
 
 func TestParseLocale(t *testing.T) {
-	tests := map[string]Locale{"zh_TW.UTF-8": TraditionalChinese, "zh-CN": TraditionalChinese, "en_US.UTF-8": English, "C": English, "": English}
+	tests := map[string]Locale{"zh_TW.UTF-8": TraditionalChinese, "zh-CN": SimplifiedChinese, "zh-Hans": SimplifiedChinese, "ja_JP.UTF-8": Japanese, "jp": Japanese, "en_US.UTF-8": English, "C": English, "": English}
 	for input, want := range tests {
 		if got := ParseLocale(input); got != want {
 			t.Errorf("ParseLocale(%q) = %q, want %q", input, got, want)
@@ -12,14 +12,16 @@ func TestParseLocale(t *testing.T) {
 }
 
 func TestCatalogsHaveSameMessages(t *testing.T) {
-	for id := range catalogs[English] {
-		if _, ok := catalogs[TraditionalChinese][id]; !ok {
-			t.Errorf("Traditional Chinese catalog is missing %q", id)
+	for _, locale := range []Locale{TraditionalChinese, SimplifiedChinese, Japanese} {
+		for id := range catalogs[English] {
+			if _, ok := catalogs[locale][id]; !ok {
+				t.Errorf("%s catalog is missing %q", locale, id)
+			}
 		}
-	}
-	for id := range catalogs[TraditionalChinese] {
-		if _, ok := catalogs[English][id]; !ok {
-			t.Errorf("English catalog is missing %q", id)
+		for id := range catalogs[locale] {
+			if _, ok := catalogs[English][id]; !ok {
+				t.Errorf("English catalog is missing %q (present in %s)", id, locale)
+			}
 		}
 	}
 }
@@ -43,6 +45,8 @@ func TestImageChooserLabelsAreLocalized(t *testing.T) {
 	}{
 		{locale: "en", title: "Choose an image file", accept: "Choose", dismiss: "Cancel"},
 		{locale: "zh-TW", title: "選擇映像檔案", accept: "選擇", dismiss: "取消"},
+		{locale: "zh-CN", title: "选择镜像文件", accept: "选择", dismiss: "取消"},
+		{locale: "ja", title: "イメージファイルを選択", accept: "選択", dismiss: "キャンセル"},
 	}
 	for _, tt := range tests {
 		tr := New(tt.locale)
