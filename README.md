@@ -6,7 +6,7 @@
 **GoFlasher writes raw or compressed disk images to removable USB flash media
 on Linux, Windows, and macOS.**
 
-[繁體中文說明](readme-zh-tw.md)
+[繁體中文說明](docs/readme/README.zh-TW.md)
 </div>
 
 > [!WARNING]
@@ -79,7 +79,7 @@ lock/dismount, flush, format, and eject are native and invoke no CLI. macOS stil
 uses `diskutil` for device management and `osascript` for the native chooser,
 but formatting is performed in process. All three native builds are exercised by CI, but Windows and macOS
 still require native-host privileges and physical-media acceptance before a
-release. See [BUILDING.md](BUILDING.md#native-api-and-command-dependencies) for
+release. See [BUILDING.md](docs/development/BUILDING.md#native-api-and-command-dependencies) for
 the exact boundary and the native-API migration direction.
 
 ## Prebuilt downloads
@@ -88,7 +88,7 @@ Source support and prebuilt package availability are separate. The current
 release workflow publishes prebuilt **Linux** artifacts only: an x86-64
 AppImage, an amd64 Debian package, and an x86-64 RPM package. The
 Windows and macOS implementations are available in the source tree and can be
-built from source as documented in [BUILDING.md](BUILDING.md), but signed Windows
+built from source as documented in [BUILDING.md](docs/development/BUILDING.md), but signed Windows
 installers and signed/notarized macOS packages are not yet published.
 
 A package is not a universal executable. Build and package separately for each
@@ -156,7 +156,7 @@ Do not launch GoFlasher itself with `sudo`.
 
 GoFlasher requires the Go version declared in [`go.mod`](go.mod). Building the
 Fyne GUI also requires Linux OpenGL, X11, and Wayland development packages.
-See **[BUILDING.md](BUILDING.md)** for dependency installation, source builds,
+See **[BUILDING.md](docs/development/BUILDING.md)** for dependency installation, source builds,
 AppImage, Debian and RPM packaging, and the current Windows/macOS limitations.
 
 A development GUI build can be started with:
@@ -189,11 +189,11 @@ it does not write to real block devices.
 go test ./...
 ```
 
-See **[TESTING.md](TESTING.md)** for race tests, GUI checks, package smoke tests,
+See **[TESTING.md](docs/development/TESTING.md)** for race tests, GUI checks, package smoke tests,
 and the deliberately guarded real-device test command. Release testers can use
 the step-by-step hardware manuals in
-[English](docs/HARDWARE-TESTING.md) or
-[Traditional Chinese](docs/HARDWARE-TESTING.zh-TW.md).
+[English](docs/development/HARDWARE-TESTING.md) or
+[Traditional Chinese](docs/development/HARDWARE-TESTING.zh-TW.md).
 
 ## Security and safety
 
@@ -203,7 +203,7 @@ publish a device-selection or raw-write vulnerability in a public issue.
 GoFlasher is free software distributed under the **GNU General Public License
 version 3**. See [LICENSE](LICENSE). Compiled releases also contain BSD-licensed
 third-party components; their attribution and redistribution information is in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[THIRD_PARTY_NOTICES.md](docs/legal/THIRD_PARTY_NOTICES.md).
 
 ## Enhancements and bugs
 

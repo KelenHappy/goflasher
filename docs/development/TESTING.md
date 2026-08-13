@@ -66,12 +66,12 @@ disposable VM, verify:
 ## Versioned physical hardware acceptance
 
 The normative destructive procedure is
-[`cmd/usbwriter-hwtest/spec-v1.md`](cmd/usbwriter-hwtest/spec-v1.md). The harness
+[`cmd/usbwriter-hwtest/spec-v1.md`](../../cmd/usbwriter-hwtest/spec-v1.md). The harness
 builds on Linux, Windows, and macOS and deliberately requires:
 
 Operators should follow the step-by-step
-[physical hardware test manual](docs/HARDWARE-TESTING.md), also available in
-[Traditional Chinese](docs/HARDWARE-TESTING.zh-TW.md). The versioned
+[physical hardware test manual](HARDWARE-TESTING.md), also available in
+[Traditional Chinese](HARDWARE-TESTING.zh-TW.md). The versioned
 specification remains authoritative for pass/fail decisions.
 
 - a reviewed `goflasher-hwtest/v1` device allowlist with exact identity, model,

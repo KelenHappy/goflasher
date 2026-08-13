@@ -31,7 +31,7 @@ install -Dm644 "$root/packaging/org.goflasher.usbwriter.desktop" \
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.svg" \
   "$stage/usr/share/icons/hicolor/scalable/apps/org.goflasher.usbwriter.svg"
 install -Dm644 "$root/LICENSE" "$stage/usr/share/doc/goflasher/copyright"
-install -Dm644 "$root/THIRD_PARTY_NOTICES.md" \
+install -Dm644 "$root/docs/legal/THIRD_PARTY_NOTICES.md" \
   "$stage/usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md"
 install -Dm644 "$xz_dir/LICENSE" \
   "$stage/usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE"

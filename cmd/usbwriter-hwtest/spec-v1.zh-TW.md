@@ -90,4 +90,4 @@ sysctl vm.swapusage
 
 ## 驗收
 
-Linux、Windows與macOS都必須使用RC binary及 `TESTING.zh-TW.md` 核准matrix，分別通過HW-01至HW-09。任一failure、skip、未真正觀察address reuse、缺證據或只在VM測試都會阻擋stable release。只有經文件化security review並更新本versioned spec，才能把case標為not applicable。
+Linux、Windows與macOS都必須使用RC binary及 `docs/development/TESTING.zh-TW.md` 核准matrix，分別通過HW-01至HW-09。任一failure、skip、未真正觀察address reuse、缺證據或只在VM測試都會阻擋stable release。只有經文件化security review並更新本versioned spec，才能把case標為not applicable。

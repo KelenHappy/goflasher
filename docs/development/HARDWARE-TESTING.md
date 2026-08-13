@@ -4,7 +4,7 @@
 
 This checklist describes only the physical equipment and actions needed for a
 release hardware test. Commands, harness options, and the formal pass/fail rules
-remain in [`cmd/usbwriter-hwtest/spec-v1.md`](../cmd/usbwriter-hwtest/spec-v1.md).
+remain in [`cmd/usbwriter-hwtest/spec-v1.md`](../../cmd/usbwriter-hwtest/spec-v1.md).
 
 > **DANGER:** Testing erases the selected USB device. Never use a system disk,
 > backup disk, or a device containing the only copy of any data.

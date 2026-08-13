@@ -3,7 +3,7 @@
 [Traditional Chinese / 繁體中文版](BUILDING.zh-TW.md)
 
 The isolated native macOS proof of concept and its CI validation boundary are
-documented in [docs/MACOS-NATIVE-PHASE1.md](docs/MACOS-NATIVE-PHASE1.md).
+documented in [docs/MACOS-NATIVE-PHASE1.md](../architecture/MACOS-NATIVE-PHASE1.md).
 
 ## Supported build targets
 

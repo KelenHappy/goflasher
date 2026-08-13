@@ -30,7 +30,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 "$linuxdeploy" \
 go build -trimpath -o "$appdir/usr/share/goflasher/goflasher-helper" "$root/cmd/goflasher-helper"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \
   "$appdir/usr/share/goflasher/org.goflasher.usbwriter.policy"
-install -Dm644 "$root/THIRD_PARTY_NOTICES.md" \
+install -Dm644 "$root/docs/legal/THIRD_PARTY_NOTICES.md" \
   "$appdir/usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md"
 install -Dm644 "$xz_dir/LICENSE" \
   "$appdir/usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE"

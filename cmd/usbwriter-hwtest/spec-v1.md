@@ -112,7 +112,7 @@ Record the corresponding post-case plist and the `diskutil eject` outcome.
 ## Acceptance
 
 All HW-01 through HW-09 must pass independently on Linux, Windows, and macOS
-using the release-candidate binaries and approved matrix in `TESTING.md`. A
+using the release-candidate binaries and approved matrix in `docs/development/TESTING.md`. A
 failure, skipped case, address reuse that was not actually observed, missing
 evidence, or test performed only in a VM blocks a stable release. Tests may be
 marked not applicable only by a documented security review that updates this

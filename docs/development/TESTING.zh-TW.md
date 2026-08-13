@@ -46,7 +46,7 @@ Linux image chooser應開啟內建Fyne browser而不呼叫desktop portal；檢�
 
 ## 有版本的實體硬體驗收
 
-具規範效力的destructive procedure為 [`cmd/usbwriter-hwtest/spec-v1.zh-TW.md`](cmd/usbwriter-hwtest/spec-v1.zh-TW.md)。操作員亦應依 [實體硬體測試手冊](docs/HARDWARE-TESTING.zh-TW.md) 逐步操作；spec仍是pass/fail的最高依據。
+具規範效力的destructive procedure為 [`cmd/usbwriter-hwtest/spec-v1.zh-TW.md`](../../cmd/usbwriter-hwtest/spec-v1.zh-TW.md)。操作員亦應依 [實體硬體測試手冊](HARDWARE-TESTING.zh-TW.md) 逐步操作；spec仍是pass/fail的最高依據。
 
 Harness在Linux、Windows及macOS建置，並強制要求：
 
