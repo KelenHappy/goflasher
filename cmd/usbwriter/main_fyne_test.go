@@ -173,7 +173,6 @@ func newTestController(t *testing.T) *guiController {
 	a := fynetest.NewApp()
 	t.Cleanup(a.Quit)
 	w := a.NewWindow("test")
-	t.Cleanup(w.Close)
 	tr := i18n.New("en")
 	v := newApplicationView(tr, w)
 	w.SetContent(windowContent(tr, v))
