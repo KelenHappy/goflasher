@@ -57,17 +57,29 @@ type applicationView struct {
 }
 
 type guiController struct {
-	tr       i18n.Localizer
-	view     *applicationView
-	backend  device.Backend
-	machine  *core.StateMachine
-	devices  []device.Device
-	selected device.Device
-	info     image.Info
-	cancel   context.CancelFunc
-	logLines []string
-	app      fyne.App
+	tr                i18n.Localizer
+	view              *applicationView
+	backend           device.Backend
+	machine           *core.StateMachine
+	devices           []device.Device
+	selected          device.Device
+	info              image.Info
+	cancel            context.CancelFunc
+	logLines          []string
+	app               fyne.App
+	operation         operation
+	formatProgress    progress.Update
+	refreshGeneration uint64
 }
+
+type operation uint8
+
+const (
+	operationNone operation = iota
+	// operationFormatting is separate from the image-write state machine so the
+	// two destructive workflows remain mutually exclusive.
+	operationFormatting
+)
 
 const languagePreference = "language"
 
@@ -172,10 +184,19 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 	} else {
 		c.view.imageInfo.SetText(tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
 	}
-	switch c.machine.State() {
-	case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
-		c.view.status.SetText(tr.T("status.ready"))
+	if c.operation == operationFormatting {
+		c.view.status.SetText(tr.T("status.formatting"))
 		c.view.metrics.SetText(tr.T("metrics.empty"))
+		if c.formatProgress.Stage != "" {
+			c.view.status.SetText(tr.T("stage." + string(c.formatProgress.Stage)))
+			c.view.metrics.SetText(tr.T("metrics.formatting", int(c.formatProgress.BytesProcessed)))
+		}
+	} else {
+		switch c.machine.State() {
+		case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
+			c.view.status.SetText(tr.T("status.ready"))
+			c.view.metrics.SetText(tr.T("metrics.empty"))
+		}
 	}
 	c.view.window.Content().Refresh()
 }
@@ -197,13 +218,24 @@ func deviceDisplay(d device.Device) string {
 }
 
 func (c *guiController) refresh() {
+	// A generation makes the most recently requested scan authoritative; device
+	// enumeration can otherwise complete out of order.
+	c.refreshGeneration++
+	generation := c.refreshGeneration
 	go func() {
 		list, err := c.backend.ListAllowedDevices(context.Background())
 		if err != nil {
-			fyne.Do(func() { c.view.status.SetText(c.tr.T("error.devices", err)) })
+			fyne.Do(func() {
+				if generation == c.refreshGeneration {
+					c.view.status.SetText(c.tr.T("error.devices", err))
+				}
+			})
 			return
 		}
 		fyne.Do(func() {
+			if generation != c.refreshGeneration {
+				return
+			}
 			c.devices = list
 			options := make([]string, len(list))
 			for i, d := range list {
@@ -211,8 +243,8 @@ func (c *guiController) refresh() {
 			}
 			c.view.deviceSelect.Options = options
 			c.view.deviceSelect.Refresh()
+			c.appendLog(c.tr.T("log.devices", len(list)))
 		})
-		c.appendLog(c.tr.T("log.devices", len(list)))
 	}()
 }
 
@@ -262,8 +294,8 @@ func (c *guiController) detectImage(path string) {
 			c.view.imagePath.SetText(path)
 			c.view.imageInfo.SetText(c.tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
 			advanceSelection(c.machine, c.selected.Path != "", core.DeviceSelected, core.ImageSelected)
+			c.appendLog(c.tr.T("log.image", filepath.Base(path)))
 		})
-		c.appendLog(c.tr.T("log.image", filepath.Base(path)))
 	}()
 }
 
@@ -301,17 +333,28 @@ func (c *guiController) formatDevice() {
 }
 
 func (c *guiController) runFormat(formatter device.FAT32Formatter, target device.Device) {
+	if c.operation != operationNone || writingState(c.machine.State()) {
+		return
+	}
+	c.operation = operationFormatting
+	c.formatProgress = progress.Update{}
 	c.lock(true)
+	c.view.start.Disable()
 	c.view.status.SetText(c.tr.T("status.formatting"))
 	c.view.bar.SetValue(0)
 	c.view.bar.Show()
 	c.view.metrics.SetText(c.tr.T("metrics.empty"))
 	c.appendLog(c.tr.T("log.format.start", target.Path))
 	updates := make(chan progress.Update, 100)
-	go c.consumeFormatProgress(updates)
+	progressDone := make(chan struct{})
+	go func() {
+		c.consumeFormatProgress(updates)
+		close(progressDone)
+	}()
 	go func() {
 		err := formatter.FormatFAT32(context.Background(), target, "GOFLASHER", updates)
 		close(updates)
+		<-progressDone
 		fyne.Do(func() { c.finishFormat(err) })
 	}()
 }
@@ -320,6 +363,7 @@ func (c *guiController) consumeFormatProgress(updates <-chan progress.Update) {
 	for update := range updates {
 		u := update
 		fyne.Do(func() {
+			c.formatProgress = u
 			c.view.bar.SetValue(overallProgress(u, false))
 			c.view.status.SetText(c.tr.T("stage." + string(u.Stage)))
 			c.view.metrics.SetText(c.tr.T("metrics.formatting", int(u.BytesProcessed)))
@@ -328,7 +372,10 @@ func (c *guiController) consumeFormatProgress(updates <-chan progress.Update) {
 }
 
 func (c *guiController) finishFormat(err error) {
+	c.operation = operationNone
+	c.formatProgress = progress.Update{}
 	c.lock(false)
+	c.view.start.Enable()
 	c.view.bar.Show()
 	if err != nil {
 		c.view.status.SetText(c.tr.T("status.failed", err))
@@ -344,6 +391,9 @@ func (c *guiController) finishFormat(err error) {
 }
 
 func (c *guiController) startWrite() {
+	if c.operation != operationNone {
+		return
+	}
 	resetFinishedState(c.machine)
 	if writingState(c.machine.State()) {
 		c.cancelWrite()
@@ -406,10 +456,15 @@ func (c *guiController) confirmWrite(ok bool) {
 	c.view.bar.SetValue(0)
 	c.appendLog(c.tr.T("log.start"))
 	updates := make(chan progress.Update, 32)
-	go c.consumeWriteProgress(updates)
+	progressDone := make(chan struct{})
+	go func() {
+		c.consumeWriteProgress(updates)
+		close(progressDone)
+	}()
 	go func() {
 		result, err := (&core.Service{Backend: c.backend, State: c.machine}).Run(ctx, c.info, c.selected, core.RunOptions{Verify: c.view.verifyCheck.Checked, Eject: c.view.ejectCheck.Checked}, updates)
 		close(updates)
+		<-progressDone
 		fyne.Do(func() { c.finishWrite(result, err) })
 	}()
 }

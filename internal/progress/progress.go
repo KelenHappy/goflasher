@@ -20,9 +20,9 @@ const (
 	StageEjecting Stage = "ejecting"
 )
 
-// Update is an immutable progress snapshot passed from a worker to its owner.
-// Producers do not close the channel carrying updates; the goroutine that
-// created that channel owns its lifecycle.
+// Update represents progress at a point in time. Channel ownership is defined
+// by the API sending updates; producers in this repository do not close
+// caller-owned channels.
 type Update struct {
 	Stage          Stage
 	BytesProcessed uint64

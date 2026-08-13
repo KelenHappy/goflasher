@@ -6,12 +6,153 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
+	"fyne.io/fyne/v2"
+	fynetest "fyne.io/fyne/v2/test"
 	core "github.com/goflasher/goflasher/internal/app"
+	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/i18n"
 	"github.com/goflasher/goflasher/internal/progress"
 )
+
+type blockingFormatter struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingFormatter) FormatFAT32(_ context.Context, _ device.Device, _ string, updates chan<- progress.Update) error {
+	close(f.started)
+	updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: 42, TotalBytes: 100}
+	<-f.release
+	return errors.New("test format stopped")
+}
+
+func TestFormattingExcludesWritingAndPreservesLocalizedStatus(t *testing.T) {
+	c := newTestController(t)
+	c.selected = device.Device{Path: "/dev/test", Size: 1 << 30}
+	c.machine = stateMachineAt(t, core.ImageSelected, core.Ready)
+	formatter := &blockingFormatter{started: make(chan struct{}), release: make(chan struct{})}
+
+	c.runFormat(formatter, c.selected)
+	<-formatter.started
+	waitFor(t, func() bool { return c.formatProgress.BytesProcessed == 42 })
+	if !c.view.start.Disabled() {
+		t.Fatal("Start is enabled during formatting")
+	}
+	c.startWrite()
+	if got := c.machine.State(); got != core.Ready {
+		t.Fatalf("state after Start during format = %s, want Ready", got)
+	}
+
+	c.setLanguage(i18n.Japanese)
+	if got, want := c.view.status.Text, "フォーマット中"; got != want {
+		t.Errorf("status after language change = %q, want %q", got, want)
+	}
+	if got, want := c.view.metrics.Text, "進捗：42%"; got != want {
+		t.Errorf("metrics after language change = %q, want %q", got, want)
+	}
+	if !c.view.start.Disabled() || !c.view.format.Disabled() {
+		t.Error("destructive controls enabled by language change during formatting")
+	}
+
+	close(formatter.release)
+	waitFor(t, func() bool { return c.operation == operationNone })
+}
+
+type scanResult struct {
+	devices []device.Device
+	started chan struct{}
+	release chan struct{}
+}
+
+type orderedScanBackend struct {
+	device.Backend
+	mu      sync.Mutex
+	results []scanResult
+	next    int
+}
+
+func (b *orderedScanBackend) ListAllowedDevices(context.Context) ([]device.Device, error) {
+	b.mu.Lock()
+	r := b.results[b.next]
+	b.next++
+	b.mu.Unlock()
+	close(r.started)
+	<-r.release
+	return r.devices, nil
+}
+
+func TestRefreshKeepsNewestResult(t *testing.T) {
+	c := newTestController(t)
+	first := make(chan struct{})
+	second := make(chan struct{})
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	c.backend = &orderedScanBackend{results: []scanResult{
+		{devices: []device.Device{{Path: "/dev/old"}}, started: firstStarted, release: first},
+		{devices: []device.Device{{Path: "/dev/new"}}, started: secondStarted, release: second},
+	}}
+	c.refresh()
+	<-firstStarted
+	c.refresh()
+	<-secondStarted
+	close(second)
+	waitFor(t, func() bool { return len(c.devices) == 1 && c.devices[0].Path == "/dev/new" })
+	close(first)
+	time.Sleep(20 * time.Millisecond)
+	if got := c.devices[0].Path; got != "/dev/new" {
+		t.Fatalf("device after stale refresh completed = %q, want /dev/new", got)
+	}
+}
+
+func TestRefreshAndLanguageChangeShareGUIThread(t *testing.T) {
+	c := newTestController(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	c.backend = &orderedScanBackend{results: []scanResult{{
+		devices: []device.Device{{Path: "/dev/test"}}, started: started, release: release,
+	}}}
+
+	c.refresh()
+	<-started
+	for i := 0; i < 20; i++ {
+		locale := i18n.Japanese
+		if i%2 == 0 {
+			locale = i18n.English
+		}
+		fyne.DoAndWait(func() { c.setLanguage(locale) })
+	}
+	close(release)
+	waitFor(t, func() bool { return len(c.devices) == 1 })
+}
+
+func newTestController(t *testing.T) *guiController {
+	t.Helper()
+	a := fynetest.NewApp()
+	t.Cleanup(a.Quit)
+	w := a.NewWindow("test")
+	t.Cleanup(w.Close)
+	tr := i18n.New("en")
+	v := newApplicationView(tr, w)
+	w.SetContent(windowContent(tr, v))
+	return &guiController{tr: tr, view: v, machine: core.NewStateMachine(), app: a}
+}
+
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	met := false
+	for !met && time.Now().Before(deadline) {
+		fyne.DoAndWait(func() { met = condition() })
+		time.Sleep(time.Millisecond)
+	}
+	if !met {
+		t.Fatal("timed out waiting for condition")
+	}
+}
 
 func TestAdvanceSelection(t *testing.T) {
 	tests := []struct {
