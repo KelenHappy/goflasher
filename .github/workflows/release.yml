@@ -39,14 +39,16 @@ jobs:
       - name: Build RPM package
         run: packaging/make-rpm.sh dist/goflasher "$VERSION" dist
       - name: Build AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --fail --location --retry 3 \
-            -o appimagetool.AppImage \
-            https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
-          curl --fail --location --retry 3 \
-            -o linuxdeploy.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x appimagetool.AppImage linuxdeploy.AppImage
+          packaging/download-github-release-asset.sh \
+            AppImage/appimagetool continuous appimagetool-x86_64.AppImage \
+            appimagetool.AppImage
+          packaging/download-github-release-asset.sh \
+            linuxdeploy/linuxdeploy continuous linuxdeploy-x86_64.AppImage \
+            linuxdeploy.AppImage
+          unset GH_TOKEN
           packaging/make-appimage.sh dist/goflasher "$VERSION" dist \
             ./linuxdeploy.AppImage ./appimagetool.AppImage
       - name: Generate checksums
