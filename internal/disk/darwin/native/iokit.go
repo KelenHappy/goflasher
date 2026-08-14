@@ -62,10 +62,31 @@ func (f *Frameworks) RegistryIdentity(bsd string) (RegistryIdentity, error) {
 		if strings.Contains(n, "usb") {
 			out.USBAncestor = true
 		}
-		for _, p := range []struct {
+		properties := []struct {
 			key string
 			dst *string
-		}{{"USB Vendor Name", &out.Vendor}, {"USB Product Name", &out.Product}, {"USB Serial Number", &out.Serial}, {"Vendor Identification", &out.Vendor}, {"Product Name", &out.Product}} {
+		}{{"USB Vendor Name", &out.Vendor}, {"USB Product Name", &out.Product}, {"Vendor Identification", &out.Vendor}, {"Product Name", &out.Product}}
+		if depth == 0 {
+			properties = append(properties,
+				struct {
+					key string
+					dst *string
+				}{"UUID", &out.MediaID},
+				struct {
+					key string
+					dst *string
+				}{"GUID", &out.MediaID},
+				struct {
+					key string
+					dst *string
+				}{"Media UUID", &out.MediaID})
+		} else if out.USBAncestor {
+			properties = append(properties, struct {
+				key string
+				dst *string
+			}{"USB Serial Number", &out.TransportSerial})
+		}
+		for _, p := range properties {
 			{
 				if *p.dst != "" {
 					continue

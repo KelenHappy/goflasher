@@ -1,28 +1,182 @@
 //go:build darwin
 
-// macOS is intentionally a compile-safe outline while the Linux manager is
-// brought to production readiness. The future implementation will keep this
-// API and use Disk Arbitration/IOKit behind this build-tag boundary.
 package disk
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
 
-type darwinManager struct{}
+	darwinapi "github.com/goflasher/goflasher/internal/disk/darwin"
+	"github.com/goflasher/goflasher/internal/disk/darwin/native"
+)
 
-func NewManager() Manager { return &darwinManager{} }
+const darwinOperationTimeout = 2 * time.Minute
 
-func (*darwinManager) List(context.Context) ([]Disk, error) {
-	return nil, ErrUnsupported
+type darwinProbe interface {
+	List(context.Context) ([]darwinapi.ProbeResult, error)
+	Unmount(context.Context, string) error
+	Eject(context.Context, string) error
 }
 
-func (*darwinManager) Refresh(context.Context, string) (Disk, error) {
-	return Disk{}, ErrUnsupported
+type darwinManager struct {
+	probe   darwinProbe
+	openErr error
 }
 
-func (*darwinManager) Unmount(context.Context, Disk) error {
-	return ErrUnsupported
+func NewManager() Manager {
+	p, err := darwinapi.OpenNativeAdapter()
+	return &darwinManager{probe: p, openErr: err}
 }
 
-func (*darwinManager) Eject(context.Context, Disk) error {
-	return ErrUnsupported
+func probeDisk(p darwinapi.ProbeResult) (Disk, bool) {
+	// A registry entry ID is deliberately scoped to this enumeration lifetime.
+	// Registry path, BSD node, size and model never substitute for it.
+	if !p.Whole || p.Internal || !p.Removable || !p.Ejectable || !p.USBAncestor || p.Size == 0 || p.RegistryID == "" || p.BSDName == "" {
+		return Disk{}, false
+	}
+	mounts := append([]string(nil), p.MountPoints...)
+	return Disk{
+		ID: "darwin-registry:" + p.RegistryID, Device: "/dev/r" + p.BSDName,
+		Vendor: p.Vendor, Model: firstNonempty(p.Product, p.MediaName),
+		Bus: "usb", Size: p.Size, Removable: true, External: true, Ejectable: true,
+		Mounted: len(mounts) != 0, MountPoints: mounts,
+		RegistryID: p.RegistryID, RegistryPath: p.RegistryPath, MediaID: p.MediaID, TransportSerial: p.TransportSerial,
+	}, true
+}
+
+func firstNonempty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func (m *darwinManager) List(ctx context.Context) ([]Disk, error) {
+	if m.openErr != nil || m.probe == nil {
+		return nil, fmt.Errorf("open native Darwin disk manager: %w", errors.Join(ErrUnsupported, m.openErr))
+	}
+	probes, err := m.probe.List(ctx)
+	if err != nil {
+		return nil, mapDarwinError(err)
+	}
+	out := make([]Disk, 0, len(probes))
+	for _, p := range probes {
+		if d, ok := probeDisk(p); ok {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+func (m *darwinManager) Refresh(ctx context.Context, id string) (Disk, error) {
+	all, err := m.List(ctx)
+	if err != nil {
+		return Disk{}, err
+	}
+	for _, d := range all {
+		if d.ID == id {
+			return d, nil
+		}
+	}
+	return Disk{}, ErrNotFound
+}
+
+func validateDarwinSelection(selected, fresh Disk) error {
+	if selected.System || fresh.System {
+		return ErrSystemDisk
+	}
+	if !selected.Removable || !fresh.Removable || !selected.External || !fresh.External || !selected.Ejectable || !fresh.Ejectable || selected.Bus != "usb" || fresh.Bus != "usb" {
+		return ErrNotRemovable
+	}
+	if !SameIdentity(selected, fresh) {
+		return ErrChanged
+	}
+	return nil
+}
+
+func bsdName(device string) (string, bool) {
+	name := strings.TrimPrefix(device, "/dev/r")
+	return name, name != device && strings.HasPrefix(name, "disk") && !strings.Contains(name, "/")
+}
+
+func (m *darwinManager) Unmount(ctx context.Context, selected Disk) error {
+	ctx, cancel := context.WithTimeout(ctx, darwinOperationTimeout)
+	defer cancel()
+	fresh, err := m.Refresh(ctx, selected.ID)
+	if err != nil {
+		return err
+	}
+	if err := validateDarwinSelection(selected, fresh); err != nil {
+		return err
+	}
+	bsd, ok := bsdName(fresh.Device)
+	if !ok {
+		return ErrChanged
+	}
+	if err := m.probe.Unmount(ctx, bsd); err != nil {
+		return errors.Join(ErrUnmountFailed, mapDarwinError(err))
+	}
+	again, err := m.Refresh(ctx, selected.ID)
+	if err != nil {
+		return errors.Join(ErrUnmountFailed, err)
+	}
+	if err := validateDarwinSelection(fresh, again); err != nil || again.Mounted {
+		return errors.Join(ErrUnmountFailed, err)
+	}
+	return nil
+}
+
+func (m *darwinManager) Eject(ctx context.Context, selected Disk) error {
+	ctx, cancel := context.WithTimeout(ctx, darwinOperationTimeout)
+	defer cancel()
+	fresh, err := m.Refresh(ctx, selected.ID)
+	if err != nil {
+		return err
+	}
+	if err := validateDarwinSelection(selected, fresh); err != nil {
+		return err
+	}
+	bsd, ok := bsdName(fresh.Device)
+	if !ok {
+		return ErrChanged
+	}
+	if err := m.probe.Eject(ctx, bsd); err != nil {
+		return errors.Join(ErrEjectFailed, mapDarwinError(err))
+	}
+	for {
+		_, err := m.Refresh(ctx, selected.ID)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return errors.Join(ErrEjectFailed, err)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(ErrEjectFailed, ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func mapDarwinError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var dissenter native.DissenterError
+	if errors.As(err, &dissenter) {
+		return fmt.Errorf("%w: %v", ErrPermission, err)
+	}
+	if errors.Is(err, native.ErrUnavailable) {
+		return ErrNotFound
+	}
+	return err
 }

@@ -18,8 +18,7 @@ Prepare the following for each supported platform:
 - two clearly different labels, such as `GOFLASHER TEST A` and
   `GOFLASHER TEST B`;
 - a direct USB port whenever possible;
-- a phone or camera for recording device insertion and removal; and
-- a tester plus a second person to verify the selected device and results.
+- a way to record the exact artifact hash and local PASS/FAIL result.
 
 A virtual machine may be used for package installation checks, but it does not
 replace a physical computer for USB hardware acceptance.
@@ -31,7 +30,6 @@ Before starting:
 3. Empty both test drives and confirm that losing all their data is acceptable.
 4. Attach a physical label to each test drive.
 5. Record each drive's brand, model, capacity, and serial number when present.
-6. Have the second person confirm that both drives are disposable test media.
 
 ## Example images
 
@@ -151,14 +149,13 @@ For every platform, retain:
 - the computer model and OS version;
 - both test-drive models, capacities, hardware revisions, and connection type;
 - the release-candidate version and binary hashes;
-- photos or continuous video showing the labeled drive used in each removal
-  test;
 - complete logs for all nine checks, including failed and repeated attempts;
-- a result sheet marking every check as pass or fail; and
-- approval from the tester and the second reviewer.
+- a local result sheet marking every check as pass or fail.
 
-Serial numbers and personal identifiers may be hidden in public copies, but an
-unredacted copy should be kept in restricted release storage.
+Photos, video, a second reviewer, public evidence, uploaded hardware serial
+numbers, and external approval are not release requirements. The maintainer is
+responsible for each exact release candidate. See the [macOS convergence
+target](../architecture/MACOS-CONVERGENCE.md) for the minimum macOS record.
 
 ## Release decision
 

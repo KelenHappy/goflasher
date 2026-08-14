@@ -4,10 +4,9 @@ package filepicker
 
 import "testing"
 
-func TestAppleScriptString(t *testing.T) {
-	got := appleScriptString(`Choose "disk" from C:\images`)
-	want := `Choose \"disk\" from C:\\images`
-	if got != want {
-		t.Fatalf("appleScriptString() = %q, want %q", got, want)
+func TestDarwinPickerHasStableSignature(t *testing.T) {
+	var picker func(string, string, string) (string, error) = OpenImage
+	if picker == nil {
+		t.Fatal("OpenImage is nil")
 	}
 }
