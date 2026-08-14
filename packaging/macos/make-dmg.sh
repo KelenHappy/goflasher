@@ -46,7 +46,7 @@ if [[ -n "$SIGN_ID" ]]; then
   codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$APP"
   codesign --verify --deep --strict --verbose=2 "$APP"
 else
-  echo "SIGN_ID is empty; creating an unsigned hardware-test DMG" >&2
+  echo "SIGN_ID is empty; creating an unsigned DMG" >&2
 fi
 rm -rf "$OUTPUT/dmg-root"
 mkdir -p "$OUTPUT/dmg-root"

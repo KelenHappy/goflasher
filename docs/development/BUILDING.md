@@ -131,7 +131,7 @@ GoFlasher-${VERSION}-windows-amd64.zip
 GoFlasher-${VERSION}-windows-amd64.zip.sha256
 ```
 
-The ZIP contains the signed `GoFlasher.exe`, `README-Windows.txt`, English and
+Production ZIPs contain the signed `GoFlasher.exe`, `README-Windows.txt`, English and
 Traditional Chinese third-party notices, and `licenses/` with unmodified license
 files for compiled Go modules. It contains no signing certificate, signing
 temporary files, build cache, source tree, or debug symbols.
@@ -140,8 +140,11 @@ The platform-neutral Go command in `packaging/windows/make-portable.go` creates
 the layout and checksum from an
 already-built executable. The release workflow embeds the UAC
 `requireAdministrator` manifest, signs with SHA-256 plus an RFC 3161 timestamp,
-verifies the Authenticode signature, and only then creates the ZIP. Repository
-maintainers configure these GitHub Actions secrets:
+verifies the Authenticode signature, and only then creates the ZIP. Signing is
+enabled only when the `WINDOWS_PRODUCTION_READY` GitHub Actions repository
+variable is exactly `true`; otherwise, development and alpha workflows package
+the executable unsigned. Before enabling that variable, repository maintainers
+configure these GitHub Actions secrets:
 
 - `WINDOWS_CERTIFICATE_PFX_BASE64`: base64-encoded public code-signing PFX;
 - `WINDOWS_CERTIFICATE_PASSWORD`: its password.

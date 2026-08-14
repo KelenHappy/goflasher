@@ -91,13 +91,15 @@ GoFlasher-${VERSION}-windows-amd64.zip
 GoFlasher-${VERSION}-windows-amd64.zip.sha256
 ```
 
-ZIP包含已簽章的`GoFlasher.exe`、`README-Windows.txt`、英文與繁中第三方聲明，以及
+Production ZIP包含已簽章的`GoFlasher.exe`、`README-Windows.txt`、英文與繁中第三方聲明，以及
 存放編譯module未修改license的`licenses/`。ZIP不包含簽章certificate、簽章暫存檔、
 build cache、source tree或debug symbol。
 
 `packaging/windows/make-portable.go`的跨平台Go command從已建置的executable建立
 portable layout與checksum。Release workflow嵌入UAC `requireAdministrator` manifest，以SHA-256及
-RFC 3161 timestamp完成Authenticode簽章、驗證簽章，之後才建立ZIP。Maintainer需設定：
+RFC 3161 timestamp完成Authenticode簽章、驗證簽章，之後才建立ZIP。只有當GitHub Actions
+repository variable `WINDOWS_PRODUCTION_READY`明確設為`true`時才會簽章；否則development
+與alpha workflow會封裝未簽章的executable。啟用此variable前，maintainer需設定：
 
 - `WINDOWS_CERTIFICATE_PFX_BASE64`：公開code-signing PFX的base64內容；
 - `WINDOWS_CERTIFICATE_PASSWORD`：PFX密碼。
