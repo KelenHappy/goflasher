@@ -237,7 +237,7 @@ jobs:
             dist/GoFlasher-${{ env.VERSION }}-${{ matrix.arch }}.dmg.sha256
           if-no-files-found: error
       - name: Publish GitHub release assets
-        if: github.event_name == 'push' && vars.MACOS_PRODUCTION_READY == 'true'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
