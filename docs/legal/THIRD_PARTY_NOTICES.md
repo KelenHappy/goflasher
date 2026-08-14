@@ -22,9 +22,11 @@ Linux packages use the following path:
 /usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE
 ```
 
-On other platforms whose builds include xz, packagers must include both this
-notice and that unmodified license file in the installer, application bundle,
-or accompanying documentation.
+On Windows, the portable ZIP places this notice at its top level and copies the
+unmodified license files for every compiled Go module into `licenses/`. On other
+platforms whose builds include xz, packagers must include this notice and the
+unmodified license file in the application bundle, package, or accompanying
+documentation.
 
 ## github.com/ebitengine/purego
 
