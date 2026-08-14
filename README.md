@@ -84,17 +84,15 @@ the exact boundary and the native-API migration direction.
 
 ## Prebuilt downloads
 
-Source support and prebuilt package availability are separate. The current
-release workflow publishes prebuilt **Linux** artifacts only: an x86-64
-AppImage, an amd64 Debian package, and an x86-64 RPM package. The
-Windows and macOS implementations are available in the source tree and can be
-built from source as documented in [BUILDING.md](docs/development/BUILDING.md), but signed Windows
-installers and signed/notarized macOS packages are not yet published.
+Source support and prebuilt package availability are separate. The release
+workflow publishes Linux packages and an Authenticode-signed Windows amd64
+portable ZIP. macOS remains available as source until its signed and notarized
+release gate is enabled.
 
 A package is not a universal executable. Build and package separately for each
 operating system and CPU architecture. Debian packages resolve their declared
 runtime dependencies through APT, and RPM packages do so through DNF. Windows
-users currently need an Administrator session, and macOS builds currently need
+users need an Administrator session, and macOS builds currently need
 elevated raw-disk access; distributing them publicly also requires the platform's
 normal code-signing (and, on macOS, notarization) process. Gzip and XZ decoding
 are compiled into GoFlasher, so packaged builds do not require external
@@ -106,7 +104,14 @@ the repository release workflow:
 - `GoFlasher-<version>-x86_64.AppImage`
 - `goflasher_<version>_amd64.deb`
 - `goflasher-<version>-1*.x86_64.rpm`
+- `goflasher-<version>-1-x86_64.pkg.tar.zst`
 - `SHA256SUMS`
+- `GoFlasher-<version>-windows-amd64.zip`
+- `GoFlasher-<version>-windows-amd64.zip.sha256`
+
+**Windows distribution is portable-only:** download the ZIP, extract it, and
+run `GoFlasher.exe` as Administrator. GoFlasher does not automatically update
+itself; download future versions manually from GitHub Releases.
 
 Verify files downloaded from the release page before running or installing
 them:
@@ -148,6 +153,12 @@ Install the RPM package on Fedora, RHEL, or compatible distributions:
 
 ```sh
 sudo dnf install ./goflasher-*.x86_64.rpm
+```
+
+On Arch Linux, install the native package with:
+
+```sh
+sudo pacman -U ./goflasher-*-x86_64.pkg.tar.zst
 ```
 
 Do not launch GoFlasher itself with `sudo`.

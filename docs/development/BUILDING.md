@@ -52,7 +52,16 @@ dependencies. The current runtime boundary is:
 | Windows | SetupAPI, cfgmgr32, `DeviceIoControl`, volume FSCTLs, and raw `\\.\PhysicalDriveN` access | None for disk operations | GUI and backend are active; run as Administrator |
 | macOS | Disk Arbitration and IOKit; AppKit `NSOpenPanel`; migration raw `/dev/rdisk*` writer | None for discovery, lifecycle, or picker | Native manager active; privileged raw-operation cutover remains gated |
 
-The Windows and macOS discovery/lifecycle implementations have no CLI runtime dependency. UDisks2 D-Bus removes the Linux `udisksctl` client process, not the UDisks2 daemon or its polkit policy. Native replacements must preserve repeated identity, system-disk, mount, capacity, and removability checks before raw access.
+The Windows and macOS discovery/lifecycle implementations have no CLI runtime
+dependency. Windows deliberately uses one elevated GUI process: the production
+executable carries a UAC `requireAdministrator` manifest, and discovery, locking,
+raw I/O, formatting, and eject all run in that process. There is no Windows
+privileged helper, service, or cross-process IPC, and the backend never invokes
+PowerShell or another command interpreter. This platform-specific model does not
+change Linux: its narrowly scoped helper and polkit boundary remain in place.
+UDisks2 D-Bus removes the Linux `udisksctl` client process, not the UDisks2 daemon
+or its polkit policy. Native replacements must preserve repeated identity,
+system-disk, mount, capacity, and removability checks before raw access.
 
 The three-platform CI matrix proves that each native source set compiles and its
 isolated tests pass. It does not prove destructive access on real hardware; the
@@ -62,8 +71,8 @@ Build on (or cross-compile specifically for) every target OS and architecture;
 one binary cannot run unchanged on Linux, Windows, and macOS. Fyne's desktop
 build uses CGo, so a native build environment is the simplest supported route.
 Gzip and XZ streaming decoders are pure Go and compiled into the application;
-no external decompressor is required at runtime. Public Windows releases should
-be code-signed; public macOS app bundles should be code-signed and notarized.
+no external decompressor is required at runtime. Public Windows executables must
+be Authenticode signed; public macOS app bundles must be code-signed and notarized.
 
 ## Build from source
 
@@ -92,9 +101,9 @@ go run -tags fyne ./cmd/usbwriter
 Do not build or run the GUI as root.
 
 On Windows, install Go and the C compiler required by Fyne, then build the same
-GUI entry point from an Administrator PowerShell session:
+GUI entry point from an Administrator Command Prompt:
 
-```powershell
+```bat
 go test ./...
 go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
 ```
@@ -102,6 +111,57 @@ go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
 Run `dist\goflasher.exe` as Administrator so that Windows permits the selected
 removable disk to be taken offline and opened for raw writing. GoFlasher still
 revalidates the disk identity immediately before destructive access.
+
+## Windows portable distribution
+
+**Windows distribution is portable-only.** Windows v1 supports amd64 and is
+built on GitHub's `windows-latest` runner. The permanent user flow is:
+
+```text
+Download → Extract ZIP → Run GoFlasher.exe as Administrator
+```
+
+There is no Windows installer, service, background updater, registry setup,
+shell extension, driver package, or automatic update mechanism. Users download
+future versions manually from the official GitHub Releases page. The portable
+asset and its checksum are:
+
+```text
+GoFlasher-${VERSION}-windows-amd64.zip
+GoFlasher-${VERSION}-windows-amd64.zip.sha256
+```
+
+The ZIP contains the signed `GoFlasher.exe`, `README-Windows.txt`, English and
+Traditional Chinese third-party notices, and `licenses/` with unmodified license
+files for compiled Go modules. It contains no signing certificate, signing
+temporary files, build cache, source tree, or debug symbols.
+
+The platform-neutral Go command in `packaging/windows/make-portable.go` creates
+the layout and checksum from an
+already-built executable. The release workflow embeds the UAC
+`requireAdministrator` manifest, signs with SHA-256 plus an RFC 3161 timestamp,
+verifies the Authenticode signature, and only then creates the ZIP. Repository
+maintainers configure these GitHub Actions secrets:
+
+- `WINDOWS_CERTIFICATE_PFX_BASE64`: base64-encoded public code-signing PFX;
+- `WINDOWS_CERTIFICATE_PASSWORD`: its password.
+
+The PFX exists only in the runner temporary directory and a shell `trap` deletes
+it on every exit path; it is never copied into the portable directory or uploaded.
+
+### PowerShell usage audit
+
+The application, Windows backend, portable packager, CI package validation, and
+release/signing workflow do not invoke PowerShell. The portable packager is a Go
+command, workflow orchestration uses Git Bash plus Windows SDK tools, source-build
+examples use Command Prompt, and user checksum instructions use `certutil`.
+
+The only remaining PowerShell command examples are in the hardware-test
+specification. They are optional maintainer evidence collection using Windows
+inventory cmdlets (`Get-Disk`, `Get-Partition`, and `Get-Volume`); they are not
+executed by GoFlasher, its package, CI, or the release workflow. Replacing those
+cmdlets with less complete deprecated inventory commands would reduce evidence
+quality without removing a product dependency, because no such dependency exists.
 
 On macOS, install Go and the Fyne prerequisites, then build the GUI:
 
@@ -166,20 +226,34 @@ Like the Debian package, the RPM installs the helper and polkit policy to their
 fixed system paths and declares the runtime dependencies required on Fedora,
 RHEL, and compatible distributions.
 
+## Arch Linux package
+
+The release workflow also produces an x86-64 native pacman package:
+
+```sh
+packaging/make-arch.sh dist/goflasher 1.0.0 dist
+sudo pacman -U ./dist/goflasher-1.0.0-1-x86_64.pkg.tar.zst
+```
+
+It carries the same GUI, root-owned helper, polkit policy, desktop metadata,
+notices, and dependency license as the Debian and RPM packages. Arch Linux is
+an additional package target; it does not change the Linux privilege boundary.
+
 ## Third-party license notices
 
 All binary distributions must ship `THIRD_PARTY_NOTICES.md` and the unmodified
 license files for compiled dependencies. The Linux packaging scripts copy the
 BSD 3-Clause `github.com/ulikunitz/xz` license from the exact module version used
-for the build. Future Windows and macOS packaging must place the same files in
-the installer, application bundle, or accompanying documentation.
+for the build. Windows packaging copies notices and compiled-module licenses into
+the portable ZIP; macOS packaging places applicable files in the application
+bundle or accompanying documentation.
 
 ## Checksums
 
 Generate checksums only after all release artifacts are final:
 
 ```sh
-(cd dist && sha256sum *.deb *.AppImage > SHA256SUMS)
+(cd dist && sha256sum *.deb *.rpm *.pkg.tar.zst *.AppImage > SHA256SUMS)
 ```
 
 Verify them with:
@@ -196,22 +270,24 @@ started manually. It:
 
 1. runs the headless tests;
 2. builds the Linux Fyne binary;
-3. builds the Debian package and AppImage;
-4. generates `SHA256SUMS`;
-5. uploads the files as an Actions artifact; and
-6. on tag builds, attaches them to the corresponding GitHub release.
+3. builds the Debian, RPM, Arch Linux, AppImage, and signed Windows amd64 portable ZIP assets;
+4. generates platform checksums;
+5. uploads each platform's files as Actions artifacts; and
+6. on tag builds, attaches them to the same GitHub release.
 
 A manual workflow run creates an Actions artifact but does not publish a GitHub
 release.
 
-## Windows work remaining
+## Windows release boundary
 
 The Windows GUI, native Explorer chooser, removable-device discovery, repeated
 identity checks, volume lock/dismount, raw writing, and read-back verification are
 implemented. Native in-process FAT32 formatting, volume locking/dismount, flush,
-and safe eject are also implemented without PowerShell. A public Windows release still needs hardware-isolated tests,
-signed packaging, and release jobs. The current backend requires Administrator
-rights; a dedicated privileged helper would provide a better privilege boundary.
+and safe eject are also implemented without PowerShell. The release workflow
+produces the signed amd64 portable ZIP and checksum. Hardware-isolated acceptance
+of the exact release candidate remains mandatory. The supported Windows privilege
+architecture is the single elevated GUI process described above, not a helper or
+service.
 
 ## macOS release boundary
 

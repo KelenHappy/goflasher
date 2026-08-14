@@ -34,7 +34,13 @@ sudo apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev ud
 | Windows | SetupAPI、cfgmgr32、`DeviceIoControl`、volume FSCTL、raw `\\.\PhysicalDriveN` | disk operation無CLI | 需Administrator |
 | macOS | Disk Arbitration、IOKit、AppKit `NSOpenPanel` 與 migration raw writer | discovery/lifecycle/picker 無 command dependency | privileged raw-operation cutover 仍受 gate 限制 |
 
-Go/Fyne/CGo toolchain是source build dependency，不是runtime dependency，也不應bundle進application。Gzip及XZ decoder為純Go並編譯進程式。Windows公開release應code-sign；macOS app bundle應code-sign及notarize。
+Go/Fyne/CGo toolchain是source build dependency，不是runtime dependency，也不應bundle進application。Gzip及XZ decoder為純Go並編譯進程式。Windows公開release executable必須完成Authenticode簽章；macOS app bundle必須code-sign及notarize。
+
+Windows 明確採用單一 elevated GUI process：正式 executable 內含 UAC
+`requireAdministrator` manifest，discovery、locking、raw I/O、格式化及退出都在同一
+process 執行。Windows 不設 privileged helper、service 或跨程序 IPC，backend 也不會
+執行 PowerShell 或其他 command interpreter。這是平台特定的權限模型，不會改動 Linux
+既有的 polkit 與受限 helper 架構。
 
 三平台CI只能證明source可編譯及隔離測試通過，不能證明真實硬體上的destructive access；release仍必須通過 `TESTING.zh-TW.md` 的實體媒體驗收。
 
@@ -60,12 +66,56 @@ sudo install -m 0644 packaging/org.goflasher.usbwriter.policy \
 
 Windows：
 
-```powershell
+```bat
 go test ./...
 go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
 ```
 
 以Administrator執行 `dist\goflasher.exe`，讓Windows允許lock/dismount及raw open；backend仍會在destructive access前重新驗證identity。
+
+## Windows portable distribution
+
+**Windows distribution is portable-only.** Windows v1只支援amd64，並在GitHub
+`windows-latest` runner建置。永久使用流程為：
+
+```text
+Download → Extract ZIP → Run GoFlasher.exe as Administrator
+```
+
+Windows不提供installer、service、background updater、registry setup、shell
+extension、driver package或automatic update。使用者日後從官方GitHub Releases頁面
+手動下載新版。Portable asset及checksum名稱為：
+
+```text
+GoFlasher-${VERSION}-windows-amd64.zip
+GoFlasher-${VERSION}-windows-amd64.zip.sha256
+```
+
+ZIP包含已簽章的`GoFlasher.exe`、`README-Windows.txt`、英文與繁中第三方聲明，以及
+存放編譯module未修改license的`licenses/`。ZIP不包含簽章certificate、簽章暫存檔、
+build cache、source tree或debug symbol。
+
+`packaging/windows/make-portable.go`的跨平台Go command從已建置的executable建立
+portable layout與checksum。Release workflow嵌入UAC `requireAdministrator` manifest，以SHA-256及
+RFC 3161 timestamp完成Authenticode簽章、驗證簽章，之後才建立ZIP。Maintainer需設定：
+
+- `WINDOWS_CERTIFICATE_PFX_BASE64`：公開code-signing PFX的base64內容；
+- `WINDOWS_CERTIFICATE_PASSWORD`：PFX密碼。
+
+PFX只會存在runner temporary directory，並由shell `trap`在所有exit path刪除；不會
+複製進portable directory或上傳。
+
+### PowerShell usage audit
+
+Application、Windows backend、portable packager、CI package validation及release/signing
+workflow都不執行PowerShell。Portable packager是Go command；workflow使用Git Bash與
+Windows SDK tools；source build範例使用Command Prompt；使用者以`certutil`驗證checksum。
+
+目前只在hardware-test spec保留PowerShell command範例，供maintainer選擇性使用
+`Get-Disk`、`Get-Partition`及`Get-Volume`蒐集Windows inventory證據。GoFlasher、package、
+CI與release workflow都不會執行它們。改用資訊較不完整且已deprecated的inventory
+command只會降低驗收證據品質，並不會消除product dependency，因為產品本來就沒有此
+dependency。
 
 macOS：
 
@@ -107,6 +157,18 @@ sudo dnf install ./dist/goflasher-1.0.0-1*.x86_64.rpm
 
 RPM同樣把helper與polkit policy裝到固定位置，並宣告Fedora/RHEL相容distribution所需runtime dependency。
 
+## Arch Linux package
+
+Release workflow也產生x86-64 native pacman package：
+
+```sh
+packaging/make-arch.sh dist/goflasher 1.0.0 dist
+sudo pacman -U ./dist/goflasher-1.0.0-1-x86_64.pkg.tar.zst
+```
+
+內容包含與Debian/RPM相同的GUI、root-owned helper、polkit policy、desktop metadata、
+notice及dependency license。加入Arch package不會改變Linux privilege boundary。
+
 ## 第三方授權聲明
 
 所有binary distribution都必須包含 `THIRD_PARTY_NOTICES.md`、`THIRD_PARTY_NOTICES.zh-TW.md` 及編譯dependency未修改的license檔案。詳細內容見兩份notice。
@@ -116,17 +178,17 @@ RPM同樣把helper與polkit policy裝到固定位置，並宣告Fedora/RHEL相�
 所有release artifact完成後才產生：
 
 ```sh
-(cd dist && sha256sum *.deb *.AppImage > SHA256SUMS)
+(cd dist && sha256sum *.deb *.rpm *.pkg.tar.zst *.AppImage > SHA256SUMS)
 cd dist && sha256sum --check SHA256SUMS
 ```
 
 ## GitHub Actions release
 
-`.github/workflows/release.yml` 在符合 `v*` 的tag或manual dispatch執行：headless tests、Linux Fyne build、Debian/AppImage封裝、產生checksum、上傳artifact；tag build另附加至GitHub release。Manual run不會發布release。
+`.github/workflows/release.yml`在符合`v*`的tag或manual dispatch執行：headless tests、Linux package與已Authenticode簽章的Windows amd64 portable ZIP、產生各平台checksum並上傳Actions artifact；`v*` tag build會把平台assets附加到同一個GitHub Release。Manual run只產生Actions artifact，不發布Release。
 
-## Windows尚待完成
+## Windows release boundary
 
-GUI、Explorer chooser、native discovery、repeated identity check、volume lock/dismount、raw write、read-back、in-process FAT32、flush及safe eject已實作且不依賴PowerShell。公開release仍需hardware-isolated tests、signed packaging及release jobs；未來dedicated privileged helper可改善權限邊界。
+GUI、Explorer chooser、native discovery、repeated identity check、volume lock/dismount、raw write、read-back、in-process FAT32、flush及safe eject已實作且不依賴PowerShell。Release workflow會產生已簽章的amd64 portable ZIP與checksum；exact release candidate仍必須通過hardware-isolated acceptance。Windows支援的權限架構是上述單一elevated GUI process，不使用helper或service。
 
 ## macOS尚待完成
 

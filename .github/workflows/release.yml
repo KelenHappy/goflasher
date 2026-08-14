@@ -14,6 +14,84 @@ permissions:
   contents: write
 
 jobs:
+  windows:
+    name: Windows amd64 signed portable ZIP
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test Windows source set
+        run: go test ./...
+      - name: Embed UAC manifest and build portable executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          windres=$(command -v windres || find /c/mingw64 /c/msys64/mingw64 -name windres.exe -print -quit 2>/dev/null)
+          test -n "$windres"
+          "$windres" --target=pe-x86-64 -I packaging/windows packaging/windows/goflasher.rc -O coff -o cmd/usbwriter/goflasher_windows_amd64.syso
+          mkdir -p dist
+          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/GoFlasher.exe ./cmd/usbwriter
+          rm cmd/usbwriter/goflasher_windows_amd64.syso
+          mt=$(find '/c/Program Files (x86)/Windows Kits/10/bin' -path '*/x64/mt.exe' -print 2>/dev/null | sort -V | tail -1)
+          test -n "$mt"
+          exe_win=$(cygpath -w "$PWD/dist/GoFlasher.exe")
+          manifest_win=$(cygpath -w "$PWD/dist/embedded.manifest")
+          MSYS2_ARG_CONV_EXCL='*' "$mt" -nologo "-inputresource:${exe_win};#1" "-out:${manifest_win}"
+          grep -F requireAdministrator dist/embedded.manifest
+          rm dist/embedded.manifest
+      - name: Authenticode sign and verify executable
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$WINDOWS_CERTIFICATE_PFX_BASE64"
+          test -n "$WINDOWS_CERTIFICATE_PASSWORD"
+          pfx="$RUNNER_TEMP/goflasher-signing.pfx"
+          trap 'rm -f "$pfx"' EXIT
+          printf '%s' "$WINDOWS_CERTIFICATE_PFX_BASE64" | base64 --decode >"$pfx"
+          signtool=$(find '/c/Program Files (x86)/Windows Kits/10/bin' -path '*/x64/signtool.exe' -print 2>/dev/null | sort -V | tail -1)
+          test -n "$signtool"
+          pfx_win=$(cygpath -w "$pfx")
+          exe_win=$(cygpath -w "$PWD/dist/GoFlasher.exe")
+          MSYS2_ARG_CONV_EXCL='*' "$signtool" sign /f "$pfx_win" /p "$WINDOWS_CERTIFICATE_PASSWORD" /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 "$exe_win"
+          MSYS2_ARG_CONV_EXCL='*' "$signtool" verify /pa /all /v "$exe_win"
+      - name: Build portable ZIP and checksum
+        shell: bash
+        run: go run ./packaging/windows --executable dist/GoFlasher.exe --version "$VERSION" --output dist
+      - name: Verify portable contents and secret exclusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="dist/GoFlasher-$VERSION-windows-amd64"
+          test -f "$root/GoFlasher.exe"
+          test -f "$root/README-Windows.txt"
+          test -f "$root/THIRD_PARTY_NOTICES.md"
+          test -f "$root/THIRD_PARTY_NOTICES.zh-TW.md"
+          test -n "$(find "$root/licenses" -type f -print -quit)"
+          test -z "$(find "$root" -type f \( -name '*.pfx' -o -name '*.p12' -o -name '*.cer' -o -name '*.crt' -o -name '*.key' -o -name '*.pdb' \) -print -quit)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goflasher-windows-amd64-${{ env.VERSION }}
+          path: |
+            dist/GoFlasher-${{ env.VERSION }}-windows-amd64.zip
+            dist/GoFlasher-${{ env.VERSION }}-windows-amd64.zip.sha256
+          if-no-files-found: error
+      - name: Publish GitHub release assets
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --verify-tag --generate-notes
+          gh release upload "$VERSION" "dist/GoFlasher-$VERSION-windows-amd64.zip" "dist/GoFlasher-$VERSION-windows-amd64.zip.sha256" --clobber
+
   linux:
     runs-on: ubuntu-24.04
     env:
@@ -27,7 +105,7 @@ jobs:
       - name: Install GUI and packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev rpm
+          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev rpm zstd
       - name: Test and build
         run: |
           go test ./...
@@ -38,6 +116,8 @@ jobs:
         run: packaging/make-deb.sh dist/goflasher "$VERSION" dist
       - name: Build RPM package
         run: packaging/make-rpm.sh dist/goflasher "$VERSION" dist
+      - name: Build Arch Linux package
+        run: packaging/make-arch.sh dist/goflasher "$VERSION" dist
       - name: Build AppImage
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,7 +134,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.AppImage *.deb *.rpm > SHA256SUMS
+          sha256sum *.AppImage *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
           rm goflasher goflasher-helper
       - uses: actions/upload-artifact@v4
         with:

@@ -27,6 +27,7 @@ type Disk struct {
 	Vendor      string
 	Model       string
 	Serial      string
+	WWN         string
 	Bus         string
 	Size        uint64
 	Removable   bool
@@ -57,6 +58,9 @@ func SameIdentity(a, b Disk) bool {
 		return false
 	}
 	if (a.TransportSerial != "" || b.TransportSerial != "") && (a.TransportSerial == "" || a.TransportSerial != b.TransportSerial) {
+		return false
+	}
+	if (a.WWN != "" || b.WWN != "") && (a.WWN == "" || a.WWN != b.WWN) {
 		return false
 	}
 	return (a.Serial == "" && b.Serial == "") || (a.Serial != "" && a.Serial == b.Serial)

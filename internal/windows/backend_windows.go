@@ -18,16 +18,25 @@ import (
 )
 
 var (
-	ErrUnsupportedDevice = errors.New("unsupported device")
-	ErrSystemDisk        = errors.New("system disk")
-	ErrDeviceChanged     = errors.New("device identity changed")
-	ErrUnmountFailed     = errors.New("could not lock and dismount every volume; run GoFlasher as administrator")
+	ErrUnsupportedDevice         = errors.New("unsupported device")
+	ErrSystemDisk                = errors.New("system disk")
+	ErrDeviceChanged             = errors.New("device identity changed")
+	ErrUnmountFailed             = errors.New("could not lock and dismount every volume; run GoFlasher as administrator")
+	ErrSystemTopologyUnavailable = errors.New("Windows system topology unavailable")
+	ErrVolumeTopologyUnavailable = errors.New("Windows volume topology unavailable")
+	ErrVolumeLockDenied          = errors.New("Windows volume lock denied")
 )
+
+type windowsIdentityEvidence struct {
+	Serial string
+	WWN    string
+}
 
 // diskRecord is deliberately free of Win32 handles. A snapshot can safely be
 // passed to policy code and tests; handles remain owned by nativeAPI.
 type diskRecord struct {
 	device.Device
+	identity                                 windowsIdentityEvidence
 	deviceHotplug, mediaHotplug, usbAncestor bool
 	deviceNumber                             uint32
 	devInst                                  uint32
@@ -71,6 +80,10 @@ func classify(r *diskRecord) {
 		d.RejectReason = ErrSystemDisk.Error()
 		return
 	}
+	if !hasPersistentIdentity(*d) {
+		d.RejectReason = "no trustworthy persistent identity"
+		return
+	}
 	if !isSupportedDisk(*r) {
 		return
 	}
@@ -82,7 +95,7 @@ func isSupportedDisk(r diskRecord) bool {
 	if !hasUSBConnection(r) || !isHotplugDisk(r) {
 		return false
 	}
-	if !hasPersistentIdentity(r.Device) || !hasUsableLocation(r.Device) {
+	if !hasUsableLocation(r.Device) {
 		return false
 	}
 	return isPhysicalTransport(r.Transport)
@@ -194,7 +207,7 @@ func (b *Backend) Unmount(ctx context.Context, d device.Device) error {
 	_ = b.release(d.ID)
 	l, err := b.native().lockVolumes(ctx, r.deviceNumber)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrUnmountFailed, err)
+		return fmt.Errorf("%w: %w", ErrUnmountFailed, err)
 	}
 	b.mu.Lock()
 	b.locks[d.ID] = l

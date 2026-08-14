@@ -69,18 +69,22 @@ volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動
 
 ## 預先建置的下載套件
 
-程式碼支援的平台與目前提供預先建置套件的平台是兩件不同的事。目前 release
-workflow 只發布預先建置的 **Linux** artifacts：x86-64 AppImage、amd64 Debian
-套件與 x86-64 RPM。Windows 與 macOS 的實作已包含在原始碼中，可依 [BUILDING.md](../development/BUILDING.md)
-從原始碼建置；在完成程式碼簽署前，尚未提供已簽署的 Windows 安裝程式，以及
-已簽署並完成公證（notarization）的 macOS 套件。
+程式碼支援的平台與目前提供預先建置套件的平台是兩件不同的事。Release workflow
+會發布Linux packages與已完成Authenticode簽章的Windows amd64 portable ZIP。
+macOS在signed/notarized release gate啟用前仍提供source build。
 
 封裝版本發布後，儲存庫的發行工作流程會在 GitHub Release 提供下列檔案：
 
 - `GoFlasher-<version>-x86_64.AppImage`
 - `goflasher_<version>_amd64.deb`
 - `goflasher-<version>-1*.x86_64.rpm`
+- `goflasher-<version>-1-x86_64.pkg.tar.zst`
 - `SHA256SUMS`
+- `GoFlasher-<version>-windows-amd64.zip`
+- `GoFlasher-<version>-windows-amd64.zip.sha256`
+
+**Windows distribution is portable-only.** 下載ZIP、解壓縮，然後以Administrator
+執行`GoFlasher.exe`。GoFlasher不會自動更新；日後請從GitHub Releases手動下載新版。
 
 套件並不是可跨所有平台共用的單一執行檔；每個作業系統及 CPU 架構都必須分別
 建置與封裝。Debian 套件透過 APT、RPM 套件透過 DNF 安裝宣告的執行期相依套件。
@@ -147,9 +151,9 @@ go run -tags fyne ./cmd/usbwriter
 若未指定 `fyne` 標籤，`cmd/usbwriter` 只會執行不含相依套件、供無圖形介面
 環境使用的資訊啟動程式。
 
-在 Windows 的系統管理員 PowerShell 中，可建置完整 GUI：
+在 Windows 的系統管理員 Command Prompt 中，可建置完整 GUI：
 
-```powershell
+```bat
 go test ./...
 go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
 ```
@@ -204,17 +208,13 @@ GoFlasher 是依 **GNU General Public License version 3** 授權的自由軟體�
 其著作權聲明與再散布資訊請參閱
 [THIRD_PARTY_NOTICES.md](../legal/THIRD_PARTY_NOTICES.md)。
 
-## 尚待完成的項目
+## Release boundary
 
 Windows GUI、原生 Explorer 選擇器、可移除式裝置探索、重複身分驗證、離線操作、
-原始寫入與回讀驗證均已實作。正式發布 Windows 版本前仍需完成：
-
-- 加入與實體硬體隔離的 Windows 測試；
-- 加入已簽署的 Windows 安裝套件及發行工作流程。
-
-目前 Windows 後端需要系統管理員權限；日後加入專用權限提升輔助程式可建立更好的
-權限邊界。Linux 版已使用透過 polkit 啟動、會再次驗證裝置身分的專用權限提升
-輔助程式。
+原始寫入與回讀驗證均已實作。Release workflow會產生已Authenticode簽章的amd64
+portable ZIP與checksum；exact artifact仍須完成實體硬體驗收。Windows永久採單一
+elevated GUI process，不使用helper、service或跨程序IPC。Linux仍維持polkit與受限
+helper架構。
 
 macOS GUI、原生 Finder 選擇器、可移除式 USB 後端、原始寫入、回讀驗證與
 `diskutil` 退出操作均已實作。正式發布前仍需要實體硬體隔離測試、專用權限提升

@@ -17,7 +17,9 @@
 /usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE
 ```
 
-在其他包含 xz 的平台版本中，封裝者必須在安裝程式、應用程式套件或隨附文件中，同時包含本聲明與該未修改的授權檔案。
+Windows portable ZIP會在頂層放置本聲明，並將所有編譯進executable的Go module未修改
+授權檔案放在`licenses/`。其他包含xz的平台版本也必須在application package或隨附
+文件中包含本聲明與該未修改的授權檔案。
 
 ## github.com/ebitengine/purego
 
