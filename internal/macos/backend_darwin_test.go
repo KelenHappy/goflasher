@@ -5,417 +5,79 @@ package macos
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"strings"
 	"testing"
 
-	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/disk"
 )
 
-type runnerResult struct {
-	output []byte
-	err    error
+type fakeManager struct {
+	current          disk.Disk
+	unmounts, ejects int
 }
 
-type testCommandCause struct{}
-
-func (*testCommandCause) Error() string { return "command failed" }
-
-type fakeRunner struct {
-	json        map[string][]byte
-	runs        [][]string
-	jsonRuns    [][]string
-	jsonResults map[string][]runnerResult
-	runResults  []runnerResult
-	deadlines   []bool
+func (f *fakeManager) List(context.Context) ([]disk.Disk, error) {
+	if f.current.ID == "" {
+		return nil, nil
+	}
+	return []disk.Disk{f.current}, nil
 }
-
-func (f *fakeRunner) JSON(ctx context.Context, args ...string) ([]byte, error) {
-	_, hasDeadline := ctx.Deadline()
-	f.deadlines = append(f.deadlines, hasDeadline)
-	f.jsonRuns = append(f.jsonRuns, append([]string(nil), args...))
-	key := fmt.Sprint(args)
-	if results := f.jsonResults[key]; len(results) > 0 {
-		result := results[0]
-		f.jsonResults[key] = results[1:]
-		return result.output, result.err
+func (f *fakeManager) Refresh(_ context.Context, id string) (disk.Disk, error) {
+	if id != f.current.ID || id == "" {
+		return disk.Disk{}, disk.ErrNotFound
 	}
-	out, ok := f.json[key]
-	if !ok {
-		return nil, fmt.Errorf("unexpected JSON command: %v", args)
-	}
-	return out, nil
+	return f.current, nil
 }
-func (f *fakeRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
-	_, hasDeadline := ctx.Deadline()
-	f.deadlines = append(f.deadlines, hasDeadline)
-	f.runs = append(f.runs, append([]string(nil), args...))
-	if len(f.runResults) > 0 {
-		result := f.runResults[0]
-		f.runResults = f.runResults[1:]
-		return result.output, result.err
-	}
-	return nil, nil
+func (f *fakeManager) Unmount(context.Context, disk.Disk) error {
+	f.unmounts++
+	f.current.Mounted = false
+	f.current.MountPoints = nil
+	return nil
 }
-
-func TestListAllowedDevices(t *testing.T) {
-	runner := &fakeRunner{json: map[string][]byte{
-		"[list external physical]": []byte(`{"AllDisksAndPartitions":[{"DeviceIdentifier":"disk4","Partitions":[{"MountPoint":"/Volumes/USB"}]}]}`),
-		"[info disk4]":             []byte(`{"DeviceIdentifier":"disk4","DeviceNode":"/dev/disk4","DeviceTreePath":"IOService:/USB/disk@1","MediaName":"USB Flash","BusProtocol":"USB","TotalSize":16000000000,"Whole":true,"Internal":false,"RemovableMedia":true,"Ejectable":true}`),
-	}}
-	backend := &Backend{runner: runner}
-	devices, err := backend.ListAllowedDevices(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(devices) != 1 {
-		t.Fatalf("got %d devices, want 1", len(devices))
-	}
-	assertAllowedDevice(t, devices[0])
+func (f *fakeManager) Eject(context.Context, disk.Disk) error {
+	f.ejects++
+	f.current = disk.Disk{}
+	return nil
 }
-
-func assertAllowedDevice(t *testing.T, got device.Device) {
-	t.Helper()
-	if got.ID != "IOService:/USB/disk@1" {
-		t.Fatalf("device ID = %q", got.ID)
+func safeDisk() disk.Disk {
+	return disk.Disk{ID: "darwin-registry:abc", Device: "/dev/rdisk7", Vendor: "V", Model: "M", Serial: "S", Bus: "usb", Size: 1024, Removable: true, External: true, Ejectable: true, Mounted: true, MountPoints: []string{"/Volumes/X"}, RegistryID: "abc", RegistryPath: "IOService:/port/media"}
+}
+func TestBackendDelegatesPolicyToManager(t *testing.T) {
+	m := &fakeManager{current: safeDisk()}
+	b := NewBackendWithManager(m)
+	list, err := b.ListAllowedDevices(context.Background())
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list=%+v err=%v", list, err)
 	}
-	if got.Path != "/dev/rdisk4" {
-		t.Fatalf("device path = %q", got.Path)
+	if err = b.Unmount(context.Background(), list[0]); err != nil || m.unmounts != 1 {
+		t.Fatalf("unmount=%v count=%d", err, m.unmounts)
 	}
-	if !got.Mounted {
-		t.Fatal("device is not mounted")
-	}
-	if !got.IsAllowed {
-		t.Fatal("device is not allowed")
+	list[0].Mounted = false
+	list[0].MountPoints = nil
+	if err = b.Eject(context.Background(), list[0]); err != nil || m.ejects != 1 {
+		t.Fatalf("eject=%v count=%d", err, m.ejects)
 	}
 }
-
-const diskList = `{"AllDisksAndPartitions":[{"DeviceIdentifier":"disk4"}]}`
-const allowedInfo = `{"DeviceIdentifier":"disk4","DeviceNode":"/dev/disk4","DeviceTreePath":"IOService:/USB/disk@1","MediaName":"USB Flash","BusProtocol":"USB","TotalSize":16000000000,"Whole":true,"Internal":false,"RemovableMedia":true}`
-
-func sequencedRunner(infos ...string) *fakeRunner {
-	results := make([]runnerResult, len(infos))
-	for i, info := range infos {
-		results[i] = runnerResult{output: []byte(info)}
-	}
-	listResults := make([]runnerResult, len(infos))
-	for i := range listResults {
-		listResults[i] = runnerResult{output: []byte(diskList)}
-	}
-	return &fakeRunner{jsonResults: map[string][]runnerResult{
-		"[list external physical]": listResults,
-		"[info disk4]":             results,
-	}}
-}
-
-func TestDestructiveOperationsRejectChangedDevice(t *testing.T) {
-	changes := map[string]string{
-		"identity":    strings.Replace(allowedInfo, "IOService:/USB/disk@1", "IOService:/USB/disk@2", 1),
-		"capacity":    strings.Replace(allowedInfo, "16000000000", "32000000000", 1),
-		"model":       strings.Replace(allowedInfo, "USB Flash", "Replacement", 1),
-		"disk number": strings.Replace(allowedInfo, `"DeviceIdentifier":"disk4"`, `"DeviceIdentifier":"disk5"`, 1),
-		"device path": strings.Replace(allowedInfo, "/dev/disk4", "/dev/disk5", 1),
-	}
-	operations := map[string]func(*Backend, device.Device) error{
-		"Unmount":     func(b *Backend, d device.Device) error { return b.Unmount(context.Background(), d) },
-		"OpenWriter":  func(b *Backend, d device.Device) error { _, err := b.OpenWriter(context.Background(), d); return err },
-		"FormatFAT32": func(b *Backend, d device.Device) error { return b.FormatFAT32(context.Background(), d, "TEST", nil) },
-	}
-	for change, info := range changes {
-		for operation, run := range operations {
-			t.Run(change+"/"+operation, func(t *testing.T) {
-				runner := sequencedRunner(allowedInfo, info)
-				backend := &Backend{runner: runner}
-				selected, err := backend.ListAllowedDevices(context.Background())
-				if err != nil || len(selected) != 1 {
-					t.Fatalf("select device: %v, %v", selected, err)
-				}
-				if err := run(backend, selected[0]); !errors.Is(err, ErrDeviceChanged) {
-					t.Fatalf("error = %v", err)
-				}
-				if len(runner.runs) != 0 {
-					t.Fatalf("destructive commands = %v", runner.runs)
-				}
-			})
-		}
+func TestBackendRejectsDeviceNodeReuse(t *testing.T) {
+	m := &fakeManager{current: safeDisk()}
+	b := NewBackendWithManager(m)
+	selected := deviceFromDisk(m.current)
+	m.current.RegistryID = "replacement"
+	m.current.ID = "darwin-registry:replacement"
+	if _, err := b.diskSnapshot(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("error=%v", err)
 	}
 }
-
-func TestListAllowedDevicesFailsClosed(t *testing.T) {
-	unsafe := map[string]string{
-		"internal":       strings.Replace(allowedInfo, `"Internal":false`, `"Internal":true`, 1),
-		"non-removable":  strings.Replace(allowedInfo, `"RemovableMedia":true`, `"RemovableMedia":false`, 1),
-		"non-USB":        strings.Replace(allowedInfo, `"BusProtocol":"USB"`, `"BusProtocol":"SATA"`, 1),
-		"empty identity": strings.Replace(allowedInfo, "IOService:/USB/disk@1", "", 1),
-	}
-	for name, info := range unsafe {
-		t.Run(name, func(t *testing.T) {
-			devices, err := (&Backend{runner: sequencedRunner(info)}).ListAllowedDevices(context.Background())
-			assertNoDevices(t, devices)
-			if err != nil {
-				t.Fatalf("unexpected enumeration error: %v", err)
-			}
-		})
-	}
-	t.Run("malformed list JSON", testMalformedListJSON)
-	t.Run("list command failure", testListCommandFailure)
-	t.Run("malformed info JSON", testMalformedInfoJSON)
-}
-
-func testMalformedListJSON(t *testing.T) {
-	runner := &fakeRunner{jsonResults: map[string][]runnerResult{"[list external physical]": {{output: []byte("{bad")}}}}
-	devices, err := (&Backend{runner: runner}).ListAllowedDevices(context.Background())
-	assertEnumerationFailure(t, devices, err)
-}
-
-func testListCommandFailure(t *testing.T) {
-	cause := errors.New("diskutil failed")
-	runner := &fakeRunner{jsonResults: map[string][]runnerResult{"[list external physical]": {{err: cause}}}}
-	devices, err := (&Backend{runner: runner}).ListAllowedDevices(context.Background())
-	assertNoDevices(t, devices)
-	if !errors.Is(err, cause) {
-		t.Fatalf("error = %v, want cause %v", err, cause)
-	}
-}
-
-func testMalformedInfoJSON(t *testing.T) {
-	devices, err := (&Backend{runner: sequencedRunner("{bad")}).ListAllowedDevices(context.Background())
-	assertEnumerationFailure(t, devices, err)
-}
-
-func assertEnumerationFailure(t *testing.T, devices []device.Device, err error) {
-	t.Helper()
-	assertNoDevices(t, devices)
-	if err == nil {
-		t.Fatal("enumeration unexpectedly succeeded")
-	}
-}
-
-func assertNoDevices(t *testing.T, devices []device.Device) {
-	t.Helper()
-	if len(devices) != 0 {
-		t.Fatalf("devices = %v, want none", devices)
-	}
-}
-
-func TestCommandErrorsPreserveCauseAndOutput(t *testing.T) {
-	cause := &testCommandCause{}
-	tests := []struct {
-		name   string
-		run    func(*Backend, device.Device) error
-		prefix string
-	}{
-		{name: "unmount", run: func(b *Backend, d device.Device) error { return b.Unmount(context.Background(), d) }, prefix: "unmount failed"},
-		{name: "eject", run: func(b *Backend, d device.Device) error { return b.Eject(context.Background(), d) }, prefix: "eject:"},
-		{name: "format", run: func(b *Backend, d device.Device) error { return b.FormatFAT32(context.Background(), d, "LABEL", nil) }, prefix: "format FAT32:"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Selection enumerates once. Every operation then enumerates again
-			// before touching the disk. Formatting additionally revalidates for
-			// its nested unmount, after unmount, and immediately before opening
-			// the raw device for formatting.
-			infos := []string{allowedInfo, allowedInfo}
-			if tt.name == "format" {
-				infos = append(infos, allowedInfo, allowedInfo, allowedInfo)
-			}
-			runner := sequencedRunner(infos...)
-			backend := &Backend{runner: runner}
-			if tt.name == "format" {
-				// The only diskutil Run during shared formatting is unmountDisk;
-				// let it succeed, then fail the formatter opener with the original
-				// command cause and output.
-				runner.runResults = []runnerResult{{}}
-				backend.openFormat = func(string) (formatTarget, error) {
-					return nil, fmt.Errorf("format command: %w: diskutil output", cause)
-				}
-			} else {
-				runner.runResults = []runnerResult{{output: []byte("diskutil output"), err: cause}}
-			}
-			selected, _ := backend.ListAllowedDevices(context.Background())
-			err := tt.run(backend, selected[0])
-			assertCommandError(t, err, cause, tt.prefix, "diskutil output")
-			wantJSON := [][]string{{"list", "external", "physical"}, {"info", "disk4"}, {"list", "external", "physical"}, {"info", "disk4"}}
-			if tt.name == "format" {
-				for range 3 {
-					wantJSON = append(wantJSON, []string{"list", "external", "physical"}, []string{"info", "disk4"})
-				}
-			}
-			if fmt.Sprint(runner.jsonRuns) != fmt.Sprint(wantJSON) {
-				t.Fatalf("JSON command sequence = %v, want %v", runner.jsonRuns, wantJSON)
-			}
-			wantRun := [][]string{{"unmountDisk", "/dev/disk4"}}
-			if tt.name == "eject" {
-				wantRun = [][]string{{"eject", "/dev/disk4"}}
-			}
-			if got, want := fmt.Sprint(runner.runs), fmt.Sprint(wantRun); got != want {
-				t.Fatalf("run command sequence = %v, want %v", runner.runs, wantRun)
-			}
-		})
-	}
-}
-
-func assertCommandError(t *testing.T, err, cause error, prefix, output string) {
-	t.Helper()
-	if !errors.Is(err, cause) {
-		t.Fatalf("error = %v, want cause %v", err, cause)
-	}
-	var typedCause *testCommandCause
-	if !errors.As(err, &typedCause) || typedCause != cause {
-		t.Fatalf("error = %v, want typed cause %T", err, cause)
-	}
-	if !strings.Contains(err.Error(), output) {
-		t.Fatalf("error = %v, want output %q", err, output)
-	}
-	if !strings.HasPrefix(err.Error(), prefix) {
-		t.Fatalf("error = %v, want prefix %q", err, prefix)
-	}
-}
-
-func TestEveryOperationRevalidates(t *testing.T) {
-	operations := map[string]func(*Backend, device.Device) error{
-		"OpenReader": func(b *Backend, d device.Device) error { _, err := b.OpenReader(context.Background(), d); return err },
-		"OpenWriter": func(b *Backend, d device.Device) error { _, err := b.OpenWriter(context.Background(), d); return err },
-		"Flush":      func(b *Backend, d device.Device) error { return b.Flush(context.Background(), d) },
-		"Eject":      func(b *Backend, d device.Device) error { return b.Eject(context.Background(), d) },
-	}
-	changed := strings.Replace(allowedInfo, "16000000000", "1", 1)
-	for name, run := range operations {
-		t.Run(name, func(t *testing.T) {
-			runner := sequencedRunner(allowedInfo, changed)
-			backend := &Backend{runner: runner}
-			selected, _ := backend.ListAllowedDevices(context.Background())
-			if err := run(backend, selected[0]); !errors.Is(err, ErrDeviceChanged) {
-				t.Fatalf("error = %v", err)
-			}
-			if len(runner.jsonResults["[list external physical]"]) != 0 {
-				t.Fatal("operation did not perform its own enumeration")
-			}
-		})
-	}
-}
-
-func TestFormatRejectsInvalidLabelBeforeDiskOperations(t *testing.T) {
-	runner := sequencedRunner(allowedInfo, allowedInfo)
-	backend := &Backend{runner: runner}
-	selected, _ := backend.ListAllowedDevices(context.Background())
-	label := `name;$(touch /tmp/bad) "quoted" 'single'`
-	if err := backend.FormatFAT32(context.Background(), selected[0], label, nil); err == nil {
-		t.Fatal("invalid FAT32 label was accepted")
-	}
-	if len(runner.runs) != 0 {
-		t.Fatalf("disk commands executed for invalid label: %v", runner.runs)
-	}
-}
-
-func TestDevicePathConversions(t *testing.T) {
-	if got := wholeDevice("/dev/rdisk12"); got != "/dev/disk12" {
-		t.Fatalf("wholeDevice() = %q", got)
-	}
-}
-
-func TestWholeDiskIdentifierValidation(t *testing.T) {
-	valid := map[string]uint32{"disk0": 0, "disk12": 12}
-	for identifier, want := range valid {
-		if got, ok := wholeDiskNumber(identifier); !ok || got != want {
-			t.Errorf("wholeDiskNumber(%q) = %d, %v; want %d, true", identifier, got, ok, want)
-		}
-	}
-	for _, identifier := range []string{"", "disk", "disk4s1", "/dev/disk4", "Disk4", "disk-1", "friendly-name"} {
-		if got, ok := wholeDiskNumber(identifier); ok {
-			t.Errorf("wholeDiskNumber(%q) = %d, true", identifier, got)
-		}
-	}
-}
-
-func TestDeviceFromInfoRequiresMatchingStructuredIdentifiers(t *testing.T) {
-	listed := listedDisk{DeviceIdentifier: "disk4"}
-	base := infoJSON{DeviceIdentifier: "disk4", DeviceNode: "/dev/disk4", DeviceTreePath: "IOService:/USB/disk@1", BusProtocol: "USB", TotalSize: 1024, Whole: true, RemovableMedia: true}
-	d, ok := deviceFromInfo(listed, base)
-	if !ok {
-		t.Fatal("matching structured identifiers were rejected")
-	}
-	if d.Path != "/dev/rdisk4" {
-		t.Fatalf("device path = %q, want /dev/rdisk4", d.Path)
-	}
-	if d.Major != 4 {
-		t.Fatalf("device number = %d, want 4", d.Major)
-	}
-	changedIdentifier := base
-	changedIdentifier.DeviceIdentifier = "disk5"
-	if _, ok := deviceFromInfo(listed, changedIdentifier); ok {
-		t.Fatal("mismatched DeviceIdentifier was accepted")
-	}
-	changedNode := base
-	changedNode.DeviceNode = "/dev/disk5"
-	if _, ok := deviceFromInfo(listed, changedNode); ok {
-		t.Fatal("mismatched DeviceNode was accepted")
-	}
-}
-
-func TestCommandErrorIncludesStructuredCommandAndStderr(t *testing.T) {
-	cause := &testCommandCause{}
-	err := commandError("diskutil", cause, []byte(" permission denied\n"))
-	assertCommandError(t, err, cause, "diskutil", "permission denied")
-}
-
-func testFormatOpener(t *testing.T, size int64) func(string) (formatTarget, error) {
-	t.Helper()
-	f, err := os.CreateTemp(t.TempDir(), "disk")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = f.Truncate(size); err != nil {
-		t.Fatal(err)
-	}
-	return func(string) (formatTarget, error) { return f, nil }
-}
-
-func TestFormatFAT32UsesSharedFormatter(t *testing.T) {
-	runner := &fakeRunner{json: map[string][]byte{
-		"[list external physical]": []byte(`{"AllDisksAndPartitions":[{"DeviceIdentifier":"disk4"}]}`),
-		"[info disk4]":             []byte(`{"DeviceIdentifier":"disk4","DeviceNode":"/dev/disk4","DeviceTreePath":"IOService:/USB/disk@1","MediaName":"USB Flash","BusProtocol":"USB","TotalSize":16000000000,"Whole":true,"Internal":false,"RemovableMedia":true}`),
-	}}
-	backend := &Backend{runner: runner, openFormat: testFormatOpener(t, 16000000000)}
-	devices, err := backend.ListAllowedDevices(context.Background())
-	if err != nil || len(devices) != 1 {
-		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
-	}
-	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
-		t.Fatal(err)
-	}
-	want := fmt.Sprint([]string{"unmountDisk", "/dev/disk4"})
-	if got := fmt.Sprint(runner.runs[0]); got != want {
-		t.Fatalf("format command = %s, want %s", got, want)
-	}
-}
-
-func TestBackendCommandsAlwaysHaveDeadlines(t *testing.T) {
-	// Selection, FormatFAT32 revalidation, Unmount revalidation, the
-	// post-unmount check, and the final pre-format revalidation.
-	runner := sequencedRunner(allowedInfo, allowedInfo, allowedInfo, allowedInfo, allowedInfo)
-	backend := &Backend{runner: runner, openFormat: testFormatOpener(t, 16000000000)}
-	devices, err := backend.ListAllowedDevices(context.Background())
-	if err != nil || len(devices) != 1 {
-		t.Fatalf("ListAllowedDevices() = %v, %v", devices, err)
-	}
-	if err := backend.FormatFAT32(context.Background(), devices[0], "GOFLASHER", nil); err != nil {
-		t.Fatal(err)
-	}
-	wantJSON := make([][]string, 0, 10)
-	for range 5 {
-		wantJSON = append(wantJSON, []string{"list", "external", "physical"}, []string{"info", "disk4"})
-	}
-	if fmt.Sprint(runner.jsonRuns) != fmt.Sprint(wantJSON) {
-		t.Fatalf("JSON command sequence = %v, want %v", runner.jsonRuns, wantJSON)
-	}
-	if got, want := fmt.Sprint(runner.runs), fmt.Sprint([][]string{{"unmountDisk", "/dev/disk4"}}); got != want {
-		t.Fatalf("run command sequence = %v, want %v", runner.runs, want)
-	}
-	for i, hasDeadline := range runner.deadlines {
-		if !hasDeadline {
-			t.Errorf("command %d had no context deadline", i)
-		}
+func TestOpenNeverUsesSelectedPath(t *testing.T) {
+	m := &fakeManager{current: safeDisk()}
+	m.current.Mounted = false
+	b := NewBackendWithManager(m)
+	selected := deviceFromDisk(m.current)
+	selected.Path = "/dev/rdisk999"
+	called := ""
+	b.openRaw = func(path string, flag int) (*os.File, error) { called = path; return nil, os.ErrPermission }
+	_, _ = b.OpenWriter(context.Background(), selected)
+	if called != "" {
+		t.Fatalf("selected path reached raw opener: %q", called)
 	}
 }

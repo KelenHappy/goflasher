@@ -68,3 +68,81 @@ jobs:
         run: |
           gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --verify-tag --generate-notes
           gh release upload "$VERSION" dist/* --clobber
+
+  macos:
+    name: macOS ${{ matrix.arch }} signed DMG
+    # Maintainers enable this only after authenticated XPC/helper and exact-RC
+    # hardware acceptance are complete. An incomplete migration build must not
+    # become a public destructive release merely because signing secrets exist.
+    if: vars.MACOS_PRODUCTION_READY == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: amd64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify native architecture and tests
+        run: |
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+          go test ./...
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          test -n "$CERTIFICATE_P12_BASE64"
+          echo "$CERTIFICATE_P12_BASE64" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+      - name: Build separately signed app and helper
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/GoFlasher ./cmd/usbwriter
+          go build -trimpath -ldflags "-s -w" -o dist/goflasher-helper ./cmd/goflasher-helper
+          packaging/macos/make-dmg.sh dist/GoFlasher dist/goflasher-helper "$VERSION" "${{ matrix.arch }}" "$SIGN_IDENTITY" dist
+      - name: Notarize, staple, and verify Gatekeeper
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+        run: |
+          dmg="dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg"
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          mount=$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | sed 's|^.*\t||')
+          trap 'hdiutil detach "$mount"' EXIT
+          spctl --assess --type execute --verbose=2 "$mount/GoFlasher.app"
+      - name: Generate checksum
+        run: shasum -a 256 "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg" > "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goflasher-macos-${{ matrix.arch }}-${{ env.VERSION }}
+          path: |
+            dist/GoFlasher-${{ env.VERSION }}-${{ matrix.arch }}.dmg
+            dist/GoFlasher-${{ env.VERSION }}-${{ matrix.arch }}.dmg.sha256
+          if-no-files-found: error
+      - name: Publish GitHub release assets
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --verify-tag --generate-notes
+          gh release upload "$VERSION" "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg" "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg.sha256" --clobber

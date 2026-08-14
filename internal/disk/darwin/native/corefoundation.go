@@ -32,6 +32,8 @@ type cfAPI struct {
 	stringTypeID       func() uintptr
 	numberTypeID       func() uintptr
 	booleanTypeID      func() uintptr
+	urlTypeID          func() uintptr
+	urlGetFSRep        func(uintptr, bool, *byte, int64) uint8
 	runLoopGetCurrent  func() uintptr
 	runLoopRunInMode   func(uintptr, float64, bool) int32
 }
@@ -58,11 +60,28 @@ func bindCF(lib uintptr) (cfBindings, error) {
 	purego.RegisterLibFunc(&b.api.stringTypeID, lib, "CFStringGetTypeID")
 	purego.RegisterLibFunc(&b.api.numberTypeID, lib, "CFNumberGetTypeID")
 	purego.RegisterLibFunc(&b.api.booleanTypeID, lib, "CFBooleanGetTypeID")
+	purego.RegisterLibFunc(&b.api.urlTypeID, lib, "CFURLGetTypeID")
+	purego.RegisterLibFunc(&b.api.urlGetFSRep, lib, "CFURLGetFileSystemRepresentation")
 	purego.RegisterLibFunc(&b.api.runLoopGetCurrent, lib, "CFRunLoopGetCurrent")
 	purego.RegisterLibFunc(&b.api.runLoopRunInMode, lib, "CFRunLoopRunInMode")
 	var err error
 	b.defaultRunLoopMode, err = symbolValue(lib, "kCFRunLoopDefaultMode")
 	return b, err
+}
+func (c cfBindings) goPath(v uintptr) (string, bool) {
+	if v == 0 || c.api.getTypeID(v) != c.api.urlTypeID() {
+		return "", false
+	}
+	b := make([]byte, 4096)
+	if c.api.urlGetFSRep(v, true, &b[0], int64(len(b))) == 0 {
+		return "", false
+	}
+	for i, x := range b {
+		if x == 0 {
+			return string(b[:i]), true
+		}
+	}
+	return "", false
 }
 
 func (c cfBindings) newString(s string) (uintptr, error) {

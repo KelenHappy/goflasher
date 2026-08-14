@@ -34,12 +34,29 @@ type Disk struct {
 	System      bool
 	Mounted     bool
 	MountPoints []string
+	// RegistryID is an operation-lifetime IOKit identity. RegistryPath is only
+	// attachment evidence and must never authorize an operation by itself.
+	RegistryID   string
+	RegistryPath string
+	Ejectable    bool
+	MediaID      string
+	// TransportSerial identifies a reader/USB transport, not its media.
+	TransportSerial string
 }
 
 // SameIdentity compares the fields that must survive a destructive-operation
 // revalidation. Callers do not need to understand platform identity schemes.
 func SameIdentity(a, b Disk) bool {
 	if a.ID == "" || a.ID != b.ID || a.Device == "" || a.Device != b.Device || a.Size == 0 || a.Size != b.Size {
+		return false
+	}
+	if a.RegistryID != b.RegistryID || a.RegistryPath != b.RegistryPath {
+		return false
+	}
+	if (a.MediaID != "" || b.MediaID != "") && (a.MediaID == "" || a.MediaID != b.MediaID) {
+		return false
+	}
+	if (a.TransportSerial != "" || b.TransportSerial != "") && (a.TransportSerial == "" || a.TransportSerial != b.TransportSerial) {
 		return false
 	}
 	return (a.Serial == "" && b.Serial == "") || (a.Serial != "" && a.Serial == b.Serial)

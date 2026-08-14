@@ -1,259 +1,116 @@
 //go:build darwin
 
-// Package macos implements conservative removable USB disk discovery and raw
-// access using macOS diskutil.
+// Package macos is the migration writer implementation. Platform discovery,
+// identity, refresh, unmount and eject policy is owned exclusively by disk.Manager.
 package macos
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/disk"
 	"github.com/goflasher/goflasher/internal/fat32"
 	"github.com/goflasher/goflasher/internal/progress"
 )
 
 var (
-	ErrUnsupportedDevice = errors.New("unsupported device")
-	ErrSystemDisk        = errors.New("system disk")
-	ErrDeviceChanged     = errors.New("device identity changed")
-	ErrUnmountFailed     = errors.New("unmount failed; raw access may require administrator privileges")
+	ErrUnsupportedDevice = disk.ErrNotRemovable
+	ErrSystemDisk        = disk.ErrSystemDisk
+	ErrDeviceChanged     = disk.ErrChanged
+	ErrUnmountFailed     = disk.ErrUnmountFailed
 )
 
-type commandRunner interface {
-	JSON(context.Context, ...string) ([]byte, error)
-	Run(context.Context, ...string) ([]byte, error)
-}
-
-type diskutilRunner struct{}
-
-func (diskutilRunner) JSON(ctx context.Context, args ...string) ([]byte, error) {
-	if len(args) == 0 {
-		return nil, errors.New("diskutil: missing command")
-	}
-	commandArgs := append([]string{args[0], "-plist"}, args[1:]...)
-	plist, err := exec.CommandContext(ctx, "diskutil", commandArgs...).CombinedOutput()
-	if err != nil {
-		return nil, commandError("diskutil", err, plist)
-	}
-	cmd := exec.CommandContext(ctx, "plutil", "-convert", "json", "-o", "-", "--", "-")
-	cmd.Stdin = bytes.NewReader(plist)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, commandError("plutil", err, out)
-	}
-	return out, nil
-}
-
-func (diskutilRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, "diskutil", args...).CombinedOutput()
-}
-
-func commandError(command string, err error, output []byte) error {
-	detail := strings.TrimSpace(string(output))
-	if detail == "" {
-		return fmt.Errorf("%s: %w", command, err)
-	}
-	return fmt.Errorf("%s: %w: %s", command, err, detail)
-}
-
-const (
-	queryTimeout     = 30 * time.Second
-	operationTimeout = 2 * time.Minute
-	formatTimeout    = 10 * time.Minute
-)
+const formatTimeout = 10 * time.Minute
 
 type formatTarget interface {
 	fat32.Device
 	io.Closer
 }
 type Backend struct {
-	runner     commandRunner
+	manager    disk.Manager
+	openRaw    func(string, int) (*os.File, error)
 	openFormat func(string) (formatTarget, error)
 }
 
 var _ device.Backend = (*Backend)(nil)
 
-func NewBackend() *Backend                               { return &Backend{runner: diskutilRunner{}, openFormat: openFormatTarget} }
-func openFormatTarget(path string) (formatTarget, error) { return os.OpenFile(path, os.O_RDWR, 0) }
+func NewBackend() *Backend { return NewBackendWithManager(disk.NewManager()) }
+func NewBackendWithManager(manager disk.Manager) *Backend {
+	return &Backend{manager: manager, openRaw: openRawFile, openFormat: openFormatTarget}
+}
+func openRawFile(path string, flag int) (*os.File, error) { return os.OpenFile(path, flag, 0) }
+func openFormatTarget(path string) (formatTarget, error)  { return os.OpenFile(path, os.O_RDWR, 0) }
 
-type listJSON struct {
-	Disks []listedDisk `json:"AllDisksAndPartitions"`
+func deviceFromDisk(d disk.Disk) device.Device {
+	n, _ := wholeDiskNumber(strings.TrimPrefix(d.Device, "/dev/r"))
+	return device.Device{ID: d.ID, Path: d.Device, Vendor: d.Vendor, Model: d.Model, Serial: d.Serial, Transport: d.Bus, SysfsPath: d.RegistryPath, Major: n, Size: d.Size, IsCardReader: d.Ejectable, Mounted: d.Mounted, IsSystemDisk: d.System, IsAllowed: d.Removable && d.External && !d.System && d.Bus == "usb" && d.Size > 0 && d.RegistryID != "", MountPoints: append([]string(nil), d.MountPoints...), PartitionCount: len(d.MountPoints)}
 }
-type listedDisk struct {
-	DeviceIdentifier string            `json:"DeviceIdentifier"`
-	Partitions       []listedPartition `json:"Partitions"`
-}
-type listedPartition struct {
-	MountPoint string `json:"MountPoint"`
-}
-type infoJSON struct {
-	DeviceIdentifier    string `json:"DeviceIdentifier"`
-	DeviceNode          string `json:"DeviceNode"`
-	DeviceTreePath      string `json:"DeviceTreePath"`
-	MediaName           string `json:"MediaName"`
-	IORegistryEntryName string `json:"IORegistryEntryName"`
-	BusProtocol         string `json:"BusProtocol"`
-	TotalSize           uint64 `json:"TotalSize"`
-	Whole               bool   `json:"Whole"`
-	Internal            bool   `json:"Internal"`
-	RemovableMedia      bool   `json:"RemovableMedia"`
-	Ejectable           bool   `json:"Ejectable"`
-}
-
-func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
-	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
-	defer cancel()
-	out, err := b.runner.JSON(ctx, "list", "external", "physical")
-	if err != nil {
-		return nil, fmt.Errorf("list macOS disks: %w", err)
-	}
-	var listing listJSON
-	if err := json.Unmarshal(out, &listing); err != nil {
-		return nil, fmt.Errorf("decode macOS disk list: %w", err)
-	}
-	result := make([]device.Device, 0, len(listing.Disks))
-	for _, listed := range listing.Disks {
-		if _, ok := wholeDiskNumber(listed.DeviceIdentifier); !ok {
-			continue
-		}
-		infoOut, err := b.runner.JSON(ctx, "info", listed.DeviceIdentifier)
-		if err != nil {
-			return nil, fmt.Errorf("inspect macOS disk %q: %w", listed.DeviceIdentifier, err)
-		}
-		var info infoJSON
-		if err := json.Unmarshal(infoOut, &info); err != nil {
-			return nil, fmt.Errorf("decode macOS disk %q info: %w", listed.DeviceIdentifier, err)
-		}
-		if d, ok := deviceFromInfo(listed, info); ok {
-			result = append(result, d)
-		}
-	}
-	return result, nil
-}
-
-func deviceFromInfo(listed listedDisk, info infoJSON) (device.Device, bool) {
-	number, ok := wholeDiskNumber(listed.DeviceIdentifier)
-	if !ok || info.DeviceIdentifier != listed.DeviceIdentifier || info.DeviceNode != "/dev/"+listed.DeviceIdentifier {
-		return device.Device{}, false
-	}
-	mounts := partitionMounts(listed.Partitions)
-	id := strings.TrimSpace(info.DeviceTreePath)
-	d := device.Device{
-		ID: id, Path: "/dev/r" + listed.DeviceIdentifier, Model: first(info.MediaName, info.IORegistryEntryName),
-		Transport: strings.ToLower(info.BusProtocol), SysfsPath: id,
-		Major: number, Size: info.TotalSize, IsCardReader: info.Ejectable,
-		Mounted: len(mounts) > 0, MountPoints: mounts, PartitionCount: len(listed.Partitions), IsSystemDisk: info.Internal,
-	}
-	classifyDevice(&d, info)
-	return d, true
-}
-
-func wholeDiskNumber(identifier string) (uint32, bool) {
-	digits := strings.TrimPrefix(identifier, "disk")
-	if digits == identifier || digits == "" {
-		return 0, false
-	}
-	number, err := strconv.ParseUint(digits, 10, 32)
-	return uint32(number), err == nil
-}
-
-func partitionMounts(partitions []listedPartition) []string {
-	mounts := make([]string, 0, len(partitions))
-	for _, partition := range partitions {
-		if partition.MountPoint != "" {
-			mounts = append(mounts, partition.MountPoint)
-		}
-	}
-	return mounts
-}
-
-func classifyDevice(d *device.Device, info infoJSON) {
-	switch {
-	case d.IsSystemDisk:
-		d.RejectReason = ErrSystemDisk.Error()
-	case !info.Whole || !strings.EqualFold(info.BusProtocol, "USB") || !info.RemovableMedia || info.TotalSize == 0 || d.ID == "":
-		d.RejectReason = ErrUnsupportedDevice.Error()
-	default:
-		d.IsAllowed = true
-	}
-}
-
 func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
-	all, err := b.list(ctx)
+	all, err := b.manager.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	allowed := make([]device.Device, 0, len(all))
+	out := make([]device.Device, 0, len(all))
 	for _, d := range all {
-		if d.IsAllowed {
-			allowed = append(allowed, d)
+		v := deviceFromDisk(d)
+		if v.IsAllowed {
+			out = append(out, v)
 		}
 	}
-	return allowed, nil
+	return out, nil
 }
 func (b *Backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {
-	all, err := b.list(ctx)
+	d, err := b.manager.Refresh(ctx, id)
 	if err != nil {
 		return device.Device{}, err
 	}
-	for _, d := range all {
-		if d.ID == id {
-			return d, nil
-		}
+	v := deviceFromDisk(d)
+	if !v.IsAllowed {
+		return device.Device{}, ErrUnsupportedDevice
 	}
-	return device.Device{}, os.ErrNotExist
+	return v, nil
 }
-func (b *Backend) revalidate(ctx context.Context, selected device.Device) (device.Device, error) {
-	fresh, err := b.RefreshDevice(ctx, selected.ID)
+func (b *Backend) diskSnapshot(ctx context.Context, selected device.Device) (disk.Disk, error) {
+	d, err := b.manager.Refresh(ctx, selected.ID)
 	if err != nil {
-		return device.Device{}, fmt.Errorf("%w: %w", ErrDeviceChanged, err)
+		return disk.Disk{}, fmt.Errorf("%w: %w", ErrDeviceChanged, err)
 	}
+	fresh := deviceFromDisk(d)
 	if !fresh.IsAllowed {
-		return device.Device{}, fmt.Errorf("%w: %s", ErrUnsupportedDevice, fresh.RejectReason)
+		return disk.Disk{}, ErrUnsupportedDevice
 	}
 	if !device.SameIdentity(selected, fresh) || selected.Size != fresh.Size || selected.Model != fresh.Model {
-		return device.Device{}, ErrDeviceChanged
+		return disk.Disk{}, ErrDeviceChanged
 	}
-	return fresh, nil
+	return d, nil
 }
 func (b *Backend) Unmount(ctx context.Context, selected device.Device) error {
-	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
-	defer cancel()
-	fresh, err := b.revalidate(ctx, selected)
+	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return err
 	}
-	if out, err := b.runner.Run(ctx, "unmountDisk", wholeDevice(fresh.Path)); err != nil {
-		return fmt.Errorf("%w: %w: %s", ErrUnmountFailed, err, strings.TrimSpace(string(out)))
-	}
-	again, err := b.revalidate(ctx, fresh)
-	if err != nil {
-		return err
-	}
-	if again.Mounted {
-		return ErrUnmountFailed
-	}
-	return nil
+	return b.manager.Unmount(ctx, d)
 }
 func (b *Backend) open(ctx context.Context, selected device.Device, flag int) (*os.File, error) {
-	fresh, err := b.revalidate(ctx, selected)
+	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return nil, err
 	}
-	if fresh.Mounted {
+	if d.Mounted {
 		return nil, ErrUnmountFailed
 	}
-	return os.OpenFile(fresh.Path, flag, 0)
+	opener := b.openRaw
+	if opener == nil {
+		opener = openRawFile
+	}
+	return opener(d.Device, flag)
 }
 func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
 	return b.open(ctx, d, os.O_WRONLY)
@@ -269,24 +126,17 @@ func (b *Backend) Flush(ctx context.Context, d device.Device) error {
 	defer f.Close()
 	return f.Sync()
 }
-func (b *Backend) Eject(ctx context.Context, d device.Device) error {
-	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
-	defer cancel()
-	fresh, err := b.revalidate(ctx, d)
+func (b *Backend) Eject(ctx context.Context, selected device.Device) error {
+	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return err
 	}
-	out, err := b.runner.Run(ctx, "eject", wholeDevice(fresh.Path))
-	if err != nil {
-		return fmt.Errorf("eject: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return b.manager.Eject(ctx, d)
 }
-
-func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string, updates chan<- progress.Update) error {
+func (b *Backend) FormatFAT32(ctx context.Context, selected device.Device, label string, updates chan<- progress.Update) error {
 	ctx, cancel := context.WithTimeout(ctx, formatTimeout)
 	defer cancel()
-	fresh, err := b.revalidate(ctx, d)
+	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return err
 	}
@@ -296,44 +146,43 @@ func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string
 	if !fat32.ValidLabel(label) {
 		return errors.New("format FAT32: invalid volume label")
 	}
-	if err := b.Unmount(ctx, fresh); err != nil {
+	if err = b.manager.Unmount(ctx, d); err != nil {
 		return err
 	}
-	again, err := b.revalidate(ctx, fresh)
+	d, err = b.manager.Refresh(ctx, d.ID)
 	if err != nil {
 		return err
+	}
+	if d.Mounted {
+		return ErrUnmountFailed
 	}
 	opener := b.openFormat
 	if opener == nil {
 		opener = openFormatTarget
 	}
-	target, err := opener(again.Path)
+	target, err := opener(d.Device)
 	if err != nil {
 		return fmt.Errorf("format FAT32: %w", err)
 	}
 	defer target.Close()
-	err = fat32.Format(ctx, target, again.Size, label, func(percent uint64) {
-		if updates == nil {
-			return
+	if err = fat32.Format(ctx, target, d.Size, label, func(percent uint64) {
+		if updates != nil {
+			select {
+			case updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: percent, TotalBytes: 100}:
+			case <-ctx.Done():
+			default:
+			}
 		}
-		select {
-		case updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: percent, TotalBytes: 100}:
-		case <-ctx.Done():
-		default:
-		}
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("format FAT32: %w", err)
 	}
 	return nil
 }
-
-func wholeDevice(path string) string { return strings.Replace(path, "/dev/rdisk", "/dev/disk", 1) }
-func first(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
+func wholeDiskNumber(identifier string) (uint32, bool) {
+	digits := strings.TrimPrefix(identifier, "disk")
+	if digits == identifier || digits == "" {
+		return 0, false
 	}
-	return ""
+	n, err := strconv.ParseUint(digits, 10, 32)
+	return uint32(n), err == nil
 }

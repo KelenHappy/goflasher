@@ -7,7 +7,7 @@
 
 ## 支援的建置目標
 
-Raw-device backend與Fyne GUI可在Linux、Windows及macOS建置。Windows使用原生Win32 SetupAPI、Configuration Manager、volume control與storage IOCTL；raw access需以Administrator執行。macOS目前使用 `diskutil` 探索、卸載及退出可移除USB裝置。
+Raw-device backend與Fyne GUI可在Linux、Windows及macOS建置。Windows使用原生Win32 SetupAPI、Configuration Manager、volume control與storage IOCTL；raw access需以Administrator執行。macOS 使用 Disk Arbitration 與 IOKit 進行 discovery、identity、mount inspection、unmount/eject，並以 AppKit 選擇 image。
 
 可重用的 `internal/disk` abstraction與writer backend分離；共用 `Manager` API不含native handle或平台constant，`disk.NewManager()`由build tag選擇。Linux使用sysfs、mountinfo、swap inspection及udisks2；Windows使用原生Win32 backend。macOS native manager完成後也必須維持相同介面。
 
@@ -32,7 +32,7 @@ sudo apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev ud
 |---|---|---|---|
 | Linux | sysfs、procfs、`/run/udev/data`、UDisks2 system D-Bus | `pkexec`啟動受限helper | GUI及backend已啟用 |
 | Windows | SetupAPI、cfgmgr32、`DeviceIoControl`、volume FSCTL、raw `\\.\PhysicalDriveN` | disk operation無CLI | 需Administrator |
-| macOS | `diskutil` plist output、raw `/dev/rdisk*`及共用in-process FAT32 formatter | `diskutil`；`osascript`開啟原生chooser | raw access仍有權限限制 |
+| macOS | Disk Arbitration、IOKit、AppKit `NSOpenPanel` 與 migration raw writer | discovery/lifecycle/picker 無 command dependency | privileged raw-operation cutover 仍受 gate 限制 |
 
 Go/Fyne/CGo toolchain是source build dependency，不是runtime dependency，也不應bundle進application。Gzip及XZ decoder為純Go並編譯進程式。Windows公開release應code-sign；macOS app bundle應code-sign及notarize。
 
@@ -74,7 +74,7 @@ go test ./...
 go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
 ```
 
-目前macOS `disk.Manager` outline尚未連結native framework並回傳 `disk.ErrUnsupported`。未來會在不改共用API的前提下，於 `disk_darwin.go` 後使用Disk Arbitration與IOKit。Raw `/dev/rdiskN` access需提升權限；dedicated helper完成前，本機build目前需依英文文件所述權限context執行。
+Darwin manager 透過 PureGo 載入 Disk Arbitration 與 IOKit；picker 使用 AppKit `NSOpenPanel`，兩者都沒有 command fallback。GUI 不得以 `sudo` 執行；authenticated helper/XPC cutover 完成前，raw-operation development 必須 fail closed。
 
 ## Debian package
 
@@ -130,4 +130,4 @@ GUI、Explorer chooser、native discovery、repeated identity check、volume loc
 
 ## macOS尚待完成
 
-macOS GUI、Finder chooser、保守的removable-USB backend、raw write、read-back及 `diskutil` eject已實作。共用in-process formatter直接寫入已驗證raw device，不用 `diskutil` 格式化。公開release仍需實體硬體隔離測試、dedicated privileged helper、簽署與notarization。
+Native discovery、operation-lifetime identity、mount inspection、unmount/eject callback、post-operation refresh 與 AppKit picker 均不使用 `diskutil`、`plutil` 或 `osascript`。Release workflow 會建立分架構 DMG 並執行 signing、notarization、stapling、Gatekeeper 與 checksum；stable 仍由 authenticated XPC helper cutover 與 exact-RC hardware acceptance 阻擋。

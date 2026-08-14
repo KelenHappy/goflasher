@@ -10,15 +10,13 @@ documented in [docs/MACOS-NATIVE-PHASE1.md](../architecture/MACOS-NATIVE-PHASE1.
 The raw-device backend and Fyne GUI build on Linux, Windows, and macOS. Windows uses
 native Win32 SetupAPI, Configuration Manager, volume-control, and storage IOCTL
 calls; run the Windows GUI as Administrator for raw access.
-macOS uses `diskutil` for removable-USB discovery, unmount, and eject operations.
+macOS uses Disk Arbitration and IOKit for discovery, identity, mount inspection, unmount, and eject, and AppKit for image selection.
 
 The reusable `internal/disk` abstraction is separate from the existing writer
 backends. Its common `Manager` API contains no native handles or platform
 constants. `disk.NewManager()` is selected by build tags. The Linux manager is
 implemented with sysfs, mountinfo, swap inspection, and udisks2. Windows uses
-the native Win32 backend. macOS still returns `disk.ErrUnsupported` from its
-compile-safe `disk.Manager` outline; a future Disk Arbitration/IOKit manager can
-replace it without changing callers.
+the native Win32 backend. macOS implements the same manager with nested PureGo bindings; native handles never leave the nested package.
 
 ## Requirements
 
@@ -52,21 +50,9 @@ dependencies. The current runtime boundary is:
 |---|---|---|---|
 | Linux | sysfs, procfs, `/run/udev/data`, and the UDisks2 system D-Bus API | `pkexec` starts the narrowly scoped privileged helper | GUI and backend are active |
 | Windows | SetupAPI, cfgmgr32, `DeviceIoControl`, volume FSCTLs, and raw `\\.\PhysicalDriveN` access | None for disk operations | GUI and backend are active; run as Administrator |
-| macOS | `diskutil` plist output and raw `/dev/rdisk*` access; shared in-process FAT32 formatter | `diskutil`; `osascript` opens the native file chooser | GUI and backend are active; raw access requires elevation |
+| macOS | Disk Arbitration and IOKit; AppKit `NSOpenPanel`; migration raw `/dev/rdisk*` writer | None for discovery, lifecycle, or picker | Native manager active; privileged raw-operation cutover remains gated |
 
-The commands listed for macOS are part of the operating system; end users do not
-install Visual Studio, an SDK, `diskutil`, or `osascript` to run a packaged
-GoFlasher binary. The Windows storage backend has no CLI runtime dependency.
-Source builds are different:
-the Go and Fyne/CGo build toolchains are required on the build machine, but they
-are not runtime dependencies and should not be bundled into the application.
-
-UDisks2 D-Bus removes the Linux `udisksctl` client process, not the UDisks2
-daemon or its polkit authorization policy. Windows disk operations are native
-API-only; replacing the remaining macOS device-management commands requires
-Disk Arbitration plus IOKit work. Such replacements
-must preserve the existing repeated identity, system-disk, mount, capacity, and
-removability checks before raw access.
+The Windows and macOS discovery/lifecycle implementations have no CLI runtime dependency. UDisks2 D-Bus removes the Linux `udisksctl` client process, not the UDisks2 daemon or its polkit policy. Native replacements must preserve repeated identity, system-disk, mount, capacity, and removability checks before raw access.
 
 The three-platform CI matrix proves that each native source set compiles and its
 isolated tests pass. It does not prove destructive access on real hardware; the
@@ -124,14 +110,7 @@ go test ./...
 go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
 ```
 
-The macOS disk-manager outline does not yet link native frameworks and returns
-`disk.ErrUnsupported`. A future implementation will use Disk Arbitration and
-IOKit behind `disk_darwin.go` without changing the common API.
-
-Raw `/dev/rdiskN` access requires elevated rights. Until a dedicated privileged
-helper is available, launch the locally built binary with `sudo`; GoFlasher
-only lists external physical disks positively classified as removable USB
-media and revalidates their physical device-tree identity before access.
+The Darwin manager loads Disk Arbitration and IOKit through PureGo. The image picker uses AppKit `NSOpenPanel`; neither path invokes a command-line fallback. Never run the GUI with `sudo`. Raw-operation development remains fail-closed until the authenticated helper/XPC cutover is complete.
 
 ## Debian package
 
@@ -234,11 +213,6 @@ and safe eject are also implemented without PowerShell. A public Windows release
 signed packaging, and release jobs. The current backend requires Administrator
 rights; a dedicated privileged helper would provide a better privilege boundary.
 
-## macOS work remaining
+## macOS release boundary
 
-The macOS GUI, native Finder chooser, conservative removable-USB backend, raw
-writing, read-back verification, and `diskutil` eject operation are implemented.
-A shared in-process formatter writes FAT32 directly to the validated raw device;
-`diskutil` is not used for formatting.
-A public macOS release still needs hardware-isolated tests, a dedicated
-privileged helper, signed and notarized packaging, and release jobs.
+Native discovery, operation-lifetime identity, mount inspection, unmount/eject callbacks, post-operation refresh, and the AppKit picker are implemented without `diskutil`, `plutil`, or `osascript`. The release workflow builds separate Intel and Apple Silicon DMGs and performs signing, notarization, stapling, Gatekeeper verification, and checksums. Stable publication still requires the authenticated XPC helper cutover and exact-RC hardware acceptance described in the convergence contract; the migration writer is not grounds to bypass that gate.

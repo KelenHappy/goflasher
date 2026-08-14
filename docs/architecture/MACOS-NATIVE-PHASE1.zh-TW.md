@@ -4,6 +4,10 @@
 
 這是隔離的proof of concept，**不會**切換production macOS backend，也不會刪除現有實作。
 
+具約束力的 production 最終目標與固定 migration 順序見
+[`MACOS-CONVERGENCE.zh-TW.md`](MACOS-CONVERGENCE.zh-TW.md)。Phase 0 不改動
+production backend，native operation 證據不足時不得 fallback 到較弱證據。
+
 ## Public API mapping
 
 | Framework | 驗證API |

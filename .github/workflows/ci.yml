@@ -84,6 +84,9 @@ jobs:
         run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udisksctl|Output\([^)]*udisksctl' internal || true)"
       - name: Reject udevadm CLI regressions
         run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udevadm|Output\([^)]*udevadm' internal || true)"
+      - name: Reject macOS command fallbacks
+        run: |
+          test -z "$(rg 'exec\.Command(Context)?\([^)]*(diskutil|plutil|osascript)' internal cmd/usbwriter || true)"
       - run: go vet ./...
       - name: Scan Go dependencies for known vulnerabilities
         run: |

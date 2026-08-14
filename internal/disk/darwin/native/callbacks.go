@@ -27,7 +27,7 @@ func newCallbackState(s *Session) *callbackState {
 	if v == 0 {
 		v = nextCallbackToken.Add(1)
 	}
-	x := &callbackState{token: uintptr(v), session: s, result: make(chan callbackResult, 1)}
+	x := &callbackState{token: uintptr(v), session: s, result: make(chan callbackResult, 256)}
 	callbackStates.Store(x.token, x)
 	return x
 }

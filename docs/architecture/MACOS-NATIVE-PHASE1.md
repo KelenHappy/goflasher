@@ -5,6 +5,10 @@
 This is an isolated proof of concept. It does **not** switch the production
 macOS backend and does not remove its existing implementation.
 
+The binding production target and fixed migration sequence are defined in
+[`MACOS-CONVERGENCE.md`](MACOS-CONVERGENCE.md). Phase 0 does not change the
+production backend, and native uncertainty never falls back to weaker evidence.
+
 ## Public API mapping
 
 | Framework | APIs exercised |

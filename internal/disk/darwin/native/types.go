@@ -20,6 +20,7 @@ type DiskDescription struct {
 }
 
 type RegistryIdentity struct {
-	EntryID, Path, Vendor, Product, Serial string
-	USBAncestor                            bool
+	EntryID, Path, Vendor, Product string
+	MediaID, TransportSerial       string
+	USBAncestor                    bool
 }

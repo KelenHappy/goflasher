@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -22,6 +24,9 @@ type daAPI struct {
 	unregisterCallback  func(uintptr, uintptr, uintptr)
 	scheduleRunLoop     func(uintptr, uintptr, uintptr)
 	unscheduleRunLoop   func(uintptr, uintptr, uintptr)
+	diskUnmount         func(uintptr, uint32, uintptr, uintptr)
+	diskEject           func(uintptr, uint32, uintptr, uintptr)
+	dissenterStatus     func(uintptr) int32
 }
 type daBindings struct {
 	api  daAPI
@@ -38,6 +43,9 @@ func bindDA(lib uintptr) (daBindings, error) {
 	purego.RegisterLibFunc(&d.api.unregisterCallback, lib, "DAUnregisterCallback")
 	purego.RegisterLibFunc(&d.api.scheduleRunLoop, lib, "DASessionScheduleWithRunLoop")
 	purego.RegisterLibFunc(&d.api.unscheduleRunLoop, lib, "DASessionUnscheduleFromRunLoop")
+	purego.RegisterLibFunc(&d.api.diskUnmount, lib, "DADiskUnmount")
+	purego.RegisterLibFunc(&d.api.diskEject, lib, "DADiskEject")
+	purego.RegisterLibFunc(&d.api.dissenterStatus, lib, "DADissenterGetStatus")
 	d.keys = map[string]uintptr{}
 	for _, k := range []string{"kDADiskDescriptionMediaBSDNameKey", "kDADiskDescriptionMediaNameKey", "kDADiskDescriptionMediaSizeKey", "kDADiskDescriptionMediaWholeKey", "kDADiskDescriptionDeviceInternalKey", "kDADiskDescriptionMediaEjectableKey", "kDADiskDescriptionMediaRemovableKey", "kDADiskDescriptionVolumePathKey"} {
 		v, e := symbolValue(lib, k)
@@ -164,9 +172,7 @@ func (s *Session) describe(d uintptr) (DiskDescription, error) {
 	out.Internal, _ = s.f.cf.goBool(get("kDADiskDescriptionDeviceInternalKey"))
 	out.Ejectable, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaEjectableKey"))
 	out.Removable, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaRemovableKey"))
-	// Look up every currently bound public key even where conversion (for
-	// example CFURL for VolumePath) belongs to a later phase.
-	get("kDADiskDescriptionVolumePathKey")
+	out.VolumePath, _ = s.f.cf.goPath(get("kDADiskDescriptionVolumePathKey"))
 	s.emitDiagnostic(diagnostic)
 	if out.BSDName == "" {
 		return DiskDescription{}, errDiskWithoutBSDName
@@ -200,6 +206,126 @@ func goCString(p *byte) string {
 func (s *Session) WaitForDisk(ctx context.Context) (DiskDescription, error) {
 	return waitForDisk(ctx, s)
 }
+
+// ListDisks collects the initial appeared-callback burst. Disk Arbitration
+// delivers every currently known disk after registration; a quiet interval
+// terminates the snapshot while the context provides the hard bound.
+func (s *Session) ListDisks(ctx context.Context) ([]DiskDescription, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	state := newCallbackState(s)
+	defer state.close()
+	loop := s.f.cf.api.runLoopGetCurrent()
+	s.f.da.api.registerAppeared(s.ref, 0, appearedCallback, state.token)
+	s.f.da.api.scheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	defer func() {
+		s.f.da.api.unregisterCallback(s.ref, appearedCallback, state.token)
+		s.f.da.api.unscheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	}()
+	quiet := time.NewTimer(300 * time.Millisecond)
+	defer quiet.Stop()
+	byName := map[string]DiskDescription{}
+	for {
+		select {
+		case r := <-state.result:
+			if r.err != nil {
+				return nil, r.err
+			}
+			byName[r.disk.BSDName] = r.disk
+			if !quiet.Stop() {
+				select {
+				case <-quiet.C:
+				default:
+				}
+			}
+			quiet.Reset(300 * time.Millisecond)
+		case <-quiet.C:
+			out := make([]DiskDescription, 0, len(byName))
+			for _, d := range byName {
+				out = append(out, d)
+			}
+			return out, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			s.f.cf.api.runLoopRunInMode(s.f.cf.defaultRunLoopMode, 0.05, true)
+			runtime.Gosched()
+		}
+	}
+}
+
+type DissenterError struct{ Status int32 }
+
+func (e DissenterError) Error() string {
+	return fmt.Sprintf("Disk Arbitration dissenter status %d", e.Status)
+}
+
+var operationCallback = purego.NewCallback(func(_ uintptr, dissenter, token uintptr) {
+	v, ok := operationStates.LoadAndDelete(token)
+	if !ok {
+		return
+	}
+	state := v.(chan error)
+	if dissenter == 0 {
+		state <- nil
+		return
+	}
+	// The frameworks pointer is held separately because callback ABI contexts
+	// contain only an integer token, never a Go pointer.
+	f, ok := operationFrameworks.LoadAndDelete(token)
+	if !ok {
+		state <- ErrUnavailable
+		return
+	}
+	state <- DissenterError{Status: f.(*Frameworks).da.api.dissenterStatus(dissenter)}
+})
+
+var operationStates sync.Map
+var operationFrameworks sync.Map
+var nextOperationToken atomic.Uint64
+
+func (s *Session) operation(ctx context.Context, bsd string, eject bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	z := append([]byte("/dev/"+bsd), 0)
+	d := s.f.da.api.diskCreateBSD(0, s.ref, &z[0])
+	if d == 0 {
+		return ErrUnavailable
+	}
+	defer s.f.cf.api.release(d)
+	token := uintptr(nextOperationToken.Add(1))
+	if token == 0 {
+		token = uintptr(nextOperationToken.Add(1))
+	}
+	done := make(chan error, 1)
+	operationStates.Store(token, done)
+	operationFrameworks.Store(token, s.f)
+	defer func() { operationStates.Delete(token); operationFrameworks.Delete(token) }()
+	loop := s.f.cf.api.runLoopGetCurrent()
+	s.f.da.api.scheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	defer s.f.da.api.unscheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	if eject {
+		s.f.da.api.diskEject(d, 0, operationCallback, token)
+	} else {
+		s.f.da.api.diskUnmount(d, 1, operationCallback, token)
+	}
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			s.f.cf.api.runLoopRunInMode(s.f.cf.defaultRunLoopMode, .05, true)
+			runtime.Gosched()
+		}
+	}
+}
+
+func (s *Session) Unmount(ctx context.Context, bsd string) error { return s.operation(ctx, bsd, false) }
+func (s *Session) Eject(ctx context.Context, bsd string) error   { return s.operation(ctx, bsd, true) }
 
 var appearedCallback = purego.NewCallback(func(disk, context uintptr) { dispatchAppeared(context, disk) })
 
