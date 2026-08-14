@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   windows:
-    name: Windows amd64 signed portable ZIP
+    name: Windows amd64 portable ZIP
     runs-on: windows-latest
     env:
       VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
@@ -45,6 +45,7 @@ jobs:
           grep -F requireAdministrator dist/embedded.manifest
           rm dist/embedded.manifest
       - name: Authenticode sign and verify executable
+        if: vars.WINDOWS_PRODUCTION_READY == 'true'
         shell: bash
         env:
           WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
@@ -151,6 +152,8 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.arch }} DMG
+    # Keep this job unconditional so development and alpha builds still test,
+    # build, package, checksum, and upload their unsigned DMGs.
     strategy:
       fail-fast: false
       matrix:
@@ -197,16 +200,14 @@ jobs:
           mkdir -p dist
           go build -trimpath -tags fyne -ldflags "-s -w" -o dist/GoFlasher ./cmd/usbwriter
           go build -trimpath -ldflags "-s -w" -o dist/goflasher-helper ./cmd/goflasher-helper
-      - name: Package unsigned hardware-test DMG
-        if: vars.MACOS_PRODUCTION_READY != 'true'
-        run: packaging/macos/make-dmg.sh dist/GoFlasher dist/goflasher-helper "$VERSION" "${{ matrix.arch }}" "" dist
-      - name: Package signed production DMG
-        if: vars.MACOS_PRODUCTION_READY == 'true'
+      - name: Package DMG
         env:
-          SIGN_IDENTITY: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION }}
+          SIGN_IDENTITY: ${{ vars.MACOS_PRODUCTION_READY == 'true' && secrets.MACOS_DEVELOPER_ID_APPLICATION || '' }}
         run: |
           set -euo pipefail
-          test -n "$SIGN_IDENTITY"
+          if [[ "${{ vars.MACOS_PRODUCTION_READY }}" == "true" ]]; then
+            test -n "$SIGN_IDENTITY"
+          fi
           packaging/macos/make-dmg.sh dist/GoFlasher dist/goflasher-helper "$VERSION" "${{ matrix.arch }}" "$SIGN_IDENTITY" dist
       - name: Notarize, staple, and verify Gatekeeper
         if: vars.MACOS_PRODUCTION_READY == 'true'
