@@ -135,6 +135,8 @@ func sameWindowsIdentity(a, b windowsIdentityEvidence) bool {
 	return a == b
 }
 
+// Conflicting WWNs are rejected because choosing one based on descriptor order
+// would make the device identity unstable.
 func parseStorageDeviceIDs(b []byte) (string, error) {
 	if len(b) < 12 {
 		return "", fmt.Errorf("short STORAGE_DEVICE_ID_DESCRIPTOR: got %d bytes", len(b))
@@ -168,6 +170,8 @@ func parseStorageDeviceIDs(b []byte) (string, error) {
 	return found, nil
 }
 
+// Only device-associated NAA and EUI identifiers provide stable WWN evidence;
+// other valid identifier types are intentionally ignored.
 func parseStorageIdentifier(b []byte, off int, index uint32) (string, int, error) {
 	if off+8 > len(b) {
 		return "", 0, fmt.Errorf("truncated STORAGE_IDENTIFIER header %d", index)
@@ -293,6 +297,8 @@ func diskRecordFromDescriptor(h windows.Handle, number uint32, length uint64, q 
 	return r, nil
 }
 
+// Enumeration fails closed when safety-related topology is unavailable rather
+// than returning disks whose eligibility could be misclassified.
 func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

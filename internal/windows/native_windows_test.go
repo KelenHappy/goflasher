@@ -88,6 +88,131 @@ func TestParseStorageDeviceWWN(t *testing.T) {
 	}
 }
 
+func TestParseStorageDeviceIDs(t *testing.T) {
+	binaryWWN := storageIdentifier(1, 3, 0, []byte{0x50, 0x00, 0xc5, 0x00, 0x12, 0x34, 0x56, 0x78})
+	asciiWWN := storageIdentifier(2, 2, 0, []byte(" 5000c50012345678 "))
+	ignored := storageIdentifier(1, 3, 1, []byte{0xde, 0xad})
+
+	tests := []struct {
+		name    string
+		data    []byte
+		want    string
+		wantErr bool
+	}{
+		{name: "binary NAA", data: storageDeviceIDDescriptor(binaryWWN), want: "5000C50012345678"},
+		{name: "normalized ASCII EUI", data: storageDeviceIDDescriptor(asciiWWN), want: "5000C50012345678"},
+		{name: "ignores non-device association", data: storageDeviceIDDescriptor(ignored, binaryWWN), want: "5000C50012345678"},
+		{name: "rejects conflicting identifiers", data: storageDeviceIDDescriptor(binaryWWN, storageIdentifier(1, 3, 0, []byte{0x60, 0, 0, 0, 0, 0, 0, 1})), wantErr: true},
+		{name: "rejects short descriptor", data: make([]byte, 11), wantErr: true},
+		{name: "rejects undersized descriptor size", data: descriptorWithSize(11, 0, nil), wantErr: true},
+		{name: "rejects oversized descriptor size", data: descriptorWithSize(64, 0, nil), wantErr: true},
+		{name: "rejects missing declared entry", data: descriptorWithSize(12, 1, nil), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseStorageDeviceIDs(tt.data)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("WWN=%q error=%v, want %q error=%t", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseStorageIdentifierRejectsInvalidEntryBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "truncated header", data: make([]byte, 7)},
+		{name: "empty identifier", data: storageIdentifier(1, 3, 0, nil)},
+		{name: "truncated identifier", data: func() []byte {
+			entry := storageIdentifier(1, 3, 0, []byte{1})
+			binary.LittleEndian.PutUint16(entry[2:4], 2)
+			return entry
+		}()},
+		{name: "next overlaps identifier", data: func() []byte {
+			entry := storageIdentifier(1, 3, 0, []byte{1, 2})
+			binary.LittleEndian.PutUint16(entry[4:6], 9)
+			return entry
+		}()},
+		{name: "next exceeds buffer", data: func() []byte {
+			entry := storageIdentifier(1, 3, 0, []byte{1})
+			binary.LittleEndian.PutUint16(entry[4:6], uint16(len(entry)+1))
+			return entry
+		}()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := parseStorageIdentifier(tt.data, 0, 4); err == nil {
+				t.Fatal("invalid STORAGE_IDENTIFIER accepted")
+			}
+		})
+	}
+}
+
+func TestVolumeGUIDValidation(t *testing.T) {
+	const guid = "01234567-89ab-CDEF-0123-456789abcdef"
+	tests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "canonical mixed case", value: guid, valid: true},
+		{name: "too short", value: guid[:35]},
+		{name: "separator in wrong position", value: "0123456-789ab-CDEF-0123-456789abcdef"},
+		{name: "missing separator", value: "0123456789ab-CDEF-0123-456789abcdef"},
+		{name: "non hexadecimal byte", value: "01234567-89ab-CDEG-0123-456789abcdef"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGUID(tt.value); got != tt.valid {
+				t.Fatalf("isGUID(%q) = %t, want %t", tt.value, got, tt.valid)
+			}
+		})
+	}
+
+	volume := `\\?\Volume{` + guid + `}\`
+	if got := volumeGUID(volume); got != strings.TrimSuffix(volume, `\`) {
+		t.Fatalf("volumeGUID(%q) = %q", volume, got)
+	}
+	if got := volumeGUID(`\\?\Volume{not-a-guid}\`); got != "<unknown-volume>" {
+		t.Fatalf("invalid volume GUID exposed as %q", got)
+	}
+}
+
+func storageIdentifier(codeSet, identifierType, association byte, value []byte) []byte {
+	entry := make([]byte, 8+len(value))
+	entry[0], entry[1], entry[6] = codeSet, identifierType, association
+	binary.LittleEndian.PutUint16(entry[2:4], uint16(len(value)))
+	copy(entry[8:], value)
+	return entry
+}
+
+func storageDeviceIDDescriptor(entries ...[]byte) []byte {
+	size := 12
+	for _, entry := range entries {
+		size += len(entry)
+	}
+	descriptor := descriptorWithSize(uint32(size), uint32(len(entries)), nil)
+	for i, entry := range entries {
+		entry = append([]byte(nil), entry...)
+		if i+1 < len(entries) {
+			binary.LittleEndian.PutUint16(entry[4:6], uint16(len(entry)))
+		} else {
+			binary.LittleEndian.PutUint16(entry[4:6], 0)
+		}
+		descriptor = append(descriptor, entry...)
+	}
+	return descriptor
+}
+
+func descriptorWithSize(size, count uint32, payload []byte) []byte {
+	descriptor := make([]byte, 12, 12+len(payload))
+	binary.LittleEndian.PutUint32(descriptor[4:8], size)
+	binary.LittleEndian.PutUint32(descriptor[8:12], count)
+	return append(descriptor, payload...)
+}
+
 func TestIdentityAdmissionRequiresSerialOrWWN(t *testing.T) {
 	for _, evidence := range []windowsIdentityEvidence{{Serial: "SERIAL"}, {WWN: "5000C50012345678"}, {Serial: "SERIAL", WWN: "5000C50012345678"}} {
 		r := candidate()
