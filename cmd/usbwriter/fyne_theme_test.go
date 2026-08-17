@@ -44,4 +44,9 @@ func TestThemeModeForcesRequestedPalette(t *testing.T) {
 	if color.NRGBAModel.Convert(light) != color.NRGBAModel.Convert(wantLight) {
 		t.Errorf("light background = %v, want %v", light, wantLight)
 	}
+	foreground := newReadableTheme(themeModeLight).Color(theme.ColorNameForeground, theme.VariantDark)
+	wantForeground := theme.LightTheme().Color(theme.ColorNameForeground, theme.VariantLight)
+	if color.NRGBAModel.Convert(foreground) != color.NRGBAModel.Convert(wantForeground) {
+		t.Errorf("light foreground under dark OS variant = %v, want %v", foreground, wantForeground)
+	}
 }

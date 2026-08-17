@@ -146,7 +146,6 @@ func commandPipes(cmd *exec.Cmd) (io.WriteCloser, io.ReadCloser, error) {
 func sendRequest(cmd *exec.Cmd, in io.WriteCloser, request privilegedRequest) error {
 	data, err := json.Marshal(request)
 	if err == nil {
-		data = append(data, '\n')
 		_, err = in.Write(data)
 	}
 	if err != nil {
@@ -362,29 +361,20 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 
 const maxPrivilegedRequestBytes = 4096
 
-// readPrivilegedRequest keeps the JSON control plane bounded and separate from
-// the untrusted binary image stream. This prevents a privileged helper from
-// allocating an attacker-controlled amount of memory while decoding metadata.
+// readPrivilegedRequest bounds JSON decoding without adding a frame delimiter.
+// Delimiter-free requests remain compatible with older installed helpers,
+// which treat every byte after the JSON object as image payload. Any bytes the
+// decoder reads ahead are put back in front of the remaining payload.
 func readPrivilegedRequest(in io.Reader) (privilegedRequest, io.Reader, error) {
-	buffered := bufio.NewReaderSize(in, maxPrivilegedRequestBytes+1)
-	line, err := buffered.ReadSlice('\n')
-	if errors.Is(err, bufio.ErrBufferFull) || len(line) > maxPrivilegedRequestBytes {
-		return privilegedRequest{}, nil, errors.New("privileged request is too large")
-	}
-	if err != nil {
-		return privilegedRequest{}, nil, fmt.Errorf("invalid request frame: %w", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(line))
+	limited := &io.LimitedReader{R: in, N: maxPrivilegedRequestBytes}
+	decoder := json.NewDecoder(limited)
 	decoder.DisallowUnknownFields()
 	var req privilegedRequest
 	if err := decoder.Decode(&req); err != nil {
 		return privilegedRequest{}, nil, fmt.Errorf("invalid request: %w", err)
 	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return privilegedRequest{}, nil, errors.New("invalid request: multiple JSON values")
-	}
-	return req, buffered, nil
+	payload := io.MultiReader(decoder.Buffered(), limited, in)
+	return req, payload, nil
 }
 
 func flushAndInvalidate(target interface{ Sync() error }, invalidate func() error) error {

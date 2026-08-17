@@ -11,6 +11,7 @@ import (
 
 type readableTheme struct {
 	fyne.Theme
+	mode themeMode
 }
 
 type themeMode string
@@ -38,15 +39,21 @@ func newReadableTheme(mode themeMode) fyne.Theme {
 	case themeModeDark:
 		base = theme.DarkTheme()
 	}
-	return readableTheme{Theme: base}
+	return readableTheme{Theme: base, mode: mode}
 }
 
 func (t readableTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
-	if variant == theme.VariantDark {
+	effectiveVariant := variant
+	if t.mode == themeModeLight {
+		effectiveVariant = theme.VariantLight
+	} else if t.mode == themeModeDark {
+		effectiveVariant = theme.VariantDark
+	}
+	if effectiveVariant == theme.VariantDark {
 		switch name {
 		case theme.ColorNameForeground, theme.ColorNameDisabled, theme.ColorNamePlaceHolder:
 			return color.White
 		}
 	}
-	return t.Theme.Color(name, variant)
+	return t.Theme.Color(name, effectiveVariant)
 }
