@@ -110,14 +110,14 @@ jobs:
         run: |
           mkdir -p dist
           go build -trimpath -tags fyne -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
-          packaging/make-deb.sh dist/goflasher 0.0.0-ci dist
+          packaging/make-deb.sh dist/goflasher 0.0.0-ci_build dist
           packaging/make-rpm.sh dist/goflasher 0.0.0-ci dist
           packaging/make-arch.sh dist/goflasher 0.0.0-ci dist
-          test -f dist/goflasher_0.0.0-ci_amd64.deb
+          test -f dist/goflasher_0.0.0-ci.build_amd64.deb
           rpm_path=$(find dist -maxdepth 1 -name 'goflasher-0.0.0_ci-1*.rpm' -print -quit)
           test -n "$rpm_path"
-          dpkg-deb --contents dist/goflasher_0.0.0-ci_amd64.deb | grep -F THIRD_PARTY_NOTICES.md
-          dpkg-deb --contents dist/goflasher_0.0.0-ci_amd64.deb | grep -F github.com_ulikunitz_xz_LICENSE
+          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F THIRD_PARTY_NOTICES.md
+          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F github.com_ulikunitz_xz_LICENSE
           rpm -qlp "$rpm_path" | grep -F THIRD_PARTY_NOTICES.md
           rpm -qlp "$rpm_path" | grep -F github.com_ulikunitz_xz_LICENSE
           arch_path=dist/goflasher-0.0.0_ci-1-x86_64.pkg.tar.zst
