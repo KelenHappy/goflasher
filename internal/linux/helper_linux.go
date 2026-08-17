@@ -70,14 +70,36 @@ func newCommandHelper() privilegedHelper {
 	if err != nil {
 		executable = helperExecutable
 	}
+	// Only existence and an exec bit are checked, not a hash or signature.
+	// App-level integrity verification here would be theater: the helper lives at
+	// a root-owned path, so an attacker able to replace it is already root and
+	// could equally patch any expected-hash baked into this unprivileged binary.
+	// Integrity is instead owned by the package manager (rpm -V / dpkg --verify)
+	// and, on macOS, codesign of the separately signed helper.
 	for _, candidate := range helperCandidates(executable, os.Getenv("APPDIR")) {
 		if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
 			return &commandHelper{executable: candidate}
 		}
 	}
+	// Last-resort fallback: re-exec this binary as the privileged helper. This
+	// runs the whole GUI binary as root under pkexec, a larger attack surface
+	// than the dedicated helper (dispatchEmbeddedHelper returns before any GUI
+	// init, but imported packages' init() still run as root). Every packaged
+	// build (deb/rpm/arch/AppImage) ships the standalone cmd/goflasher-helper at
+	// /usr/libexec, tried first above, so this path is reached only by a bare GUI
+	// binary with no accompanying helper — not by any shipped artifact.
 	return &commandHelper{executable: executable, arguments: []string{embeddedHelperArgument}}
 }
 
+// helperCandidates picks which binary the GUI hands to pkexec. This selection
+// is a convenience/packaging concern, NOT a security boundary. It runs entirely
+// in the unprivileged GUI before pkexec, so APPDIR (used only for AppImage
+// layouts) grants no capability an attacker who already controls this process
+// lacks — such an attacker could invoke pkexec directly. The privilege boundary
+// is the root helper, which trusts nothing in the request: it re-derives the
+// device from the kernel major/minor and rebinds via fstat(fd) in
+// validateOpenedDevice. The fixed /usr/libexec path is tried first, so on a
+// normal install the APPDIR/relative candidates are never reached.
 func helperCandidates(executable, appDir string) []string {
 	candidates := []string{helperExecutable}
 	if appDir != "" {
@@ -562,6 +584,12 @@ func validateDeviceSafety(env helperEnvironment, name string, major, minor uint3
 	return validateDeviceNode(env, name, major, minor)
 }
 
+// validateDeviceNode is a best-effort pre-open fail-fast check, NOT a security
+// boundary. It stats a path, so a TOCTOU swap of /dev/<name> between this Stat
+// and the subsequent open() is possible. That window is harmless because the
+// authoritative decision runs post-open in validateOpenedDevice via fstat(fd),
+// which rebinds to the actual kernel object before any write or ioctl. Do not
+// rely on this function alone for authorization.
 func validateDeviceNode(env helperEnvironment, name string, major, minor uint32) error {
 	node := filepath.Join(env.DevRoot, name)
 	var st syscall.Stat_t

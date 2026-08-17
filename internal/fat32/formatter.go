@@ -176,6 +176,10 @@ func sectorsPerCluster(size uint64) uint64 {
 		return 64
 	}
 }
+// fatLabel writes into a fixed 11-byte, space-padded field. copy() bounds the
+// write to min(11, len(label)), so even if ValidLabel is ever loosened, an
+// over-long or arbitrary-byte label cannot overflow this field — the worst case
+// is a spec-nonconformant label, not a memory-safety or injection issue.
 func fatLabel(label string) []byte { v := []byte("           "); copy(v, label); return v }
 func bootSector(total, fatSectors uint32, spc byte, label string) []byte {
 	b := make([]byte, 512)

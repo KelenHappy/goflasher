@@ -17,6 +17,10 @@ var (
 
 // Target is selection evidence, not a raw locator. In particular it has no
 // pathname field: the helper must re-enumerate and resolve the current node.
+// The boolean claims below (Whole, Removable, External, NonSystem, USB) are
+// asserted by the untrusted client, not verified facts. The helper must
+// independently confirm each property against the resolved device before
+// authorizing any destructive operation; it must never trust them as-is.
 type Target struct {
 	ID, RegistryID, MediaID, TransportSerial   string
 	Capacity                                   uint64
@@ -30,6 +34,13 @@ type Request struct {
 	Verify, Eject bool
 }
 
+// Validate is a well-formedness check on the request, NOT a security boundary.
+// It confirms the protocol version, a supported operation, and that the client
+// has supplied the required fields — including asserting the Target's safety
+// booleans are all true. It does NOT establish that the device actually has
+// those properties: the booleans are client claims. Authorization must re-derive
+// and re-verify the device on the privileged helper side (as the Linux helper
+// does via kernel major/minor and fstat) before any destructive operation.
 func (r Request) Validate() error {
 	if r.Version != ProtocolVersion {
 		return fmt.Errorf("%w: got %d, want %d", ErrIncompatible, r.Version, ProtocolVersion)

@@ -49,9 +49,41 @@ func NewBackend() *Backend { return NewBackendWithManager(disk.NewManager()) }
 func NewBackendWithManager(manager disk.Manager) *Backend {
 	return &Backend{manager: manager, openRaw: openRawFile, openFormat: openFormatTarget}
 }
-func openRawFile(path string, flag int) (*os.File, error) { return os.OpenFile(path, flag, 0) }
+// exclusiveLockFlags requests a non-blocking advisory exclusive open lock for
+// writes. O_EXLOCK coordinates with DiskArbitration and Apple's own disk tools
+// (newfs, diskutil, hdiutil) so they do not auto-mount or write metadata to the
+// just-unmounted device mid-operation; O_NONBLOCK makes the open fail fast with
+// EAGAIN instead of blocking (os.OpenFile ignores context, so a blocking open
+// would defeat formatTimeout), which we surface as ErrDeviceBusy. The lock is
+// advisory — it coordinates with cooperating openers, it is NOT a security
+// boundary. The authoritative post-open check remains validateOpenedDisk.
+const exclusiveLockFlags = syscall.O_EXLOCK | syscall.O_NONBLOCK
+
+// ErrDeviceBusy reports that the raw device could not be opened exclusively
+// because another process holds it.
+var ErrDeviceBusy = errors.New("device is busy")
+
+func openRawFile(path string, flag int) (*os.File, error) {
+	// Only writers need exclusivity; read-back opens must not contend with the
+	// preceding write/format on the same device.
+	if flag&syscall.O_ACCMODE != os.O_RDONLY {
+		flag |= exclusiveLockFlags
+	}
+	return openLocked(path, flag)
+}
 func openFormatTarget(path string) (formatTarget, error) {
-	return os.OpenFile(path, os.O_RDWR|syscall.O_CLOEXEC, 0)
+	f, err := openLocked(path, os.O_RDWR|syscall.O_CLOEXEC|exclusiveLockFlags)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+func openLocked(path string, flag int) (*os.File, error) {
+	f, err := os.OpenFile(path, flag, 0)
+	if err != nil && errors.Is(err, syscall.EAGAIN) {
+		return nil, fmt.Errorf("%w: %w", ErrDeviceBusy, err)
+	}
+	return f, err
 }
 
 func deviceFromDisk(d disk.Disk) device.Device {
