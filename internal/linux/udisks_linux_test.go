@@ -80,14 +80,7 @@ func TestUDisksOperationsUseDirectDBusClient(t *testing.T) {
 
 func requirePaths(t *testing.T, operation string, paths []string, want ...string) {
 	t.Helper()
-	if len(paths) != len(want) {
-		t.Fatalf("%s device count = %d, want %d: %#v", operation, len(paths), len(want), paths)
-	}
-	for i := range want {
-		if paths[i] != want[i] {
-			t.Fatalf("%s devices = %q, want %q", operation, paths, want)
-		}
-	}
+	requireSameStrings(t, operation+" devices", paths, want)
 }
 
 func assertFormatRequest(t *testing.T, requests []privilegedRequest, label string) {

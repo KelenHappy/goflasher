@@ -64,9 +64,7 @@ func assertMountedFlashMetadata(t *testing.T, flash device.Device) {
 	if len(flash.MountPoints) != 2 {
 		t.Fatalf("flash mount points = %q, want two: %+v", flash.MountPoints, flash)
 	}
-	if flash.MountPoints[0] != "/media/My USB" || flash.MountPoints[1] != "/media/Backup" {
-		t.Fatalf("flash mount points = %q, want [/media/My USB /media/Backup]", flash.MountPoints)
-	}
+	requireSameStrings(t, "flash mount points", flash.MountPoints, []string{"/media/My USB", "/media/Backup"})
 }
 
 func TestSmallGenericUSBStorageFallback(t *testing.T) {
