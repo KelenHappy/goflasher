@@ -138,22 +138,18 @@ func sameWindowsIdentity(a, b windowsIdentityEvidence) bool {
 // Conflicting WWNs are rejected because choosing one based on descriptor order
 // would make the device identity unstable.
 func parseStorageDeviceIDs(b []byte) (string, error) {
-	if len(b) < 12 {
-		return "", fmt.Errorf("short STORAGE_DEVICE_ID_DESCRIPTOR: got %d bytes", len(b))
-	}
-	size := binary.LittleEndian.Uint32(b[4:8])
-	count := binary.LittleEndian.Uint32(b[8:12])
-	if size < 12 || uint64(size) > uint64(len(b)) {
-		return "", fmt.Errorf("invalid STORAGE_DEVICE_ID_DESCRIPTOR size %d for %d bytes", size, len(b))
+	descriptor, count, err := parseStorageDeviceIDDescriptor(b)
+	if err != nil {
+		return "", err
 	}
 	off := 12
 	var found string
 	for i := uint32(0); i < count; i++ {
-		value, next, err := parseStorageIdentifier(b[:size], off, i)
+		value, next, err := parseStorageIdentifier(descriptor, off, i)
 		if err != nil {
 			return "", err
 		}
-		if found != "" && value != "" && found != value {
+		if identifiersConflict(found, value) {
 			return "", errors.New("conflicting WWN identifiers")
 		}
 		if value != "" {
@@ -170,6 +166,21 @@ func parseStorageDeviceIDs(b []byte) (string, error) {
 	return found, nil
 }
 
+func parseStorageDeviceIDDescriptor(b []byte) ([]byte, uint32, error) {
+	if len(b) < 12 {
+		return nil, 0, fmt.Errorf("short STORAGE_DEVICE_ID_DESCRIPTOR: got %d bytes", len(b))
+	}
+	size := binary.LittleEndian.Uint32(b[4:8])
+	if size < 12 || uint64(size) > uint64(len(b)) {
+		return nil, 0, fmt.Errorf("invalid STORAGE_DEVICE_ID_DESCRIPTOR size %d for %d bytes", size, len(b))
+	}
+	return b[:size], binary.LittleEndian.Uint32(b[8:12]), nil
+}
+
+func identifiersConflict(found, value string) bool {
+	return found != "" && value != "" && found != value
+}
+
 // Only device-associated NAA and EUI identifiers provide stable WWN evidence;
 // other valid identifier types are intentionally ignored.
 func parseStorageIdentifier(b []byte, off int, index uint32) (string, int, error) {
@@ -178,13 +189,13 @@ func parseStorageIdentifier(b []byte, off int, index uint32) (string, int, error
 	}
 	idSize := int(binary.LittleEndian.Uint16(b[off+2 : off+4]))
 	next := int(binary.LittleEndian.Uint16(b[off+4 : off+6]))
-	if idSize < 1 || off+8+idSize > len(b) {
+	if !identifierFits(b, off, idSize) {
 		return "", 0, fmt.Errorf("truncated STORAGE_IDENTIFIER entry %d", index)
 	}
-	if next != 0 && (next < 8+idSize || off+next > len(b)) {
+	if !validIdentifierNextOffset(b, off, idSize, next) {
 		return "", 0, fmt.Errorf("invalid STORAGE_IDENTIFIER next offset %d", next)
 	}
-	if b[off+6] != 0 || (b[off+1] != 2 && b[off+1] != 3) {
+	if !stableStorageIdentifier(b[off+1], b[off+6]) {
 		return "", next, nil
 	}
 	raw := b[off+8 : off+8+idSize]
@@ -196,6 +207,18 @@ func parseStorageIdentifier(b []byte, off int, index uint32) (string, int, error
 	default:
 		return "", next, nil
 	}
+}
+
+func identifierFits(b []byte, off, size int) bool {
+	return size > 0 && off+8+size <= len(b)
+}
+
+func validIdentifierNextOffset(b []byte, off, size, next int) bool {
+	return next == 0 || next >= 8+size && off+next <= len(b)
+}
+
+func stableStorageIdentifier(codeSet, association byte) bool {
+	return association == 0 && (codeSet == 2 || codeSet == 3)
 }
 
 func storageWWN(h windows.Handle) (string, error) {
@@ -308,6 +331,10 @@ func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
 		return nil, fmt.Errorf("%w: identify Windows system disk: %w", ErrSystemTopologyUnavailable, err)
 	}
 	pnp, _ := setupDisks()
+	return enumerateDiskRecords(ctx, systems, pnp)
+}
+
+func enumerateDiskRecords(ctx context.Context, systems map[uint32]bool, pnp map[uint32]pnpDisk) ([]diskRecord, error) {
 	var out []diskRecord
 	for i := uint32(0); i < 256; i++ {
 		r, found, err := inspectDiskNumber(ctx, i)
@@ -317,18 +344,25 @@ func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
 		if !found {
 			continue
 		}
-		r.IsSystemDisk = systems[i]
-		if p, ok := pnp[i]; ok {
-			r.SysfsPath, r.devInst = p.instance, p.devInst
-			r.usbAncestor = r.usbAncestor || p.usb
-		}
-		r.Mounted, err = diskHasVolume(i)
+		p, hasPnP := pnp[i]
+		r, err = completeDiskRecord(r, systems[i], p, hasPnP)
 		if err != nil {
 			return nil, fmt.Errorf("determine mounted state for PhysicalDrive%d: %w", i, err)
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+func completeDiskRecord(r diskRecord, system bool, pnp pnpDisk, hasPnP bool) (diskRecord, error) {
+	r.IsSystemDisk = system
+	if hasPnP {
+		r.SysfsPath, r.devInst = pnp.instance, pnp.devInst
+		r.usbAncestor = r.usbAncestor || pnp.usb
+	}
+	mounted, err := diskHasVolume(r.deviceNumber)
+	r.Mounted = mounted
+	return r, err
 }
 
 func inspectDiskNumber(ctx context.Context, number uint32) (diskRecord, bool, error) {
@@ -506,8 +540,7 @@ func (a *winAPI) eject(ctx context.Context, r diskRecord) error {
 	return ioctl(h, ioctlStorageEjectMedia, nil)
 }
 
-// SetupAPI supplies PnP identity and topology; cfgmgr32 walks parents and
-// requests safe removal without WMI or an external process.
+// Native PnP APIs avoid relying on WMI or an external process.
 var (
 	setupapi            = windows.NewLazySystemDLL("setupapi.dll")
 	setupGetClassDevs   = setupapi.NewProc("SetupDiGetClassDevsW")
@@ -721,9 +754,17 @@ func isGUID(s string) bool {
 }
 
 func validGUIDByte(index int, value byte) bool {
-	if index == 8 || index == 13 || index == 18 || index == 23 {
+	if isGUIDSeparator(index) {
 		return value == '-'
 	}
+	return isHexByte(value)
+}
+
+func isGUIDSeparator(index int) bool {
+	return index == 8 || index == 13 || index == 18 || index == 23
+}
+
+func isHexByte(value byte) bool {
 	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
@@ -842,11 +883,15 @@ func systemDiskNumbers() (map[uint32]bool, error) {
 }
 
 func validSystemRoot(root string) bool {
-	if len(root) < 3 || root[1] != ':' || root[2] != '\\' && root[2] != '/' {
-		return false
-	}
-	letter := root[0]
-	return letter >= 'A' && letter <= 'Z' || letter >= 'a' && letter <= 'z'
+	return len(root) >= 3 && isDriveLetter(root[0]) && root[1] == ':' && isPathSeparator(root[2])
+}
+
+func isDriveLetter(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isPathSeparator(value byte) bool {
+	return value == '\\' || value == '/'
 }
 
 func (a *winAPI) formatFAT32(ctx context.Context, r diskRecord, label string, updates chan<- progress.Update) error {
