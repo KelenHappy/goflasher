@@ -88,7 +88,7 @@ const languagePreference = "language"
 
 func newGUIController(tr i18n.Localizer) *guiController {
 	a := app.NewWithID("org.goflasher.usbwriter")
-	a.Settings().SetTheme(newReadableTheme())
+	a.Settings().SetTheme(newReadableTheme(loadThemeMode(a.Preferences())))
 	if saved := a.Preferences().String(languagePreference); saved != "" {
 		tr = i18n.New(saved)
 	}
@@ -167,21 +167,47 @@ func (c *guiController) closeNow() {
 }
 
 func (c *guiController) showSettings() {
-	languages := []string{"English", "繁體中文", "简体中文", "日本語"}
-	locales := map[string]i18n.Locale{"English": i18n.English, "繁體中文": i18n.TraditionalChinese, "简体中文": i18n.SimplifiedChinese, "日本語": i18n.Japanese}
-	selected := widget.NewSelect(languages, func(name string) {
-		locale := locales[name]
+	languages := []settingChoice[i18n.Locale]{{"English", i18n.English}, {"繁體中文", i18n.TraditionalChinese}, {"简体中文", i18n.SimplifiedChinese}, {"日本語", i18n.Japanese}}
+	language := newSettingSelect(languages, c.tr.Locale(), func(locale i18n.Locale) {
 		c.app.Preferences().SetString(languagePreference, string(locale))
 		c.setLanguage(locale)
 	})
-	for name, locale := range locales {
-		if locale == c.tr.Locale() {
-			selected.SetSelected(name)
-			break
+	themes := []settingChoice[themeMode]{{c.tr.T("settings.theme.system"), themeModeSystem}, {c.tr.T("settings.theme.light"), themeModeLight}, {c.tr.T("settings.theme.dark"), themeModeDark}}
+	themeSelect := newSettingSelect(themes, loadThemeMode(c.app.Preferences()), c.setTheme)
+	content := container.NewGridWithColumns(2,
+		widget.NewLabel(c.tr.T("settings.language")), language,
+		widget.NewLabel(c.tr.T("settings.theme")), themeSelect,
+	)
+	dialog.NewCustom(c.tr.T("settings.title"), c.tr.T("settings.close"), content, c.view.window).Show()
+}
+
+// settingChoice and newSettingSelect keep presentation labels separate from
+// persisted typed values. New settings can reuse this without JSON parsing or
+// allowing unvalidated configuration to reach privileged operations.
+type settingChoice[T comparable] struct {
+	label string
+	value T
+}
+
+func newSettingSelect[T comparable](choices []settingChoice[T], current T, changed func(T)) *widget.Select {
+	labels := make([]string, len(choices))
+	values := make(map[string]T, len(choices))
+	selected := ""
+	for i, choice := range choices {
+		labels[i] = choice.label
+		values[choice.label] = choice.value
+		if choice.value == current {
+			selected = choice.label
 		}
 	}
-	content := container.NewBorder(nil, nil, widget.NewLabel(c.tr.T("settings.language")), nil, selected)
-	dialog.NewCustom(c.tr.T("settings.title"), c.tr.T("settings.close"), content, c.view.window).Show()
+	control := widget.NewSelect(labels, func(label string) { changed(values[label]) })
+	control.SetSelected(selected)
+	return control
+}
+
+func (c *guiController) setTheme(mode themeMode) {
+	c.app.Preferences().SetString(themePreference, string(mode))
+	c.app.Settings().SetTheme(newReadableTheme(mode))
 }
 
 func (c *guiController) setLanguage(locale i18n.Locale) {

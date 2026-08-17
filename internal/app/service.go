@@ -45,35 +45,18 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 }
 
 func (s *Service) runWorkflow(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (out RunResult, err error) {
-	if info.UncompressedSize == 0 || info.SHA256 == "" {
-		info, err = image.InspectContext(ctx, info)
-		if err != nil {
-			return out, err
-		}
+	info, err = inspectImage(ctx, info)
+	if err != nil {
+		return out, err
 	}
 	if info.UncompressedSize > target.Size {
 		return out, writer.ErrTargetTooSmall
 	}
-	if err = s.State.Transition(Unmounting); err != nil {
+	if err = s.unmountDevice(ctx, target); err != nil {
 		return out, err
 	}
-	if err = s.Backend.Unmount(ctx, target); err != nil {
-		return out, err
-	}
-	// Windows keeps dismounted-volume handles across writer close, flush,
-	// verification, and eject. Release them only when the complete operation
-	// leaves this scope.
-	var releaseDevice func() error
-	if releaser, ok := s.Backend.(interface{ ReleaseDevice(device.Device) error }); ok {
-		releaseDevice = func() error { return releaser.ReleaseDevice(target) }
-		defer func() {
-			if releaseDevice != nil {
-				if releaseErr := releaseDevice(); releaseErr != nil {
-					err = errors.Join(err, fmt.Errorf("release device: %w", releaseErr))
-				}
-			}
-		}()
-	}
+	releaseDevice := newDeviceRelease(s.Backend, target)
+	defer func() { err = errors.Join(err, releaseDevice()) }()
 	if err = s.writeImage(ctx, info, target, updates, &out); err != nil {
 		return out, err
 	}
@@ -83,17 +66,44 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 	if err = s.ejectDevice(ctx, target, opts.Eject, updates, &out); err != nil {
 		return out, err
 	}
-	if releaseDevice != nil {
-		releaseErr := releaseDevice()
-		releaseDevice = nil
-		if releaseErr != nil {
-			return out, fmt.Errorf("release device: %w", releaseErr)
-		}
+	if err = releaseDevice(); err != nil {
+		return out, err
 	}
 	if err = s.State.Transition(Completed); err != nil {
 		return out, err
 	}
 	return out, nil
+}
+
+func inspectImage(ctx context.Context, info image.Info) (image.Info, error) {
+	if info.UncompressedSize > 0 && info.SHA256 != "" {
+		return info, nil
+	}
+	return image.InspectContext(ctx, info)
+}
+
+func (s *Service) unmountDevice(ctx context.Context, target device.Device) error {
+	if err := s.State.Transition(Unmounting); err != nil {
+		return err
+	}
+	return s.Backend.Unmount(ctx, target)
+}
+
+// newDeviceRelease returns an idempotent cleanup function. Windows keeps
+// dismounted-volume handles across writer close, flush, verification, and
+// eject, so the service releases them only when the entire workflow finishes.
+func newDeviceRelease(backend device.Backend, target device.Device) func() error {
+	releaser, ok := backend.(interface{ ReleaseDevice(device.Device) error })
+	return func() error {
+		if !ok {
+			return nil
+		}
+		ok = false
+		if err := releaser.ReleaseDevice(target); err != nil {
+			return fmt.Errorf("release device: %w", err)
+		}
+		return nil
+	}
 }
 
 func (s *Service) writeImage(ctx context.Context, info image.Info, target device.Device, updates chan<- progress.Update, out *RunResult) error {
@@ -109,16 +119,25 @@ func (s *Service) writeImage(ctx context.Context, info image.Info, target device
 	if err != nil {
 		return err
 	}
+	writeStage := imageWriteStage(info)
+	result, writeErr := writer.Copy(ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: target.Size, Progress: updates, WriteStage: writeStage})
+	return s.finishWrite(ctx, target, info.SHA256, dst, result, writeErr, updates, out)
+}
+
+func imageWriteStage(info image.Info) progress.Stage {
 	writeStage := progress.StageWriting
 	if info.Compression != image.CompressionNone {
 		writeStage = progress.StageDecompressWriting
 	}
-	wr, writeErr := writer.Copy(ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: target.Size, Progress: updates, WriteStage: writeStage})
+	return writeStage
+}
+
+func (s *Service) finishWrite(ctx context.Context, target device.Device, expectedSHA256 string, dst interface{ Close() error }, result writer.Result, writeErr error, updates chan<- progress.Update, out *RunResult) error {
 	// Some backends perform the durability sync while closing the writer. Move
 	// the UI to Flushing before Close so that a slow USB device does not appear
 	// frozen at 100% writing while its cached data is committed.
 	if writeErr == nil {
-		if err = s.State.Transition(Flushing); err != nil {
+		if err := s.State.Transition(Flushing); err != nil {
 			_ = dst.Close()
 			return err
 		}
@@ -128,15 +147,15 @@ func (s *Service) writeImage(ctx context.Context, info image.Info, target device
 	if writeErr != nil {
 		return writeErr
 	}
-	out.BytesWritten = wr.BytesWritten
-	out.SourceSHA256 = wr.SHA256
+	out.BytesWritten = result.BytesWritten
+	out.SourceSHA256 = result.SHA256
 	if closeErr != nil {
 		return closeErr
 	}
-	if wr.SHA256 != info.SHA256 {
+	if result.SHA256 != expectedSHA256 {
 		return fmt.Errorf("%w: checksum no longer matches inspected image", writer.ErrSourceChanged)
 	}
-	if err = s.Backend.Flush(ctx, target); err != nil {
+	if err := s.Backend.Flush(ctx, target); err != nil {
 		return fmt.Errorf("flush: %w", err)
 	}
 	return nil

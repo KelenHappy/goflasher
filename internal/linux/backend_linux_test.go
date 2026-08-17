@@ -315,19 +315,36 @@ func TestWriteProtocolPreservesBufferedBinaryPayloadAndSyncs(t *testing.T) {
 	requireNoError(t, err)
 	_, err = wire.Write(requestData)
 	requireNoError(t, err)
+	requireNoError(t, wire.WriteByte('\n'))
 	_, err = wire.Write(payload)
 	requireNoError(t, err)
 
-	decoder := json.NewDecoder(strings.NewReader(wire.String()))
-	var decoded privilegedRequest
-	requireNoError(t, decoder.Decode(&decoded))
+	decoded, remaining, err := readPrivilegedRequest(strings.NewReader(wire.String()))
+	requireNoError(t, err)
+	if decoded != request {
+		t.Fatalf("decoded request = %#v, want %#v", decoded, request)
+	}
 	target := &syncBuffer{}
-	requireNoError(t, writeAndSync(target, decoder.Buffered(), strings.NewReader("")))
+	requireNoError(t, writeAndSync(target, remaining))
 	if got := []byte(target.String()); !bytes.Equal(got, payload) {
 		t.Fatalf("written payload = %x, want %x", got, payload)
 	}
 	if !target.synced {
 		t.Fatal("write completed without syncing the target descriptor")
+	}
+}
+
+func TestPrivilegedRequestFrameIsBounded(t *testing.T) {
+	request := strings.Repeat("x", maxPrivilegedRequestBytes+1) + "\n"
+	if _, _, err := readPrivilegedRequest(strings.NewReader(request)); err == nil {
+		t.Fatal("oversized privileged request was accepted")
+	}
+}
+
+func TestPrivilegedRequestRejectsMultipleJSONValues(t *testing.T) {
+	request := `{"identity":"SERIAL","major":8,"minor":32,"capacity":1,"mode":"write"} {}\n`
+	if _, _, err := readPrivilegedRequest(strings.NewReader(request)); err == nil {
+		t.Fatal("multiple privileged request values were accepted")
 	}
 }
 

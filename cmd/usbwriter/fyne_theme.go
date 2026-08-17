@@ -13,8 +13,32 @@ type readableTheme struct {
 	fyne.Theme
 }
 
-func newReadableTheme() fyne.Theme {
-	return readableTheme{Theme: theme.DefaultTheme()}
+type themeMode string
+
+const (
+	themeModeSystem themeMode = "system"
+	themeModeLight  themeMode = "light"
+	themeModeDark   themeMode = "dark"
+	themePreference           = "theme"
+)
+
+func loadThemeMode(preferences fyne.Preferences) themeMode {
+	mode := themeMode(preferences.String(themePreference))
+	if mode != themeModeLight && mode != themeModeDark {
+		return themeModeSystem
+	}
+	return mode
+}
+
+func newReadableTheme(mode themeMode) fyne.Theme {
+	base := theme.DefaultTheme()
+	switch mode {
+	case themeModeLight:
+		base = theme.LightTheme()
+	case themeModeDark:
+		base = theme.DarkTheme()
+	}
+	return readableTheme{Theme: base}
 }
 
 func (t readableTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
