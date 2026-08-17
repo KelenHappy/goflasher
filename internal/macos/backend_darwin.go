@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/goflasher/goflasher/internal/device"
@@ -32,11 +33,14 @@ const formatTimeout = 10 * time.Minute
 type formatTarget interface {
 	fat32.Device
 	io.Closer
+	Fd() uintptr
 }
 type Backend struct {
 	manager    disk.Manager
 	openRaw    func(string, int) (*os.File, error)
 	openFormat func(string) (formatTarget, error)
+	fstat      func(int, *syscall.Stat_t) error
+	stat       func(string, *syscall.Stat_t) error
 }
 
 var _ device.Backend = (*Backend)(nil)
@@ -46,7 +50,9 @@ func NewBackendWithManager(manager disk.Manager) *Backend {
 	return &Backend{manager: manager, openRaw: openRawFile, openFormat: openFormatTarget}
 }
 func openRawFile(path string, flag int) (*os.File, error) { return os.OpenFile(path, flag, 0) }
-func openFormatTarget(path string) (formatTarget, error)  { return os.OpenFile(path, os.O_RDWR, 0) }
+func openFormatTarget(path string) (formatTarget, error) {
+	return os.OpenFile(path, os.O_RDWR|syscall.O_CLOEXEC, 0)
+}
 
 func deviceFromDisk(d disk.Disk) device.Device {
 	n, _ := wholeDiskNumber(strings.TrimPrefix(d.Device, "/dev/r"))
@@ -110,7 +116,43 @@ func (b *Backend) open(ctx context.Context, selected device.Device, flag int) (*
 	if opener == nil {
 		opener = openRawFile
 	}
-	return opener(d.Device, flag)
+	f, err := opener(d.Device, flag|syscall.O_CLOEXEC)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.validateOpenedDisk(ctx, d, f.Fd()); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// validateOpenedDisk ties the refreshed IOKit identity to the kernel object
+// referenced by fd. Raw Darwin disk nodes are character devices; matching the
+// fd's rdev to the freshly authorized BSD node prevents path replacement with
+// a different device number between refresh and open.
+func (b *Backend) validateOpenedDisk(ctx context.Context, authorized disk.Disk, fd uintptr) error {
+	fstat := b.fstat
+	if fstat == nil {
+		fstat = syscall.Fstat
+	}
+	var opened syscall.Stat_t
+	if err := fstat(int(fd), &opened); err != nil || opened.Mode&syscall.S_IFMT != syscall.S_IFCHR {
+		return ErrDeviceChanged
+	}
+	fresh, err := b.manager.Refresh(ctx, authorized.ID)
+	if err != nil || fresh.Mounted || !deviceFromDisk(fresh).IsAllowed || !disk.SameIdentity(authorized, fresh) {
+		return ErrDeviceChanged
+	}
+	stat := b.stat
+	if stat == nil {
+		stat = syscall.Stat
+	}
+	var node syscall.Stat_t
+	if err := stat(fresh.Device, &node); err != nil || node.Mode&syscall.S_IFMT != syscall.S_IFCHR || node.Rdev != opened.Rdev {
+		return ErrDeviceChanged
+	}
+	return nil
 }
 func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
 	return b.open(ctx, d, os.O_WRONLY)
@@ -149,7 +191,7 @@ func (b *Backend) FormatFAT32(ctx context.Context, selected device.Device, label
 	if err = b.manager.Unmount(ctx, d); err != nil {
 		return err
 	}
-	d, err = b.manager.Refresh(ctx, d.ID)
+	d, err = b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return err
 	}
@@ -165,6 +207,9 @@ func (b *Backend) FormatFAT32(ctx context.Context, selected device.Device, label
 		return fmt.Errorf("format FAT32: %w", err)
 	}
 	defer target.Close()
+	if err = b.validateOpenedDisk(ctx, d, target.Fd()); err != nil {
+		return fmt.Errorf("format FAT32: %w", err)
+	}
 	if err = fat32.Format(ctx, target, d.Size, label, func(percent uint64) {
 		if updates != nil {
 			select {

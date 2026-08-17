@@ -218,7 +218,7 @@ func TestServiceCancellationBeforeDestructiveWork(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsSourceChecksumChangedAfterInspection(t *testing.T) {
+func TestServiceRejectsMismatchedInspectedChecksumBeforeWrite(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.img")
 	target := filepath.Join(dir, "target")
@@ -229,7 +229,10 @@ func TestServiceRejectsSourceChecksumChangedAfterInspection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info.UncompressedSize = uint64(len(payload))
+	info, err = image.Inspect(info)
+	if err != nil {
+		t.Fatal(err)
+	}
 	info.SHA256 = strings.Repeat("0", 64)
 	d := device.Device{ID: "test", Path: target, Size: uint64(len(payload)), IsAllowed: true}
 	backend := &fileBackend{path: target, d: d}
@@ -240,14 +243,32 @@ func TestServiceRejectsSourceChecksumChangedAfterInspection(t *testing.T) {
 		}
 	}
 	result, err := (&Service{Backend: backend, State: states}).Run(context.Background(), info, d, RunOptions{}, nil)
-	if !errors.Is(err, writer.ErrSourceChanged) {
-		t.Errorf("error = %v, want %v", err, writer.ErrSourceChanged)
+	if err == nil {
+		t.Fatal("mismatched inspected checksum was accepted")
 	}
-	if result.BytesWritten != uint64(len(payload)) {
-		t.Errorf("bytes written = %d, want %d", result.BytesWritten, len(payload))
+	if result.BytesWritten != 0 {
+		t.Errorf("bytes written = %d, want 0", result.BytesWritten)
 	}
-	if backend.flushed {
-		t.Error("backend flushed a changed source")
+	if backend.unmounted || backend.flushed {
+		t.Error("target was prepared for a changed source")
+	}
+}
+
+func TestServiceRejectsRetainedSourceChangeBeforeUnmount(t *testing.T) {
+	fixture := newFileServiceFixture(t, []byte("original image"), 2)
+	inspected, err := image.Inspect(fixture.info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(fixture.info.Path, 1); err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.Run(context.Background(), inspected, fixture.device, RunOptions{}, nil)
+	if err == nil {
+		t.Fatal("changed retained source was accepted")
+	}
+	if fixture.backend.unmounted {
+		t.Fatal("target was unmounted before changed source was rejected")
 	}
 }
 

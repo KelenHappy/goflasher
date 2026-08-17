@@ -49,8 +49,12 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 	if err != nil {
 		return out, err
 	}
+	defer func() { err = errors.Join(err, info.CloseSource()) }()
 	if info.UncompressedSize > target.Size {
 		return out, writer.ErrTargetTooSmall
+	}
+	if err = info.VerifySourceContext(ctx); err != nil {
+		return out, err
 	}
 	if err = s.unmountDevice(ctx, target); err != nil {
 		return out, err
@@ -76,7 +80,7 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 }
 
 func inspectImage(ctx context.Context, info image.Info) (image.Info, error) {
-	if info.UncompressedSize > 0 && info.SHA256 != "" {
+	if info.UncompressedSize > 0 && info.SHA256 != "" && info.HasRetainedSource() {
 		return info, nil
 	}
 	return image.InspectContext(ctx, info)

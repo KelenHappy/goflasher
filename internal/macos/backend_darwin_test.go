@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/goflasher/goflasher/internal/disk"
@@ -14,6 +16,53 @@ import (
 type fakeManager struct {
 	current          disk.Disk
 	unmounts, ejects int
+}
+
+func TestRawOpenBindsFDToAuthorizedDarwinDisk(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		openedRdev int32
+		mutate     func(*fakeManager)
+		ok         bool
+	}{
+		{name: "normal", openedRdev: 7, ok: true},
+		{name: "rdisk node reused", openedRdev: 8},
+		{name: "registry identity changed", openedRdev: 7, mutate: func(m *fakeManager) { m.current.RegistryID = "replacement" }},
+		{name: "selected disk disappeared", openedRdev: 7, mutate: func(m *fakeManager) { m.current = disk.Disk{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &fakeManager{current: safeDisk()}
+			m.current.Mounted = false
+			m.current.MountPoints = nil
+			selected := deviceFromDisk(m.current)
+			b := NewBackendWithManager(m)
+			path := filepath.Join(t.TempDir(), "raw")
+			if err := os.WriteFile(path, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			b.openRaw = func(string, int) (*os.File, error) {
+				if tc.mutate != nil {
+					tc.mutate(m)
+				}
+				return os.OpenFile(path, os.O_RDWR, 0)
+			}
+			b.fstat = func(_ int, st *syscall.Stat_t) error {
+				st.Mode, st.Rdev = syscall.S_IFCHR, tc.openedRdev
+				return nil
+			}
+			b.stat = func(_ string, st *syscall.Stat_t) error {
+				st.Mode, st.Rdev = syscall.S_IFCHR, 7
+				return nil
+			}
+			f, err := b.OpenWriter(context.Background(), selected)
+			if f != nil {
+				_ = f.Close()
+			}
+			if (err == nil) != tc.ok {
+				t.Fatalf("open error = %v, want success %t", err, tc.ok)
+			}
+		})
+	}
 }
 
 func (f *fakeManager) List(context.Context) ([]disk.Disk, error) {

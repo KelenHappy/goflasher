@@ -11,7 +11,7 @@ on:
         default: 0.0.0-dev
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows:
@@ -20,8 +20,8 @@ jobs:
     env:
       VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -79,29 +79,21 @@ jobs:
           test -z "$(find "$root" -type f \( -name '*.pfx' -o -name '*.p12' -o -name '*.cer' -o -name '*.crt' -o -name '*.key' -o -name '*.pdb' \) -print -quit)"
           unzip -t "dist/GoFlasher-$VERSION-windows-amd64.zip"
           unzip -Z1 "dist/GoFlasher-$VERSION-windows-amd64.zip" | grep -Fx "GoFlasher-$VERSION-windows-amd64/GoFlasher.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: goflasher-windows-amd64-${{ env.VERSION }}
           path: |
             dist/GoFlasher-${{ env.VERSION }}-windows-amd64.zip
             dist/GoFlasher-${{ env.VERSION }}-windows-amd64.zip.sha256
           if-no-files-found: error
-      - name: Publish GitHub release assets
-        if: github.event_name == 'push'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --verify-tag --generate-notes
-          gh release upload "$VERSION" "dist/GoFlasher-$VERSION-windows-amd64.zip" "dist/GoFlasher-$VERSION-windows-amd64.zip.sha256" --clobber
 
   linux:
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -121,20 +113,7 @@ jobs:
         run: packaging/make-rpm.sh dist/goflasher "$VERSION" dist
       - name: Build Arch Linux package
         run: packaging/make-arch.sh dist/goflasher "$VERSION" dist
-      - name: Build AppImage
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          packaging/download-github-release-asset.sh \
-            AppImage/appimagetool continuous appimagetool-x86_64.AppImage \
-            appimagetool.AppImage
-          packaging/download-github-release-asset.sh \
-            linuxdeploy/linuxdeploy continuous linuxdeploy-x86_64.AppImage \
-            linuxdeploy.AppImage
-          unset GH_TOKEN
-          packaging/make-appimage.sh dist/goflasher "$VERSION" dist \
-            ./linuxdeploy.AppImage ./appimagetool.AppImage
-      - name: Verify Debian, Arch Linux, and AppImage contents
+      - name: Verify Debian and Arch Linux contents
         run: |
           set -euo pipefail
           work=$(mktemp -d)
@@ -153,27 +132,16 @@ jobs:
           test -x "$work/arch/usr/libexec/goflasher-helper"
           test -f "$work/arch/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
 
-          appimage=$(realpath "$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)")
-          (cd "$work" && "$appimage" --appimage-extract >/dev/null)
-          test -x "$work/squashfs-root/usr/libexec/goflasher-helper"
-          test -f "$work/squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy"
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.AppImage *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
+          sha256sum *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
           rm goflasher goflasher-helper
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: goflasher-linux-${{ env.VERSION }}
           path: dist/*
           if-no-files-found: error
-      - name: Publish GitHub release assets
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --verify-tag --generate-notes
-          gh release upload "$VERSION" dist/* --clobber
 
   macos:
     name: macOS ${{ matrix.arch }} DMG
@@ -191,8 +159,8 @@ jobs:
     env:
       VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -263,17 +231,34 @@ jobs:
           spctl --assess --type execute --verbose=2 "$mount/GoFlasher.app"
       - name: Generate checksum
         run: shasum -a 256 "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg" > "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: goflasher-macos-${{ matrix.arch }}-${{ env.VERSION }}
           path: |
             dist/GoFlasher-${{ env.VERSION }}-${{ matrix.arch }}.dmg
             dist/GoFlasher-${{ env.VERSION }}-${{ matrix.arch }}.dmg.sha256
           if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download reviewed build outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: goflasher-*
+          path: dist
+          merge-multiple: true
       - name: Publish GitHub release assets
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
           gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --verify-tag --generate-notes
-          gh release upload "$VERSION" "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg" "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg.sha256" --clobber
+          gh release upload "$VERSION" dist/* --clobber

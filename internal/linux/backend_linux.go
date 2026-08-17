@@ -75,41 +75,48 @@ func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
 	if err != nil {
 		return nil, err
 	}
+	topology, err := readBlockTopology(b.SysClassBlock)
+	if err != nil {
+		return nil, err
+	}
 	var result []device.Device
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if d, ok := b.deviceFromEntry(entry, entries, mounts, swaps); ok {
+		if d, ok, err := b.deviceFromEntry(entry, entries, mounts, swaps, topology); err != nil {
+			return nil, err
+		} else if ok {
 			result = append(result, d)
 		}
 	}
 	return result, nil
 }
 
-func (b *Backend) deviceFromEntry(entry os.DirEntry, entries []os.DirEntry, mounts map[devNumber][]string, swaps map[string]bool) (device.Device, bool) {
+func (b *Backend) deviceFromEntry(entry os.DirEntry, entries []os.DirEntry, mounts map[devNumber][]string, swaps map[string]bool, topology *blockTopology) (device.Device, bool, error) {
 	name := entry.Name()
 	link := filepath.Join(b.SysClassBlock, name)
 	if exists(filepath.Join(link, "partition")) {
-		return device.Device{}, false
+		return device.Device{}, false, nil
 	}
 	real, err := filepath.EvalSymlinks(link)
 	if err != nil {
-		return device.Device{}, false
+		return device.Device{}, false, nil
 	}
 	major, minor, err := readDeviceNumber(filepath.Join(link, "dev"))
 	if err != nil {
-		return device.Device{}, false
+		return device.Device{}, false, nil
 	}
 	properties := b.udev(major, minor)
 	candidate := sysfsDevice{name: name, link: link, real: real, major: major, minor: minor, properties: properties}
 	d := b.basicDevice(candidate)
 	d.PartitionCount = countPartitions(entries, name, b.SysClassBlock)
-	b.populateMountMetadata(&d, name, mounts)
-	b.populateSystemDiskMetadata(&d, name, swaps)
+	if err := b.populateSafetyMetadata(&d, name, mounts, swaps, topology); err != nil {
+		return device.Device{}, false, err
+	}
 	b.classifyDevice(&d, link, real, properties)
 	d.ID = first(d.Serial, d.WWN, fmt.Sprintf("%d:%d@%s", major, minor, real))
-	return d, true
+	return d, true, nil
 }
 
 type sysfsDevice struct {
@@ -130,18 +137,30 @@ func (b *Backend) basicDevice(candidate sysfsDevice) device.Device {
 	}
 }
 
-func (b *Backend) populateMountMetadata(d *device.Device, name string, mounts map[devNumber][]string) {
-	d.MountPoints = appendUnique(d.MountPoints, mounts[devNumber{d.Major, d.Minor}]...)
+func (b *Backend) populateSafetyMetadata(d *device.Device, name string, mounts map[devNumber][]string, swaps map[string]bool, topology *blockTopology) error {
 	for number, points := range mounts {
-		if parentName(b.SysClassBlock, number) == name {
+		mounted, err := topology.nameForNumber(number)
+		if err != nil {
+			if number.major == 0 {
+				continue
+			}
+			return err
+		}
+		backed, err := topology.dependsOn(mounted, name)
+		if err != nil {
+			return err
+		}
+		if backed {
 			d.MountPoints = appendUnique(d.MountPoints, points...)
 		}
 	}
 	d.Mounted = len(d.MountPoints) > 0
-}
-
-func (b *Backend) populateSystemDiskMetadata(d *device.Device, name string, swaps map[string]bool) {
-	d.IsSystemDisk = containsCriticalMount(d.MountPoints) || b.deviceHasSwap(name, swaps)
+	hasSwap, err := deviceUsedForSwap(name, b.DevRoot, swaps, topology)
+	if err != nil {
+		return err
+	}
+	d.IsSystemDisk = containsCriticalMount(d.MountPoints) || hasSwap
+	return nil
 }
 
 func containsCriticalMount(mountPoints []string) bool {
@@ -152,22 +171,6 @@ func containsCriticalMount(mountPoints []string) bool {
 		}
 	}
 	return false
-}
-
-func (b *Backend) deviceHasSwap(name string, swaps map[string]bool) bool {
-	for path := range swaps {
-		if b.swapBelongsToDevice(path, name) {
-			return true
-		}
-	}
-	return false
-}
-
-func (b *Backend) swapBelongsToDevice(path, name string) bool {
-	if filepath.Base(path) == name {
-		return true
-	}
-	return strings.HasPrefix(parentForPath(b.SysClassBlock, path), name)
 }
 
 func (b *Backend) classifyDevice(d *device.Device, link, real string, properties map[string]string) {

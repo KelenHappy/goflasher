@@ -8,13 +8,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/progress"
+	"golang.org/x/sys/unix"
 )
 
 type fakePrivilegedHelper struct {
@@ -22,6 +25,54 @@ type fakePrivilegedHelper struct {
 	err      error
 	writes   strings.Builder
 	readData string
+}
+
+func TestOpenedLinuxDeviceIsRevalidatedBeforeUse(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *backendFixture, helperEnvironment)
+		devno  uint64
+		ok     bool
+	}{
+		{name: "normal", devno: unix.Mkdev(8, 16), ok: true},
+		{name: "node number changed", devno: unix.Mkdev(8, 32)},
+		{name: "identity changed", devno: unix.Mkdev(8, 16), mutate: func(t *testing.T, f *backendFixture, _ helperEnvironment) {
+			write(t, filepath.Join(f.SysClassBlock, "sdb", "device/serial"), "REPLACED")
+		}},
+		{name: "device disappeared", devno: unix.Mkdev(8, 16), mutate: func(t *testing.T, _ *backendFixture, env helperEnvironment) {
+			requireNoError(t, os.Remove(filepath.Join(env.SysDevBlock, "8:16")))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBackendFixture(t)
+			clearFixtureActivity(t, f.Backend)
+			sysDev := filepath.Join(f.t.TempDir(), "sys/dev/block")
+			requireNoError(t, os.MkdirAll(sysDev, 0755))
+			real, err := filepath.EvalSymlinks(filepath.Join(f.SysClassBlock, "sdb"))
+			requireNoError(t, err)
+			requireNoError(t, os.Symlink(real, filepath.Join(sysDev, "8:16")))
+			env := helperEnvironment{SysDevBlock: sysDev, SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot}
+			env.openFile = func(string, int, os.FileMode) (*os.File, error) {
+				if tc.mutate != nil {
+					tc.mutate(t, f, env)
+				}
+				return os.Open(filepath.Join(f.DevRoot, "sdb"))
+			}
+			env.fstat = func(_ int, st *syscall.Stat_t) error {
+				st.Mode = syscall.S_IFBLK
+				st.Rdev = tc.devno
+				return nil
+			}
+			req := privilegedRequest{Identity: "FLASH123", Serial: "FLASH123", Major: 8, Minor: 16, Capacity: 65536 * 512, Mode: modeWrite}
+			opened, err := openDevice(req, env, "sdb")
+			if opened != nil {
+				_ = opened.Close()
+			}
+			if (err == nil) != tc.ok {
+				t.Fatalf("open error = %v, want success %t", err, tc.ok)
+			}
+		})
+	}
 }
 
 func (f *fakePrivilegedHelper) OpenWriter(_ context.Context, r privilegedRequest) (io.WriteCloser, error) {
