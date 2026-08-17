@@ -65,6 +65,23 @@ func candidate() diskRecord {
 	return diskRecord{Device: device.Device{ID: e.canonicalID(), Path: `\\.\PhysicalDrive4`, Model: "Flash", Serial: e.Serial, Transport: "usb", Major: 4, Size: 16 << 30}, identity: e, deviceNumber: 4, usbAncestor: true, deviceHotplug: true}
 }
 
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func listedDevice(t *testing.T, b *Backend) device.Device {
+	t.Helper()
+	devices, err := b.ListAllowedDevices(context.Background())
+	requireNoError(t, err)
+	if len(devices) != 1 {
+		t.Fatalf("devices=%v, want one device", devices)
+	}
+	return devices[0]
+}
+
 func TestPolicyRequiresCorroboratingSignals(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -110,24 +127,20 @@ func TestSystemDiskQueryErrorFailsEnumeration(t *testing.T) {
 func TestEveryOpenRevalidates(t *testing.T) {
 	api := &fakeAPI{records: []diskRecord{candidate()}}
 	b := &Backend{api: api, locks: map[string]volumeLocks{}}
-	ds, err := b.ListAllowedDevices(context.Background())
-	if err != nil || len(ds) != 1 {
-		t.Fatal(ds, err)
-	}
-	if _, err = b.OpenWriter(context.Background(), ds[0]); !errors.Is(err, ErrUnmountFailed) {
+	d := listedDevice(t, b)
+	if _, err := b.OpenWriter(context.Background(), d); !errors.Is(err, ErrUnmountFailed) {
 		t.Fatal(err)
 	}
-	if err = b.Unmount(context.Background(), ds[0]); err != nil {
-		t.Fatal(err)
-	}
-	w, err := b.OpenWriter(context.Background(), ds[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if api.opens != 1 || api.lockCalls != 1 || api.locks.closes != 0 {
+	requireNoError(t, b.Unmount(context.Background(), d))
+	w, err := b.OpenWriter(context.Background(), d)
+	requireNoError(t, err)
+	requireNoError(t, w.Close())
+	assertOpenAndLockCounts(t, api, 1, 1, 0)
+}
+
+func assertOpenAndLockCounts(t *testing.T, api *fakeAPI, opens, lockCalls, closes int) {
+	t.Helper()
+	if api.opens != opens || api.lockCalls != lockCalls || api.locks.closes != closes {
 		t.Fatalf("opens=%d locks=%d closes=%d", api.opens, api.lockCalls, api.locks.closes)
 	}
 }
@@ -168,12 +181,22 @@ func TestCandidateWithoutPersistentIdentityIsHiddenWithDiagnostic(t *testing.T) 
 	r.identity, r.ID, r.Serial, r.WWN = windowsIdentityEvidence{}, "", "", ""
 	b := &Backend{api: &fakeAPI{records: []diskRecord{r}}, locks: map[string]volumeLocks{}}
 	got, err := b.ListAllowedDevices(context.Background())
-	if err != nil || len(got) != 0 {
-		t.Fatalf("devices=%v error=%v", got, err)
+	requireNoError(t, err)
+	if len(got) != 0 {
+		t.Fatalf("devices=%v, want none", got)
 	}
 	rs, err := b.records(context.Background())
-	if err != nil || len(rs) != 1 || rs[0].RejectReason != "no trustworthy persistent identity" {
-		t.Fatalf("records=%v error=%v", rs, err)
+	requireNoError(t, err)
+	assertIdentityDiagnostic(t, rs)
+}
+
+func assertIdentityDiagnostic(t *testing.T, records []diskRecord) {
+	t.Helper()
+	if len(records) != 1 {
+		t.Fatalf("records=%v, want one", records)
+	}
+	if records[0].RejectReason != "no trustworthy persistent identity" {
+		t.Fatalf("records=%v", records)
 	}
 }
 func TestManagedFileCloseIsIdempotentAndFlushes(t *testing.T) {
@@ -217,18 +240,26 @@ func TestRepeatedUnmountCleansUpPreviousLocks(t *testing.T) {
 	api := &fakeAPI{records: []diskRecord{candidate()}}
 	b := &Backend{api: api, locks: map[string]volumeLocks{}}
 	d := candidate().Device
-	if err := b.Unmount(context.Background(), d); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, b.Unmount(context.Background(), d))
 	first := api.locks
-	if err := b.Unmount(context.Background(), d); err != nil {
-		t.Fatal(err)
+	requireNoError(t, b.Unmount(context.Background(), d))
+	assertLocksReplaced(t, first, api.locks)
+	requireNoError(t, b.ReleaseDevice(d))
+	if api.locks.closes != 1 {
+		t.Fatalf("current closes=%d, want 1", api.locks.closes)
 	}
-	if first.closes != 1 || api.locks == first || api.locks.closes != 0 {
-		t.Fatalf("first closes=%d same lock=%v current closes=%d", first.closes, api.locks == first, api.locks.closes)
+}
+
+func assertLocksReplaced(t *testing.T, previous, current *fakeLocks) {
+	t.Helper()
+	if previous.closes != 1 {
+		t.Fatalf("previous closes=%d, want 1", previous.closes)
 	}
-	if err := b.ReleaseDevice(d); err != nil || api.locks.closes != 1 {
-		t.Fatalf("release error=%v current closes=%d", err, api.locks.closes)
+	if current == previous {
+		t.Fatal("lock set was not replaced")
+	}
+	if current.closes != 0 {
+		t.Fatalf("current closes=%d, want 0", current.closes)
 	}
 }
 
@@ -237,14 +268,25 @@ func TestIncompleteVolumeEnumerationPreventsRawWriter(t *testing.T) {
 	api := &fakeAPI{records: []diskRecord{candidate()}, lockErr: sentinel}
 	b := &Backend{api: api, locks: map[string]volumeLocks{}}
 	d := candidate().Device
-	if err := b.Unmount(context.Background(), d); !errors.Is(err, ErrUnmountFailed) || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), sentinel.Error()) {
-		t.Fatalf("unmount error=%v", err)
-	}
+	assertUnmountFailure(t, b.Unmount(context.Background(), d), sentinel)
 	if _, err := b.OpenWriter(context.Background(), d); !errors.Is(err, ErrUnmountFailed) {
 		t.Fatalf("writer error=%v", err)
 	}
 	if api.opens != 0 {
 		t.Fatalf("raw opens=%d, want 0", api.opens)
+	}
+}
+
+func assertUnmountFailure(t *testing.T, err, cause error) {
+	t.Helper()
+	if !errors.Is(err, ErrUnmountFailed) {
+		t.Fatalf("unmount error=%v, want ErrUnmountFailed", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("unmount error=%v, want cause %v", err, cause)
+	}
+	if !strings.Contains(err.Error(), cause.Error()) {
+		t.Fatalf("unmount error=%v, want cause text", err)
 	}
 }
 

@@ -147,33 +147,15 @@ func parseStorageDeviceIDs(b []byte) (string, error) {
 	off := 12
 	var found string
 	for i := uint32(0); i < count; i++ {
-		if off+8 > int(size) {
-			return "", fmt.Errorf("truncated STORAGE_IDENTIFIER header %d", i)
+		value, next, err := parseStorageIdentifier(b[:size], off, i)
+		if err != nil {
+			return "", err
 		}
-		codeSet, idType := b[off], b[off+1]
-		idSize := int(binary.LittleEndian.Uint16(b[off+2 : off+4]))
-		next := int(binary.LittleEndian.Uint16(b[off+4 : off+6]))
-		association := b[off+6]
-		if idSize < 1 || off+8+idSize > int(size) {
-			return "", fmt.Errorf("truncated STORAGE_IDENTIFIER entry %d", i)
+		if found != "" && value != "" && found != value {
+			return "", errors.New("conflicting WWN identifiers")
 		}
-		if next != 0 && (next < 8+idSize || off+next > int(size)) {
-			return "", fmt.Errorf("invalid STORAGE_IDENTIFIER next offset %d", next)
-		}
-		if association == 0 && (idType == 2 || idType == 3) {
-			raw := b[off+8 : off+8+idSize]
-			var value string
-			if codeSet == 1 {
-				value = fmt.Sprintf("%X", raw)
-			} else if codeSet == 2 {
-				value = normalizeIdentity(string(raw))
-			}
-			if value != "" {
-				if found != "" && found != value {
-					return "", errors.New("conflicting WWN identifiers")
-				}
-				found = value
-			}
+		if value != "" {
+			found = value
 		}
 		if next == 0 {
 			if i+1 != count {
@@ -184,6 +166,32 @@ func parseStorageDeviceIDs(b []byte) (string, error) {
 		off += next
 	}
 	return found, nil
+}
+
+func parseStorageIdentifier(b []byte, off int, index uint32) (string, int, error) {
+	if off+8 > len(b) {
+		return "", 0, fmt.Errorf("truncated STORAGE_IDENTIFIER header %d", index)
+	}
+	idSize := int(binary.LittleEndian.Uint16(b[off+2 : off+4]))
+	next := int(binary.LittleEndian.Uint16(b[off+4 : off+6]))
+	if idSize < 1 || off+8+idSize > len(b) {
+		return "", 0, fmt.Errorf("truncated STORAGE_IDENTIFIER entry %d", index)
+	}
+	if next != 0 && (next < 8+idSize || off+next > len(b)) {
+		return "", 0, fmt.Errorf("invalid STORAGE_IDENTIFIER next offset %d", next)
+	}
+	if b[off+6] != 0 || (b[off+1] != 2 && b[off+1] != 3) {
+		return "", next, nil
+	}
+	raw := b[off+8 : off+8+idSize]
+	switch b[off] {
+	case 1:
+		return fmt.Sprintf("%X", raw), next, nil
+	case 2:
+		return normalizeIdentity(string(raw)), next, nil
+	default:
+		return "", next, nil
+	}
 }
 
 func storageWWN(h windows.Handle) (string, error) {
@@ -203,33 +211,59 @@ func storageWWN(h windows.Handle) (string, error) {
 }
 
 func inspectHandle(h windows.Handle, number uint32) (diskRecord, error) {
+	if err := verifyDeviceNumber(h, number); err != nil {
+		return diskRecord{}, err
+	}
+	length, err := diskLength(h)
+	if err != nil {
+		return diskRecord{}, err
+	}
+	descriptor, err := storageDescriptor(h)
+	if err != nil {
+		return diskRecord{}, err
+	}
+	return diskRecordFromDescriptor(h, number, length, descriptor)
+}
+
+func verifyDeviceNumber(h windows.Handle, expected uint32) error {
 	n, err := query(h, ioctlStorageGetDeviceNumber, 12)
 	if err != nil {
-		return diskRecord{}, fmt.Errorf("IOCTL_STORAGE_GET_DEVICE_NUMBER: %w", err)
+		return fmt.Errorf("IOCTL_STORAGE_GET_DEVICE_NUMBER: %w", err)
 	}
 	if len(n) < 8 {
-		return diskRecord{}, errors.New("short STORAGE_DEVICE_NUMBER")
+		return errors.New("short STORAGE_DEVICE_NUMBER")
 	}
-	got := binary.LittleEndian.Uint32(n[4:8])
-	if got != number {
-		return diskRecord{}, ErrDeviceChanged
+	if binary.LittleEndian.Uint32(n[4:8]) != expected {
+		return ErrDeviceChanged
 	}
+	return nil
+}
+
+func diskLength(h windows.Handle) (uint64, error) {
 	length, err := query(h, ioctlDiskGetLengthInfo, 8)
 	if err != nil {
-		return diskRecord{}, fmt.Errorf("IOCTL_DISK_GET_LENGTH_INFO: %w", err)
+		return 0, fmt.Errorf("IOCTL_DISK_GET_LENGTH_INFO: %w", err)
 	}
 	if len(length) < 8 {
-		return diskRecord{}, errors.New("short GET_LENGTH_INFORMATION")
+		return 0, errors.New("short GET_LENGTH_INFORMATION")
 	}
+	return binary.LittleEndian.Uint64(length), nil
+}
+
+func storageDescriptor(h windows.Handle) ([]byte, error) {
 	q := make([]byte, 1024)
 	binary.LittleEndian.PutUint32(q[0:4], storageDeviceProperty)
 	var returned uint32
-	if err = windows.DeviceIoControl(h, ioctlStorageQueryProperty, &q[0], 8, &q[0], uint32(len(q)), &returned, nil); err != nil {
-		return diskRecord{}, fmt.Errorf("IOCTL_STORAGE_QUERY_PROPERTY: %w", err)
+	if err := windows.DeviceIoControl(h, ioctlStorageQueryProperty, &q[0], 8, &q[0], uint32(len(q)), &returned, nil); err != nil {
+		return nil, fmt.Errorf("IOCTL_STORAGE_QUERY_PROPERTY: %w", err)
 	}
 	if returned < 36 {
-		return diskRecord{}, errors.New("short STORAGE_DEVICE_DESCRIPTOR")
+		return nil, errors.New("short STORAGE_DEVICE_DESCRIPTOR")
 	}
+	return q[:returned], nil
+}
+
+func diskRecordFromDescriptor(h windows.Handle, number uint32, length uint64, q []byte) (diskRecord, error) {
 	// STORAGE_HOTPLUG_INFO starts with Size (one DWORD), followed by the
 	// MediaRemovable, MediaHotplug, DeviceHotplug, and WriteCacheEnableOverride
 	// BOOLEAN fields.
@@ -251,7 +285,7 @@ func inspectHandle(h windows.Handle, number uint32) (diskRecord, error) {
 	// do not expose one fail policy rather than falling back to disk number.
 	id := identity.canonicalID()
 	path := `\\.\PhysicalDrive` + strconv.FormatUint(uint64(number), 10)
-	r := diskRecord{Device: device.Device{ID: id, Path: path, Vendor: vendor, Model: model, Serial: identity.Serial, WWN: identity.WWN, Transport: busName(bus), Major: number, Size: binary.LittleEndian.Uint64(length)}, identity: identity, deviceNumber: number, usbAncestor: bus == busTypeUSB}
+	r := diskRecord{Device: device.Device{ID: id, Path: path, Vendor: vendor, Model: model, Serial: identity.Serial, WWN: identity.WWN, Transport: busName(bus), Major: number, Size: length}, identity: identity, deviceNumber: number, usbAncestor: bus == busTypeUSB}
 	if len(hot) >= 7 {
 		r.mediaHotplug = hot[5] != 0
 		r.deviceHotplug = hot[6] != 0
@@ -270,20 +304,11 @@ func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
 	pnp, _ := setupDisks()
 	var out []diskRecord
 	for i := uint32(0); i < 256; i++ {
-		if err := ctx.Err(); err != nil {
+		r, found, err := inspectDiskNumber(ctx, i)
+		if err != nil {
 			return nil, err
 		}
-		path := `\\.\PhysicalDrive` + strconv.FormatUint(uint64(i), 10)
-		h, err := openHandle(path, 0)
-		if err != nil {
-			if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_INVALID_NAME) {
-				continue
-			}
-			continue
-		}
-		r, e := inspectHandle(h, i)
-		windows.CloseHandle(h)
-		if e != nil {
+		if !found {
 			continue
 		}
 		r.IsSystemDisk = systems[i]
@@ -291,13 +316,27 @@ func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
 			r.SysfsPath, r.devInst = p.instance, p.devInst
 			r.usbAncestor = r.usbAncestor || p.usb
 		}
-		r.Mounted, e = diskHasVolume(i)
-		if e != nil {
-			return nil, fmt.Errorf("determine mounted state for PhysicalDrive%d: %w", i, e)
+		r.Mounted, err = diskHasVolume(i)
+		if err != nil {
+			return nil, fmt.Errorf("determine mounted state for PhysicalDrive%d: %w", i, err)
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+func inspectDiskNumber(ctx context.Context, number uint32) (diskRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return diskRecord{}, false, err
+	}
+	path := `\\.\PhysicalDrive` + strconv.FormatUint(uint64(number), 10)
+	h, err := openHandle(path, 0)
+	if err != nil {
+		return diskRecord{}, false, nil
+	}
+	defer windows.CloseHandle(h)
+	r, err := inspectHandle(h, number)
+	return r, err == nil, nil
 }
 
 type winFile struct {
@@ -339,7 +378,7 @@ func (a *winAPI) openDisk(ctx context.Context, r diskRecord, write bool) (native
 		return nil, err
 	}
 	fresh, err := inspectHandle(h, r.deviceNumber)
-	if err != nil || !sameWindowsIdentity(fresh.identity, r.identity) || fresh.ID != r.ID || fresh.Size != r.Size {
+	if err != nil || diskRecordChanged(r, fresh) {
 		windows.CloseHandle(h)
 		if err != nil {
 			return nil, err
@@ -347,6 +386,10 @@ func (a *winAPI) openDisk(ctx context.Context, r diskRecord, write bool) (native
 		return nil, ErrDeviceChanged
 	}
 	return &winFile{f: os.NewFile(uintptr(h), r.Path), ctx: ctx}, nil
+}
+
+func diskRecordChanged(selected, fresh diskRecord) bool {
+	return !sameWindowsIdentity(fresh.identity, selected.identity) || fresh.ID != selected.ID || fresh.Size != selected.Size
 }
 
 type handleLocks []windows.Handle
@@ -371,41 +414,53 @@ func (a *winAPI) lockVolumes(ctx context.Context, n uint32) (volumeLocks, error)
 	locks := handleLocks{}
 	locked := make(map[string]windows.Handle, len(vols))
 	for _, v := range vols {
-		if err := ctx.Err(); err != nil {
+		h, err := lockVolume(ctx, v)
+		if err != nil {
 			locks.Close()
 			return nil, err
-		}
-		h, e := openHandle(strings.TrimSuffix(v, `\`), windows.GENERIC_READ|windows.GENERIC_WRITE)
-		if e != nil {
-			locks.Close()
-			return nil, fmt.Errorf("%w: volume %s open: %w", ErrVolumeLockDenied, volumeGUID(v), e)
-		}
-		if e = ioctl(h, fsctlLockVolume, nil); e == nil {
-			e = ioctl(h, fsctlDismountVolume, nil)
-		}
-		if e != nil {
-			windows.CloseHandle(h)
-			locks.Close()
-			return nil, fmt.Errorf("%w: volume %s lock/dismount: %w", ErrVolumeLockDenied, volumeGUID(v), e)
 		}
 		locks = append(locks, h)
 		locked[v] = h
 	}
-	current, err := volumesForDiskUsing(n, func(v string) ([]uint32, error) {
+	if err := validateLockedVolumes(n, vols, locked); err != nil {
+		locks.Close()
+		return nil, err
+	}
+	return locks, nil
+}
+
+func lockVolume(ctx context.Context, volume string) (windows.Handle, error) {
+	if err := ctx.Err(); err != nil {
+		return windows.InvalidHandle, err
+	}
+	h, err := openHandle(strings.TrimSuffix(volume, `\`), windows.GENERIC_READ|windows.GENERIC_WRITE)
+	if err != nil {
+		return windows.InvalidHandle, fmt.Errorf("%w: volume %s open: %w", ErrVolumeLockDenied, volumeGUID(volume), err)
+	}
+	if err = ioctl(h, fsctlLockVolume, nil); err == nil {
+		err = ioctl(h, fsctlDismountVolume, nil)
+	}
+	if err != nil {
+		windows.CloseHandle(h)
+		return windows.InvalidHandle, fmt.Errorf("%w: volume %s lock/dismount: %w", ErrVolumeLockDenied, volumeGUID(volume), err)
+	}
+	return h, nil
+}
+
+func validateLockedVolumes(number uint32, expected []string, locked map[string]windows.Handle) error {
+	current, err := volumesForDiskUsing(number, func(v string) ([]uint32, error) {
 		if h, ok := locked[v]; ok {
 			return volumeDisksFromHandle(v, h)
 		}
 		return queryVolumeDisks(v)
 	})
 	if err != nil {
-		locks.Close()
-		return nil, err
+		return err
 	}
-	if !sameVolumes(vols, current) {
-		locks.Close()
-		return nil, fmt.Errorf("%w: volume topology changed while locking", ErrDeviceChanged)
+	if !sameVolumes(expected, current) {
+		return fmt.Errorf("%w: volume topology changed while locking", ErrDeviceChanged)
 	}
-	return locks, nil
+	return nil
 }
 
 func sameVolumes(a, b []string) bool {
@@ -474,56 +529,73 @@ func setupDisks() (map[uint32]pnpDisk, error) {
 	defer setupDestroy.Call(h)
 	out := map[uint32]pnpDisk{}
 	for index := uint32(0); ; index++ {
-		isz := 32
-		if unsafe.Sizeof(uintptr(0)) == 4 {
-			isz = 28
-		}
-		iface := make([]byte, isz)
-		binary.LittleEndian.PutUint32(iface, uint32(isz))
-		r, _, er := setupEnumInterfaces.Call(h, 0, uintptr(unsafe.Pointer(&diskInterfaceGUID)), uintptr(index), uintptr(unsafe.Pointer(&iface[0])))
-		if r == 0 {
-			if er == windows.ERROR_NO_MORE_ITEMS {
-				break
-			}
-			return out, er
-		}
-		var needed uint32
-		setupGetDetail.Call(h, uintptr(unsafe.Pointer(&iface[0])), 0, 0, uintptr(unsafe.Pointer(&needed)), 0)
-		if needed < 8 {
-			continue
-		}
-		detail := make([]byte, needed)
-		cb := uint32(8)
-		if unsafe.Sizeof(uintptr(0)) == 4 {
-			cb = 6
-		}
-		binary.LittleEndian.PutUint32(detail, cb)
-		dsz := 32
-		if unsafe.Sizeof(uintptr(0)) == 4 {
-			dsz = 28
-		}
-		devinfo := make([]byte, dsz)
-		binary.LittleEndian.PutUint32(devinfo, uint32(dsz))
-		r, _, _ = setupGetDetail.Call(h, uintptr(unsafe.Pointer(&iface[0])), uintptr(unsafe.Pointer(&detail[0])), uintptr(len(detail)), uintptr(unsafe.Pointer(&needed)), uintptr(unsafe.Pointer(&devinfo[0])))
-		if r == 0 {
-			continue
-		}
-		path := windows.UTF16PtrToString((*uint16)(unsafe.Pointer(&detail[4])))
-		dh, err := openHandle(path, 0)
+		n, disk, found, done, err := setupDiskAtIndex(h, index)
 		if err != nil {
-			continue
+			return out, err
 		}
-		b, err := query(dh, ioctlStorageGetDeviceNumber, 12)
-		windows.CloseHandle(dh)
-		if err != nil {
-			continue
+		if done {
+			break
 		}
-		n := binary.LittleEndian.Uint32(b[4:8])
-		di := binary.LittleEndian.Uint32(devinfo[20:24])
-		instance, usb := deviceTreeIdentity(di)
-		out[n] = pnpDisk{instance, di, usb}
+		if found {
+			out[n] = disk
+		}
 	}
 	return out, nil
+}
+
+func setupDiskAtIndex(set uintptr, index uint32) (uint32, pnpDisk, bool, bool, error) {
+	structureSize := setupStructureSize()
+	iface := make([]byte, structureSize)
+	binary.LittleEndian.PutUint32(iface, uint32(structureSize))
+	r, _, callErr := setupEnumInterfaces.Call(set, 0, uintptr(unsafe.Pointer(&diskInterfaceGUID)), uintptr(index), uintptr(unsafe.Pointer(&iface[0])))
+	if r == 0 {
+		if callErr == windows.ERROR_NO_MORE_ITEMS {
+			return 0, pnpDisk{}, false, true, nil
+		}
+		return 0, pnpDisk{}, false, false, callErr
+	}
+	detail, devinfo, ok := setupInterfaceDetail(set, iface)
+	if !ok {
+		return 0, pnpDisk{}, false, false, nil
+	}
+	path := windows.UTF16PtrToString((*uint16)(unsafe.Pointer(&detail[4])))
+	dh, err := openHandle(path, 0)
+	if err != nil {
+		return 0, pnpDisk{}, false, false, nil
+	}
+	defer windows.CloseHandle(dh)
+	b, err := query(dh, ioctlStorageGetDeviceNumber, 12)
+	if err != nil {
+		return 0, pnpDisk{}, false, false, nil
+	}
+	devInst := binary.LittleEndian.Uint32(devinfo[20:24])
+	instance, usb := deviceTreeIdentity(devInst)
+	return binary.LittleEndian.Uint32(b[4:8]), pnpDisk{instance, devInst, usb}, true, false, nil
+}
+
+func setupInterfaceDetail(set uintptr, iface []byte) ([]byte, []byte, bool) {
+	var needed uint32
+	setupGetDetail.Call(set, uintptr(unsafe.Pointer(&iface[0])), 0, 0, uintptr(unsafe.Pointer(&needed)), 0)
+	if needed < 8 {
+		return nil, nil, false
+	}
+	detail := make([]byte, needed)
+	cb := uint32(8)
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		cb = 6
+	}
+	binary.LittleEndian.PutUint32(detail, cb)
+	devinfo := make([]byte, setupStructureSize())
+	binary.LittleEndian.PutUint32(devinfo, uint32(len(devinfo)))
+	r, _, _ := setupGetDetail.Call(set, uintptr(unsafe.Pointer(&iface[0])), uintptr(unsafe.Pointer(&detail[0])), uintptr(len(detail)), uintptr(unsafe.Pointer(&needed)), uintptr(unsafe.Pointer(&devinfo[0])))
+	return detail, devinfo, r != 0
+}
+
+func setupStructureSize() int {
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		return 28
+	}
+	return 32
 }
 func deviceTreeIdentity(dev uint32) (string, bool) {
 	leaf, usb, cur := "", false, dev
@@ -621,10 +693,13 @@ func queryGrowingBuffer(limit int, call extentIOCTL) ([]byte, error) {
 func volumeGUID(v string) string {
 	trimmed := strings.TrimSuffix(v, `\`)
 	const prefix = `\\?\Volume{`
-	if strings.HasPrefix(trimmed, prefix) && strings.HasSuffix(trimmed, "}") && isGUID(trimmed[len(prefix):len(trimmed)-1]) {
-		return trimmed
+	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, "}") {
+		return "<unknown-volume>"
 	}
-	return "<unknown-volume>"
+	if !isGUID(trimmed[len(prefix) : len(trimmed)-1]) {
+		return "<unknown-volume>"
+	}
+	return trimmed
 }
 
 func isGUID(s string) bool {
@@ -632,17 +707,18 @@ func isGUID(s string) bool {
 		return false
 	}
 	for i, c := range []byte(s) {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if c != '-' {
-				return false
-			}
-			continue
-		}
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if !validGUIDByte(i, c) {
 			return false
 		}
 	}
 	return true
+}
+
+func validGUIDByte(index int, value byte) bool {
+	if index == 8 || index == 13 || index == 18 || index == 23 {
+		return value == '-'
+	}
+	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
 func volumeDisks(v string) ([]uint32, error) {
@@ -711,15 +787,21 @@ func volumesForDiskUsing(n uint32, query func(string) ([]uint32, error)) ([]stri
 		if e != nil {
 			return nil, fmt.Errorf("%w: %w", ErrVolumeTopologyUnavailable, e)
 		}
-		for _, d := range ds {
-			if d == n && !seen[v] {
-				out = append(out, v)
-				seen[v] = true
-				break
-			}
+		if containsDisk(ds, n) && !seen[v] {
+			out = append(out, v)
+			seen[v] = true
 		}
 	}
 	return out, nil
+}
+
+func containsDisk(disks []uint32, target uint32) bool {
+	for _, disk := range disks {
+		if disk == target {
+			return true
+		}
+	}
+	return false
 }
 func diskHasVolume(n uint32) (bool, error) {
 	v, err := volumesForDisk(n)
@@ -727,8 +809,7 @@ func diskHasVolume(n uint32) (bool, error) {
 }
 func systemDiskNumbers() (map[uint32]bool, error) {
 	root := os.Getenv("SystemRoot")
-	if len(root) < 3 || root[1] != ':' || (root[2] != '\\' && root[2] != '/') ||
-		(root[0] < 'A' || root[0] > 'Z') && (root[0] < 'a' || root[0] > 'z') {
+	if !validSystemRoot(root) {
 		return nil, fmt.Errorf("invalid SystemRoot %q", root)
 	}
 	drive := `\\.\` + root[:2]
@@ -752,6 +833,14 @@ func systemDiskNumbers() (map[uint32]bool, error) {
 		out[disk] = true
 	}
 	return out, nil
+}
+
+func validSystemRoot(root string) bool {
+	if len(root) < 3 || root[1] != ':' || root[2] != '\\' && root[2] != '/' {
+		return false
+	}
+	letter := root[0]
+	return letter >= 'A' && letter <= 'Z' || letter >= 'a' && letter <= 'z'
 }
 
 func (a *winAPI) formatFAT32(ctx context.Context, r diskRecord, label string, updates chan<- progress.Update) error {

@@ -332,11 +332,9 @@ func RunPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer) error {
 }
 
 func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env helperEnvironment) error {
-	dec := json.NewDecoder(in)
-	dec.DisallowUnknownFields()
-	var req privilegedRequest
-	if err := dec.Decode(&req); err != nil {
-		return fmt.Errorf("invalid request: %w", err)
+	req, payload, err := readPrivilegedRequest(in)
+	if err != nil {
+		return err
 	}
 	f, err := validateAndOpen(req, env)
 	if err != nil {
@@ -348,7 +346,7 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 	}
 	switch req.Mode {
 	case modeWrite:
-		err = writeAndSync(f, dec.Buffered(), in)
+		err = writeAndSync(f, payload)
 	case modeRead:
 		_, err = io.CopyN(out, f, int64(req.Capacity))
 	case modeFlush:
@@ -359,6 +357,24 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 		err = errors.New("unsupported operation mode")
 	}
 	return err
+}
+
+const maxPrivilegedRequestBytes = 4096
+
+// readPrivilegedRequest bounds JSON decoding without adding a frame delimiter.
+// Delimiter-free requests remain compatible with older installed helpers,
+// which treat every byte after the JSON object as image payload. Any bytes the
+// decoder reads ahead are put back in front of the remaining payload.
+func readPrivilegedRequest(in io.Reader) (privilegedRequest, io.Reader, error) {
+	limited := &io.LimitedReader{R: in, N: maxPrivilegedRequestBytes}
+	decoder := json.NewDecoder(limited)
+	decoder.DisallowUnknownFields()
+	var req privilegedRequest
+	if err := decoder.Decode(&req); err != nil {
+		return privilegedRequest{}, nil, fmt.Errorf("invalid request: %w", err)
+	}
+	payload := io.MultiReader(decoder.Buffered(), limited, in)
+	return req, payload, nil
 }
 
 func flushAndInvalidate(target interface{ Sync() error }, invalidate func() error) error {
@@ -382,11 +398,8 @@ func invalidateBlockCache(target *os.File) error {
 func writeAndSync(target interface {
 	io.Writer
 	Sync() error
-}, buffered, remaining io.Reader) error {
-	if _, err := io.Copy(target, buffered); err != nil {
-		return err
-	}
-	if _, err := io.Copy(target, remaining); err != nil {
+}, payload io.Reader) error {
+	if _, err := io.Copy(target, payload); err != nil {
 		return err
 	}
 	return target.Sync()

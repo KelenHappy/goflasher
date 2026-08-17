@@ -108,6 +108,7 @@ var catalogs = map[Locale]map[string]string{
 		"status.formatting":   "Formatting as FAT32…", "status.format.complete": "FAT32 format complete",
 		"log.format.start": "Formatting %s as FAT32", "log.format.complete": "FAT32 format complete",
 		"action.settings": "Settings", "settings.title": "Settings", "settings.language": "Language", "settings.close": "Close",
+		"settings.theme": "Theme", "settings.theme.system": "System", "settings.theme.light": "Light", "settings.theme.dark": "Dark",
 	},
 	TraditionalChinese: {
 		"launcher":     "GoFlasher 圖形介面需使用 'fyne' 建置標籤。安裝 Fyne 建置相依套件後，執行：go run -tags fyne ./cmd/usbwriter",
@@ -141,6 +142,7 @@ var catalogs = map[Locale]map[string]string{
 		"status.formatting":   "正在格式化為 FAT32…", "status.format.complete": "FAT32 格式化完成",
 		"log.format.start": "正在將 %s 格式化為 FAT32", "log.format.complete": "FAT32 格式化完成",
 		"action.settings": "設定", "settings.title": "設定", "settings.language": "語言", "settings.close": "關閉",
+		"settings.theme": "主題", "settings.theme.system": "跟隨系統", "settings.theme.light": "淺色", "settings.theme.dark": "深色",
 	},
 	SimplifiedChinese: {
 		"launcher":     "GoFlasher 图形界面需要使用 'fyne' 构建标签。安装 Fyne 构建依赖后运行：go run -tags fyne ./cmd/usbwriter",
@@ -162,6 +164,7 @@ var catalogs = map[Locale]map[string]string{
 		"format.confirm.body": "将清除此设备上的所有数据和分区\n\n%s %s\n%s\n%.1f GB\n序列号：%s\n\n将创建名为 GOFLASHER 的 FAT32 文件系统。此操作无法撤销。",
 		"status.formatting":   "正在格式化为 FAT32…", "status.format.complete": "FAT32 格式化完成", "log.format.start": "正在将 %s 格式化为 FAT32", "log.format.complete": "FAT32 格式化完成",
 		"action.settings": "设置", "settings.title": "设置", "settings.language": "语言", "settings.close": "关闭",
+		"settings.theme": "主题", "settings.theme.system": "跟随系统", "settings.theme.light": "浅色", "settings.theme.dark": "深色",
 	},
 	Japanese: {
 		"launcher":     "GoFlasher GUI には 'fyne' ビルドタグが必要です。Fyne の依存関係をインストールして実行してください：go run -tags fyne ./cmd/usbwriter",
@@ -182,5 +185,6 @@ var catalogs = map[Locale]map[string]string{
 		"format.confirm.body": "このデバイスのすべてのデータとパーティションが消去されます\n\n%s %s\n%s\n%.1f GB\nシリアル：%s\n\nGOFLASHER という名前の FAT32 ファイルシステムを作成します。この操作は元に戻せません。",
 		"status.formatting":   "FAT32 でフォーマット中…", "status.format.complete": "FAT32 フォーマット完了", "log.format.start": "%s を FAT32 でフォーマット中", "log.format.complete": "FAT32 フォーマット完了",
 		"action.settings": "設定", "settings.title": "設定", "settings.language": "言語", "settings.close": "閉じる",
+		"settings.theme": "テーマ", "settings.theme.system": "システム", "settings.theme.light": "ライト", "settings.theme.dark": "ダーク",
 	},
 }

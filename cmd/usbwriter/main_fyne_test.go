@@ -195,6 +195,22 @@ func newTestController(t *testing.T) *guiController {
 	return &guiController{tr: tr, view: v, machine: core.NewStateMachine(), app: a}
 }
 
+func TestThemeSelectionIsPersisted(t *testing.T) {
+	c := newTestController(t)
+	c.setTheme(themeModeDark)
+	if got := loadThemeMode(c.app.Preferences()); got != themeModeDark {
+		t.Fatalf("saved theme = %q, want %q", got, themeModeDark)
+	}
+}
+
+func TestInvalidThemePreferenceFallsBackToSystem(t *testing.T) {
+	c := newTestController(t)
+	c.app.Preferences().SetString(themePreference, "untrusted-value")
+	if got := loadThemeMode(c.app.Preferences()); got != themeModeSystem {
+		t.Fatalf("loaded theme = %q, want %q", got, themeModeSystem)
+	}
+}
+
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

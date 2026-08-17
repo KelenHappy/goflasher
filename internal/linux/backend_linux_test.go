@@ -318,16 +318,63 @@ func TestWriteProtocolPreservesBufferedBinaryPayloadAndSyncs(t *testing.T) {
 	_, err = wire.Write(payload)
 	requireNoError(t, err)
 
-	decoder := json.NewDecoder(strings.NewReader(wire.String()))
-	var decoded privilegedRequest
-	requireNoError(t, decoder.Decode(&decoded))
+	decoded, remaining, err := readPrivilegedRequest(strings.NewReader(wire.String()))
+	requireNoError(t, err)
+	if decoded != request {
+		t.Fatalf("decoded request = %#v, want %#v", decoded, request)
+	}
 	target := &syncBuffer{}
-	requireNoError(t, writeAndSync(target, decoder.Buffered(), strings.NewReader("")))
+	requireNoError(t, writeAndSync(target, remaining))
 	if got := []byte(target.String()); !bytes.Equal(got, payload) {
 		t.Fatalf("written payload = %x, want %x", got, payload)
 	}
 	if !target.synced {
 		t.Fatal("write completed without syncing the target descriptor")
+	}
+}
+
+func TestPrivilegedRequestFrameIsBounded(t *testing.T) {
+	request := privilegedRequest{Identity: strings.Repeat("x", maxPrivilegedRequestBytes), Major: 8, Minor: 32, Capacity: 1, Mode: modeWrite}
+	data, err := json.Marshal(request)
+	requireNoError(t, err)
+	if _, _, err := readPrivilegedRequest(bytes.NewReader(data)); err == nil {
+		t.Fatal("oversized privileged request was accepted")
+	}
+}
+
+func TestPrivilegedRequestNeedsNoPayloadDelimiter(t *testing.T) {
+	request := privilegedRequest{Identity: "SERIAL", Major: 8, Minor: 32, Capacity: 1, Mode: modeWrite}
+	data, err := json.Marshal(request)
+	requireNoError(t, err)
+	payload := []byte("payload-starts-immediately")
+	decoded, remaining, err := readPrivilegedRequest(bytes.NewReader(append(data, payload...)))
+	requireNoError(t, err)
+	if decoded != request {
+		t.Fatalf("decoded request = %#v, want %#v", decoded, request)
+	}
+	got, err := io.ReadAll(remaining)
+	requireNoError(t, err)
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("payload = %q, want %q", got, payload)
+	}
+}
+
+func TestRequestRemainsCompatibleWithOlderHelperDecoder(t *testing.T) {
+	request := privilegedRequest{Identity: "SERIAL", Major: 8, Minor: 32, Capacity: 1, Mode: modeWrite}
+	var control bytes.Buffer
+	requireNoError(t, sendRequest(nil, nopWriteCloser{&control}, request))
+	if bytes.HasSuffix(control.Bytes(), []byte("\n")) {
+		t.Fatal("request has a delimiter that an older helper would write to the device")
+	}
+	payload := []byte("image-payload")
+	wire := bytes.NewReader(append(control.Bytes(), payload...))
+	decoder := json.NewDecoder(wire)
+	var decoded privilegedRequest
+	requireNoError(t, decoder.Decode(&decoded))
+	got, err := io.ReadAll(io.MultiReader(decoder.Buffered(), wire))
+	requireNoError(t, err)
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("older helper payload = %q, want %q", got, payload)
 	}
 }
 
