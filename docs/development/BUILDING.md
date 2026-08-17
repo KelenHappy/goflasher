@@ -190,6 +190,10 @@ so its declared runtime dependencies are resolved:
 sudo apt install ./dist/goflasher_1.0.0_amd64.deb
 ```
 
+For Git tags containing underscores, the packaging script replaces each
+underscore with a dot in the Debian version and output filename because Debian
+version fields do not permit underscores.
+
 The Debian package installs the helper at `/usr/libexec/goflasher-helper` and
 its polkit action. FAT32 formatting is implemented inside the narrowly scoped
 helper and does not require `dosfstools` or execute a filesystem utility as

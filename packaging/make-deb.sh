@@ -8,6 +8,9 @@ fi
 
 binary=$(realpath "$1")
 version=${2#v}
+# Git permits underscores in tag names, but Debian versions do not. Preserve
+# the tag's components while converting that separator to a Debian-safe one.
+version=${version//_/.}
 output=$(realpath -m "$3")
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 xz_dir=$(cd "$root" && go list -m -f '{{.Dir}}' github.com/ulikunitz/xz)
