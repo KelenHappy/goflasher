@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -292,6 +293,17 @@ func TestEmbeddedHelperInvocationRequiresExactPrivateArgument(t *testing.T) {
 		if IsEmbeddedHelperInvocation(args) {
 			t.Fatalf("unexpected embedded helper invocation accepted: %#v", args)
 		}
+	}
+}
+
+func TestHelperCandidatesIncludeAppImageHelper(t *testing.T) {
+	got := helperCandidates("/tmp/.mount_GoFlasher/usr/bin/goflasher", "/tmp/.mount_GoFlasher")
+	want := []string{
+		helperExecutable,
+		"/tmp/.mount_GoFlasher/usr/libexec/goflasher-helper",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("helper candidates = %#v, want %#v", got, want)
 	}
 }
 

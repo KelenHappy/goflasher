@@ -77,6 +77,8 @@ jobs:
           test -f "$root/THIRD_PARTY_NOTICES.zh-TW.md"
           test -n "$(find "$root/licenses" -type f -print -quit)"
           test -z "$(find "$root" -type f \( -name '*.pfx' -o -name '*.p12' -o -name '*.cer' -o -name '*.crt' -o -name '*.key' -o -name '*.pdb' \) -print -quit)"
+          unzip -t "dist/GoFlasher-$VERSION-windows-amd64.zip"
+          unzip -Z1 "dist/GoFlasher-$VERSION-windows-amd64.zip" | grep -Fx "GoFlasher-$VERSION-windows-amd64/GoFlasher.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: goflasher-windows-amd64-${{ env.VERSION }}
@@ -132,6 +134,29 @@ jobs:
           unset GH_TOKEN
           packaging/make-appimage.sh dist/goflasher "$VERSION" dist \
             ./linuxdeploy.AppImage ./appimagetool.AppImage
+      - name: Verify Debian, Arch Linux, and AppImage contents
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+
+          deb=$(realpath "$(find dist -maxdepth 1 -name '*.deb' -print -quit)")
+          dpkg-deb -x "$deb" "$work/deb"
+          test -x "$work/deb/usr/bin/goflasher"
+          test -x "$work/deb/usr/libexec/goflasher-helper"
+          test -f "$work/deb/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
+
+          arch=$(realpath "$(find dist -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)")
+          mkdir "$work/arch"
+          tar --zstd -xf "$arch" -C "$work/arch"
+          test -x "$work/arch/usr/bin/goflasher"
+          test -x "$work/arch/usr/libexec/goflasher-helper"
+          test -f "$work/arch/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
+
+          appimage=$(realpath "$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)")
+          (cd "$work" && "$appimage" --appimage-extract >/dev/null)
+          test -x "$work/squashfs-root/usr/libexec/goflasher-helper"
+          test -f "$work/squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy"
       - name: Generate checksums
         run: |
           cd dist
@@ -209,6 +234,15 @@ jobs:
             test -n "$SIGN_IDENTITY"
           fi
           packaging/macos/make-dmg.sh dist/GoFlasher dist/goflasher-helper "$VERSION" "${{ matrix.arch }}" "$SIGN_IDENTITY" dist
+      - name: Verify DMG contents
+        run: |
+          set -euo pipefail
+          dmg="dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg"
+          mount=$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | sed 's|^.*\t||')
+          trap 'hdiutil detach "$mount"' EXIT
+          test -x "$mount/GoFlasher.app/Contents/MacOS/GoFlasher"
+          test -x "$mount/GoFlasher.app/Contents/Library/HelperTools/org.goflasher.helper"
+          plutil -lint "$mount/GoFlasher.app/Contents/Info.plist"
       - name: Notarize, staple, and verify Gatekeeper
         if: vars.MACOS_PRODUCTION_READY == 'true'
         env:

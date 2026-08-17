@@ -66,14 +66,36 @@ type commandHelper struct {
 }
 
 func newCommandHelper() privilegedHelper {
-	if info, err := os.Stat(helperExecutable); err == nil && info.Mode().IsRegular() {
-		return &commandHelper{executable: helperExecutable}
-	}
 	executable, err := os.Executable()
 	if err != nil {
 		executable = helperExecutable
 	}
+	for _, candidate := range helperCandidates(executable, os.Getenv("APPDIR")) {
+		if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
+			return &commandHelper{executable: candidate}
+		}
+	}
 	return &commandHelper{executable: executable, arguments: []string{embeddedHelperArgument}}
+}
+
+func helperCandidates(executable, appDir string) []string {
+	candidates := []string{helperExecutable}
+	if appDir != "" {
+		candidates = appendHelperCandidate(candidates, filepath.Join(appDir, "usr", "libexec", "goflasher-helper"))
+	}
+	if executable != "" {
+		candidates = appendHelperCandidate(candidates, filepath.Clean(filepath.Join(filepath.Dir(executable), "..", "libexec", "goflasher-helper")))
+	}
+	return candidates
+}
+
+func appendHelperCandidate(candidates []string, candidate string) []string {
+	for _, existing := range candidates {
+		if existing == candidate {
+			return candidates
+		}
+	}
+	return append(candidates, candidate)
 }
 
 // IsEmbeddedHelperInvocation reports whether this process was started by the

@@ -105,12 +105,13 @@ chmod +x GoFlasher-*-x86_64.AppImage
 ./GoFlasher-*-x86_64.AppImage
 ```
 
-AppImage 無法自行安裝固定且由 root 擁有的 polkit helper。第一次使用前，請解開
-AppImage，讓系統管理員檢查並安裝其中兩個整合檔案（或改裝 Debian/RPM 套件）：
+AppImage 已內含 privileged helper，並透過 `pkexec` 直接使用，不需要另外安裝
+helper。如需使用具名的 GoFlasher polkit action（而非系統通用的 `pkexec` action），
+系統管理員可解開 AppImage，再安裝內附 policy 與固定位置的 helper：
 
 ```sh
 ./GoFlasher-*-x86_64.AppImage --appimage-extract
-sudo install -m 0755 squashfs-root/usr/share/goflasher/goflasher-helper /usr/libexec/goflasher-helper
+sudo install -m 0755 squashfs-root/usr/libexec/goflasher-helper /usr/libexec/goflasher-helper
 sudo install -m 0644 squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy \
   /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy
 ```

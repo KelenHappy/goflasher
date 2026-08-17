@@ -24,10 +24,10 @@ APPIMAGE_EXTRACT_AND_RUN=1 "$linuxdeploy" \
   --desktop-file "$root/packaging/org.goflasher.usbwriter.desktop" \
   --icon-file "$root/packaging/org.goflasher.usbwriter.svg"
 
-# AppImages cannot install a stable, root-owned polkit executable themselves.
-# Ship the exact helper and policy as auditable integration payloads; users copy
-# them to the documented system locations once, outside the AppImage mount.
-go build -trimpath -o "$appdir/usr/share/goflasher/goflasher-helper" "$root/cmd/goflasher-helper"
+# Keep the separately built helper in the standard AppDir libexec location. The
+# GUI discovers it through APPDIR, so an AppImage can perform privileged work
+# without requiring users to extract and install a second executable first.
+go build -trimpath -o "$appdir/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \
   "$appdir/usr/share/goflasher/org.goflasher.usbwriter.policy"
 install -Dm644 "$root/docs/legal/THIRD_PARTY_NOTICES.md" \
