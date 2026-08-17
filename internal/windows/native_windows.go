@@ -135,6 +135,9 @@ func sameWindowsIdentity(a, b windowsIdentityEvidence) bool {
 	return a == b
 }
 
+// parseStorageDeviceIDs validates a STORAGE_DEVICE_ID_DESCRIPTOR and returns
+// its single device-associated NAA/EUI WWN. Empty identifiers are ignored, but
+// conflicting identifiers are rejected so they cannot become unstable IDs.
 func parseStorageDeviceIDs(b []byte) (string, error) {
 	if len(b) < 12 {
 		return "", fmt.Errorf("short STORAGE_DEVICE_ID_DESCRIPTOR: got %d bytes", len(b))
@@ -168,6 +171,10 @@ func parseStorageDeviceIDs(b []byte) (string, error) {
 	return found, nil
 }
 
+// parseStorageIdentifier reads one variable-length STORAGE_IDENTIFIER entry.
+// The returned offset is relative to the current entry; a zero offset marks
+// the final entry. Only device-associated NAA and EUI identifiers are useful as
+// WWNs, so other valid identifier types return an empty value without error.
 func parseStorageIdentifier(b []byte, off int, index uint32) (string, int, error) {
 	if off+8 > len(b) {
 		return "", 0, fmt.Errorf("truncated STORAGE_IDENTIFIER header %d", index)
@@ -293,6 +300,10 @@ func diskRecordFromDescriptor(h windows.Handle, number uint32, length uint64, q 
 	return r, nil
 }
 
+// list inspects every Windows physical-drive slot and enriches each discovered
+// disk with system-disk, PnP, USB-topology, and mounted-volume information.
+// A failure in a safety-related topology query aborts the complete listing
+// rather than returning records whose eligibility could be misclassified.
 func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -714,6 +725,8 @@ func isGUID(s string) bool {
 	return true
 }
 
+// validGUIDByte enforces the canonical 8-4-4-4-12 GUID layout: separators at
+// the four fixed positions and hexadecimal ASCII everywhere else.
 func validGUIDByte(index int, value byte) bool {
 	if index == 8 || index == 13 || index == 18 || index == 23 {
 		return value == '-'
