@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/ulikunitz/xz"
@@ -249,7 +250,13 @@ func TestInspectedSourceRetainsOriginalFileAcrossPathReplacement(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else if err := os.Rename(replacement, selected); err != nil {
-				t.Fatal(err)
+				// Windows normally denies replacement while the inspected handle is
+				// retained because os.Open does not share delete access. That is the
+				// stronger acceptable outcome: the pathname race is prevented by the
+				// OS rather than survived by the retained inode handle as on Unix.
+				if runtime.GOOS != "windows" || !errors.Is(err, os.ErrPermission) {
+					t.Fatal(err)
+				}
 			}
 			r, err := Open(info)
 			if err != nil {
