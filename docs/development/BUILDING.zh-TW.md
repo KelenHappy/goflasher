@@ -148,7 +148,7 @@ packaging/make-appimage.sh dist/goflasher 1.0.0 dist \
   /path/to/linuxdeploy /path/to/appimagetool
 ```
 
-AppImage含helper及policy，但不能從暫時mount安全地安裝它們。請先稽核，再依README安裝到固定system path；完成前raw access會fail closed。
+AppImage在`usr/libexec`內含可執行helper，並透過`APPDIR`尋找，因此不需要先安裝system helper即可使用。若要使用具名polkit action，可先稽核，再依README安裝到固定system path。
 
 ## RPM package
 

@@ -132,13 +132,14 @@ does not call XDG Desktop Portal, D-Bus, `kdialog`, Zenity, Dolphin, or Nautilus
 so it requires no desktop-specific package. The chooser title, Choose button,
 and Cancel button use GoFlasher's English or Traditional Chinese localization.
 
-An AppImage cannot install a stable root-owned polkit helper. Before its first
-use, extract the AppImage and have an administrator audit and install the two
-bundled integration files (or install the Debian package instead):
+The AppImage includes its privileged helper and uses it directly through
+`pkexec`, so no separate helper installation is required. To use the named
+GoFlasher polkit action instead of the system's generic `pkexec` action, an
+administrator may install the bundled policy and a stable copy of the helper:
 
 ```sh
 ./GoFlasher-*-x86_64.AppImage --appimage-extract
-sudo install -m 0755 squashfs-root/usr/share/goflasher/goflasher-helper /usr/libexec/goflasher-helper
+sudo install -m 0755 squashfs-root/usr/libexec/goflasher-helper /usr/libexec/goflasher-helper
 sudo install -m 0644 squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy \
   /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy
 ```

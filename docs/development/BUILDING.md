@@ -211,10 +211,11 @@ The current release workflow produces an x86-64 AppImage. The script uses
 `linuxdeploy` to populate the AppDir and `appimagetool` to create the final
 image.
 
-The AppImage contains the helper and policy under `usr/share/goflasher`, but
-cannot safely install them from its transient mount. Extract the AppImage and
-install those files to the fixed system paths shown in the README, after
-auditing them. Raw access fails closed until that integration is installed.
+The AppImage contains an executable helper under `usr/libexec` and discovers it
+through `APPDIR`, so it works without a system helper installation. The bundled
+policy remains available under `usr/share/goflasher`; administrators who want
+the named GoFlasher polkit action can extract, audit, and install both files to
+the fixed system paths shown in the README.
 
 ## RPM package
 
