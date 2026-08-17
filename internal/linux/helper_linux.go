@@ -320,10 +320,14 @@ func (h *commandHelper) FormatFAT32(ctx context.Context, r privilegedRequest, up
 	return nil
 }
 
-type helperEnvironment struct{ SysDevBlock, SysClassBlock, MountInfo, Swaps, DevRoot string }
+type helperEnvironment struct {
+	SysDevBlock, SysClassBlock, MountInfo, Swaps, DevRoot string
+	openFile                                              func(string, int, os.FileMode) (*os.File, error)
+	fstat                                                 func(int, *syscall.Stat_t) error
+}
 
 func realHelperEnvironment() helperEnvironment {
-	return helperEnvironment{"/sys/dev/block", "/sys/class/block", "/proc/self/mountinfo", "/proc/swaps", "/dev"}
+	return helperEnvironment{SysDevBlock: "/sys/dev/block", SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev"}
 }
 
 // RunPrivilegedHelper serves exactly one authenticated operation over stdin/stdout.
@@ -588,45 +592,118 @@ func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.
 	} else if req.Mode != modeRead {
 		flags = os.O_WRONLY
 	}
-	return os.OpenFile(filepath.Join(env.DevRoot, name), flags|syscall.O_CLOEXEC, 0)
+	opener := env.openFile
+	if opener == nil {
+		opener = os.OpenFile
+	}
+	f, err := opener(filepath.Join(env.DevRoot, name), flags|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOpenedDevice(req, env, name, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// validateOpenedDevice binds the final authorization decision to the kernel
+// object referenced by f. Opening a raw device does not itself write bytes, so
+// every destructive mode reaches this check before its first write or ioctl.
+func validateOpenedDevice(req privilegedRequest, env helperEnvironment, expectedName string, f *os.File) error {
+	var st syscall.Stat_t
+	fstat := env.fstat
+	if fstat == nil {
+		fstat = syscall.Fstat
+	}
+	if err := fstat(int(f.Fd()), &st); err != nil {
+		return fmt.Errorf("fstat opened device: %w", err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK || unix.Major(uint64(st.Rdev)) != req.Major || unix.Minor(uint64(st.Rdev)) != req.Minor {
+		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
+	}
+	name, real, err := resolveDevice(req, env)
+	if err != nil || name != expectedName {
+		return fmt.Errorf("%w: opened device no longer resolves", ErrDeviceChanged)
+	}
+	if _, _, err = validateDeviceMetadata(req, filepath.Join(env.SysClassBlock, name), real); err != nil {
+		return fmt.Errorf("revalidate opened device metadata: %w", err)
+	}
+	// Mount and swap state may also have changed while open() was pending.
+	unsafe, err := mountedOrSystem(name, req.Major, req.Minor, env)
+	if err != nil {
+		return fmt.Errorf("revalidate opened device safety: %w", err)
+	}
+	if unsafe {
+		return ErrSystemDisk
+	}
+	return nil
 }
 
 func mountedOrSystem(name string, major, minor uint32, env helperEnvironment) (bool, error) {
+	topology, err := readBlockTopology(env.SysClassBlock)
+	if err != nil {
+		return false, err
+	}
 	mounts, err := parseMountInfo(env.MountInfo)
 	if err != nil {
 		return false, err
 	}
-	if deviceMounted(name, major, minor, env.SysClassBlock, mounts) {
+	if mounted, err := deviceMounted(name, major, minor, mounts, topology); err != nil {
+		return false, err
+	} else if mounted {
 		return true, nil
 	}
 	swaps, err := parseSwaps(env.Swaps)
 	if err != nil {
 		return false, err
 	}
-	return deviceUsedForSwap(name, env.SysClassBlock, swaps), nil
+	return deviceUsedForSwap(name, env.DevRoot, swaps, topology)
 }
 
-func deviceMounted(name string, major, minor uint32, classRoot string, mounts map[devNumber][]string) bool {
+func deviceMounted(name string, major, minor uint32, mounts map[devNumber][]string, topology *blockTopology) (bool, error) {
 	for number, points := range mounts {
 		if len(points) == 0 {
 			continue
 		}
-		if sameDevice(number, major, minor) || parentName(classRoot, number) == name {
-			return true
+		mounted, err := topology.nameForNumber(number)
+		if err != nil {
+			if number.major == 0 {
+				continue
+			}
+			return false, err
+		}
+		backed, err := topology.dependsOn(mounted, name)
+		if err != nil {
+			return false, err
+		}
+		if sameDevice(number, major, minor) || backed {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func sameDevice(number devNumber, major, minor uint32) bool {
 	return number.major == major && number.minor == minor
 }
 
-func deviceUsedForSwap(name, classRoot string, swaps map[string]bool) bool {
+func deviceUsedForSwap(name, devRoot string, swaps map[string]bool, topology *blockTopology) (bool, error) {
 	for path := range swaps {
-		if filepath.Base(path) == name || parentForPath(classRoot, path) == name {
-			return true
+		swapName, block, err := topology.nameForSwapPath(path, devRoot)
+		if err != nil {
+			return false, err
+		}
+		if !block {
+			continue
+		}
+		backed, err := topology.dependsOn(swapName, name)
+		if err != nil {
+			return false, err
+		}
+		if backed {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

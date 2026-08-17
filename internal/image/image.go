@@ -38,6 +38,79 @@ type Info struct {
 	CompressedSize   uint64
 	UncompressedSize uint64 // zero when the stream does not advertise its size
 	SHA256           string
+	source           *Source
+}
+
+// Source owns the single pathname-opened file used for inspection and writing.
+// Rewinding this descriptor recreates streaming decompressors without resolving
+// the caller-controlled pathname a second time.
+type Source struct {
+	file     *os.File
+	identity os.FileInfo
+}
+
+func (i Info) HasRetainedSource() bool { return i.source != nil }
+
+func (i Info) CloseSource() error {
+	if i.source == nil {
+		return nil
+	}
+	return i.source.file.Close()
+}
+
+// ValidateSource detects truncation and in-place metadata changes before a
+// target is opened. Path replacement is irrelevant because source.file remains
+// bound to the inode/Windows file object originally inspected.
+func (i Info) ValidateSource() error {
+	if i.source == nil || i.source.identity == nil {
+		return fmt.Errorf("%w: inspected source handle is unavailable", ErrUnsupported)
+	}
+	current, err := i.source.file.Stat()
+	if err != nil {
+		return fmt.Errorf("validate inspected source: %w", err)
+	}
+	if !os.SameFile(i.source.identity, current) || i.source.identity.Size() != current.Size() || !i.source.identity.ModTime().Equal(current.ModTime()) {
+		return fmt.Errorf("%w: inspected source file changed", ErrUnsupported)
+	}
+	return nil
+}
+
+// VerifySourceContext rereads the retained, decoded stream immediately before
+// target preparation. This detects same-inode content changes even when an
+// attacker preserves size and timestamps. The existing checksum calculated
+// while writing remains a final defense against later concurrent modification.
+func (i Info) VerifySourceContext(ctx context.Context) error {
+	if err := i.ValidateSource(); err != nil {
+		return err
+	}
+	r, err := Open(i)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	h := sha256.New()
+	buf := make([]byte, 4<<20)
+	var size uint64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+			size += uint64(n)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if size != i.UncompressedSize || hex.EncodeToString(h.Sum(nil)) != i.SHA256 {
+		return fmt.Errorf("%w: retained source bytes changed after inspection", ErrUnsupported)
+	}
+	return nil
 }
 
 // Detect validates both the filename and compression magic. Image payloads do
@@ -114,31 +187,56 @@ func (r *ReadCloser) Close() error {
 // Open returns a buffered, streaming decompressor; it never materializes the
 // uncompressed image on disk or in memory.
 func Open(info Info) (*ReadCloser, error) {
+	if info.source != nil {
+		if err := info.ValidateSource(); err != nil {
+			return nil, err
+		}
+		return openFile(info, info.source.file, false)
+	}
 	f, err := os.Open(info.Path)
 	if err != nil {
 		return nil, err
 	}
+	return openFile(info, f, true)
+}
+
+func openFile(info Info, f *os.File, ownFile bool) (*ReadCloser, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		if ownFile {
+			_ = f.Close()
+		}
+		return nil, err
+	}
 	var reader io.Reader = f
-	closers := []io.Closer{f}
+	var closers []io.Closer
+	if ownFile {
+		closers = append(closers, f)
+	}
 	switch info.Compression {
 	case CompressionNone:
 	case CompressionGzip:
 		gz, err := gzip.NewReader(f)
 		if err != nil {
-			f.Close()
+			if ownFile {
+				_ = f.Close()
+			}
 			return nil, err
 		}
-		reader, closers = gz, []io.Closer{gz, f}
+		reader, closers = gz, append([]io.Closer{gz}, closers...)
 	case CompressionXZ:
 		// Go's standard library does not include XZ. Use a pure-Go streaming
 		// decoder so every packaged platform has identical support without an
 		// external executable or an uncompressed temporary file.
 		if err := requireXZStreamFooter(f); err != nil {
-			f.Close()
+			if ownFile {
+				_ = f.Close()
+			}
 			return nil, err
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			f.Close()
+			if ownFile {
+				_ = f.Close()
+			}
 			return nil, err
 		}
 		xr, err := xz.NewReader(f)
@@ -148,7 +246,9 @@ func Open(info Info) (*ReadCloser, error) {
 		}
 		reader = xr
 	default:
-		f.Close()
+		if ownFile {
+			_ = f.Close()
+		}
 		return nil, ErrUnsupported
 	}
 	return &ReadCloser{Reader: bufio.NewReaderSize(reader, 1<<20), closers: closers}, nil
@@ -187,8 +287,20 @@ func Checksum(r io.Reader) (string, error) {
 func Inspect(info Info) (Info, error) { return InspectContext(context.Background(), info) }
 
 func InspectContext(ctx context.Context, info Info) (Info, error) {
-	r, err := Open(info)
+	created := false
+	if info.source == nil {
+		f, err := os.Open(info.Path)
+		if err != nil {
+			return Info{}, err
+		}
+		info.source = &Source{file: f}
+		created = true
+	}
+	r, err := openFile(info, info.source.file, false)
 	if err != nil {
+		if created {
+			_ = info.CloseSource()
+		}
 		return Info{}, err
 	}
 	defer r.Close()
@@ -197,6 +309,9 @@ func InspectContext(ctx context.Context, info Info) (Info, error) {
 	var n uint64
 	for {
 		if err := ctx.Err(); err != nil {
+			if created {
+				_ = info.CloseSource()
+			}
 			return Info{}, err
 		}
 		read, readErr := r.Read(buf)
@@ -208,10 +323,21 @@ func InspectContext(ctx context.Context, info Info) (Info, error) {
 			break
 		}
 		if readErr != nil {
+			if created {
+				_ = info.CloseSource()
+			}
 			return Info{}, readErr
 		}
 	}
 	info.UncompressedSize = n
 	info.SHA256 = hex.EncodeToString(h.Sum(nil))
+	identity, err := info.source.file.Stat()
+	if err != nil {
+		if created {
+			_ = info.CloseSource()
+		}
+		return Info{}, err
+	}
+	info.source.identity = identity
 	return info, nil
 }

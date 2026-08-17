@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/ulikunitz/xz"
@@ -202,6 +204,7 @@ func TestInspect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer got.CloseSource()
 	wantSum := sha256.Sum256(payload)
 	if got.UncompressedSize != uint64(len(payload)) {
 		t.Fatalf("UncompressedSize = %d, want %d", got.UncompressedSize, len(payload))
@@ -211,6 +214,103 @@ func TestInspect(t *testing.T) {
 	}
 	if got.Path != info.Path || got.Format != info.Format || got.Compression != info.Compression {
 		t.Fatalf("Inspect() changed source metadata: got %+v, input %+v", got, info)
+	}
+}
+
+func TestInspectedSourceRetainsOriginalFileAcrossPathReplacement(t *testing.T) {
+	for _, symlink := range []bool{false, true} {
+		t.Run(fmt.Sprintf("symlink=%t", symlink), func(t *testing.T) {
+			dir := t.TempDir()
+			original := filepath.Join(dir, "original.img")
+			selected := original
+			want := []byte("inspected bytes")
+			if err := os.WriteFile(original, want, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if symlink {
+				selected = filepath.Join(dir, "selected.img")
+				if err := os.Symlink(original, selected); err != nil {
+					t.Fatal(err)
+				}
+			}
+			info, err := Inspect(Info{Path: selected, Compression: CompressionNone})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer info.CloseSource()
+			replacement := filepath.Join(dir, "replacement.img")
+			if err := os.WriteFile(replacement, []byte("attacker bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if symlink {
+				if err := os.Remove(selected); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(replacement, selected); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Rename(replacement, selected); err != nil {
+				// Windows normally denies replacement while the inspected handle is
+				// retained because os.Open does not share delete access. That is the
+				// stronger acceptable outcome: the pathname race is prevented by the
+				// OS rather than survived by the retained inode handle as on Unix.
+				if runtime.GOOS != "windows" || !errors.Is(err, os.ErrPermission) {
+					t.Fatal(err)
+				}
+			}
+			r, err := Open(info)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(r)
+			_ = r.Close()
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("retained source = %q, err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestInspectedSourceRejectsInPlaceChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(path, []byte("original image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Inspect(Info{Path: path, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.CloseSource()
+	if err := os.Truncate(path, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := info.ValidateSource(); err == nil {
+		t.Fatal("truncated retained source passed validation")
+	}
+}
+
+func TestRetainedSourceChecksumRejectsSameSizeInPlaceChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(path, []byte("authorized"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Inspect(Info{Path: path, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.CloseSource()
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("malicious!"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, stat.ModTime(), stat.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := info.VerifySourceContext(context.Background()); err == nil {
+		t.Fatal("same-size in-place replacement passed retained checksum")
 	}
 }
 
