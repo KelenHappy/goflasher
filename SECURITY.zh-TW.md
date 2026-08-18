@@ -36,4 +36,4 @@ Linux GUI 不應以 root 執行，也不會取得 raw-device descriptor。卸載
 
 IPC request 不包含任意檔案路徑，只包含已重新驗證的硬體 identity、可取得時的 serial/WWN、預期 major/minor、精確容量，以及 `write`、`read-back`、`flush` 或受限格式化模式。Helper 在開啟任何東西前，會自行解析 `/sys/dev/block/<major>:<minor>`、比對 sysfs identity及容量、檢查衍生 `/dev` node的 block type與device number、拒絕 mounted、system或swap disk，並自行衍生device-node path。裝置遭替換、安全 metadata缺失、request格式錯誤、未知欄位、不支援模式或授權取消都會 fail closed。
 
-每個 helper process只接受一個request及一個有界操作。它不解析映像檔、不列舉呼叫端指定的路徑、不掛載filesystem，也不是通用root service。Polkit使用不保留授權的 `auth_admin`，因此每個raw write/read-back/flush階段都可能出現驗證提示。Helper與policy的套件ownership是信任邊界的一部分；AppImage使用者必須先把隨附且可稽核的副本安裝到固定、由root擁有的位置。
+每個 helper process只接受一個request及一個有界操作。它不解析映像檔、不列舉呼叫端指定的路徑、不掛載filesystem，也不是通用root service。Polkit使用不保留授權的 `auth_admin`，因此每個raw write/read-back/flush階段都可能出現驗證提示。Helper與policy的套件ownership是信任邊界的一部分；兩者都必須位於固定且由root擁有的位置，Debian、RPM與Arch Linux套件即以此方式安裝。

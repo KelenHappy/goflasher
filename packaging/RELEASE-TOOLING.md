@@ -6,13 +6,14 @@ upstream commit and change the SHA in the same pull request. Dependabot can
 continue proposing `github-actions` updates, but a floating major tag must not
 be reintroduced.
 
-The former AppImage build downloaded and executed `appimagetool` and
-`linuxdeploy` from their mutable `continuous` releases. GitHub's release digest
-was fetched from the same mutable release metadata as the executable, so it was
-not an independent trust anchor. AppImage production output is disabled until
-reviewed immutable releases and repository-pinned SHA-256 values are available.
-Debian, RPM, and Arch packages remain produced by the pinned Ubuntu runner and
-its distribution package manager.
+AppImage is no longer a supported distribution format. Its build downloaded and
+executed `appimagetool` and `linuxdeploy` from their mutable `continuous`
+releases, and GitHub's release digest came from the same mutable release
+metadata as the executable, so it was not an independent trust anchor. The
+packaging script and its release job have been removed; do not reintroduce a
+build step that fetches tooling from a mutable upstream release. Debian, RPM,
+and Arch packages remain produced by the pinned Ubuntu runner and its
+distribution package manager.
 
 `download-github-release-asset.sh` is retained for future tooling but requires a
 non-mutable tag and a caller-supplied SHA-256 value committed by the consuming

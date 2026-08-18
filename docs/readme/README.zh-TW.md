@@ -75,7 +75,6 @@ macOS在signed/notarized release gate啟用前仍提供source build。
 
 封裝版本發布後，儲存庫的發行工作流程會在 GitHub Release 提供下列檔案：
 
-- `GoFlasher-<version>-x86_64.AppImage`
 - `goflasher_<version>_amd64.deb`
 - `goflasher-<version>-1*.x86_64.rpm`
 - `goflasher-<version>-1-x86_64.pkg.tar.zst`
@@ -98,23 +97,8 @@ Windows 目前必須以系統管理員身分執行；macOS 目前仍需提升 ra
 sha256sum --check SHA256SUMS
 ```
 
-執行 AppImage：
-
-```sh
-chmod +x GoFlasher-*-x86_64.AppImage
-./GoFlasher-*-x86_64.AppImage
-```
-
-AppImage 已內含 privileged helper，並透過 `pkexec` 直接使用，不需要另外安裝
-helper。如需使用具名的 GoFlasher polkit action（而非系統通用的 `pkexec` action），
-系統管理員可解開 AppImage，再安裝內附 policy 與固定位置的 helper：
-
-```sh
-./GoFlasher-*-x86_64.AppImage --appimage-extract
-sudo install -m 0755 squashfs-root/usr/libexec/goflasher-helper /usr/libexec/goflasher-helper
-sudo install -m 0644 squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy \
-  /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy
-```
+Debian、RPM 與 Arch Linux 套件會把 privileged helper 與具名的 GoFlasher polkit
+action 安裝到固定且 root 擁有的系統路徑，不需要另外安裝 helper。
 
 Linux 一律使用已包入 GoFlasher 的 Fyne 映像檔選擇器；選檔流程不會呼叫 XDG
 Desktop Portal、D-Bus、`kdialog`、Zenity、Dolphin 或 Nautilus，因此不需要任何
@@ -140,7 +124,7 @@ sudo dnf install ./goflasher-*.x86_64.rpm
 ## 建置
 
 GoFlasher 需要 [`go.mod`](../../go.mod) 指定的 Go 版本。建置 Fyne GUI 還需要 Linux
-的 OpenGL、X11 與 Wayland 開發套件。相依套件安裝、從原始碼建置、AppImage、
+的 OpenGL、X11 與 Wayland 開發套件。相依套件安裝、從原始碼建置、
 Debian/RPM 封裝方式及目前的 Windows/macOS 限制，請參閱 **[BUILDING.md](../development/BUILDING.md)**。
 
 開發用 GUI 可使用下列指令啟動：

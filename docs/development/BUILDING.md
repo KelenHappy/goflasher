@@ -200,27 +200,6 @@ helper and does not require `dosfstools` or execute a filesystem utility as
 root. The helper is a separate non-GUI executable; never make the GUI setuid
 and never run it with `sudo`.
 
-## AppImage
-
-The AppImage script requires executable copies of `linuxdeploy` and
-`appimagetool`:
-
-```sh
-packaging/make-appimage.sh \
-  dist/goflasher 1.0.0 dist \
-  /path/to/linuxdeploy /path/to/appimagetool
-```
-
-The current release workflow produces an x86-64 AppImage. The script uses
-`linuxdeploy` to populate the AppDir and `appimagetool` to create the final
-image.
-
-The AppImage contains an executable helper under `usr/libexec` and discovers it
-through `APPDIR`, so it works without a system helper installation. The bundled
-policy remains available under `usr/share/goflasher`; administrators who want
-the named GoFlasher polkit action can extract, audit, and install both files to
-the fixed system paths shown in the README.
-
 ## RPM package
 
 The RPM packaging script requires `rpmbuild`. After building the GUI binary:
@@ -261,7 +240,7 @@ bundle or accompanying documentation.
 Generate checksums only after all release artifacts are final:
 
 ```sh
-(cd dist && sha256sum *.deb *.rpm *.pkg.tar.zst *.AppImage > SHA256SUMS)
+(cd dist && sha256sum *.deb *.rpm *.pkg.tar.zst > SHA256SUMS)
 ```
 
 Verify them with:
@@ -278,7 +257,7 @@ started manually. It:
 
 1. runs the headless tests;
 2. builds the Linux Fyne binary;
-3. builds the Debian, RPM, Arch Linux, AppImage, and signed Windows amd64 portable ZIP assets;
+3. builds the Debian, RPM, Arch Linux, and signed Windows amd64 portable ZIP assets;
 4. generates platform checksums;
 5. uploads each platform's files as Actions artifacts; and
 6. on tag builds, attaches them to the same GitHub release.

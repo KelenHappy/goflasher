@@ -56,10 +56,9 @@ Build packages using the release workflow or the commands in the README. On a
 disposable VM, verify:
 
 1. `sha256sum --check SHA256SUMS` succeeds.
-2. The AppImage starts after `chmod +x` without installation.
-3. The Debian package installs with `apt install ./goflasher_*.deb`.
-4. The desktop launcher appears and opens GoFlasher as a regular user.
-5. Selecting an image opens the bundled Fyne chooser on Linux (the native
+2. The Debian package installs with `apt install ./goflasher_*.deb`.
+3. The desktop launcher appears and opens GoFlasher as a regular user.
+4. Selecting an image opens the bundled Fyne chooser on Linux (the native
    chooser on Windows and macOS), and cancelling it changes no application
    state.
 

@@ -139,17 +139,6 @@ sudo apt install ./dist/goflasher_1.0.0_amd64.deb
 
 套件會安裝helper與polkit action。FAT32由受限helper內的共用formatter完成，不需要dosfstools，也不以root執行filesystem utility。GUI不可設為setuid，也不可用sudo執行。
 
-## AppImage
-
-需要可執行的 `linuxdeploy` 與 `appimagetool`：
-
-```sh
-packaging/make-appimage.sh dist/goflasher 1.0.0 dist \
-  /path/to/linuxdeploy /path/to/appimagetool
-```
-
-AppImage在`usr/libexec`內含可執行helper，並透過`APPDIR`尋找，因此不需要先安裝system helper即可使用。若要使用具名polkit action，可先稽核，再依README安裝到固定system path。
-
 ## RPM package
 
 ```sh
@@ -180,7 +169,7 @@ notice及dependency license。加入Arch package不會改變Linux privilege boun
 所有release artifact完成後才產生：
 
 ```sh
-(cd dist && sha256sum *.deb *.rpm *.pkg.tar.zst *.AppImage > SHA256SUMS)
+(cd dist && sha256sum *.deb *.rpm *.pkg.tar.zst > SHA256SUMS)
 cd dist && sha256sum --check SHA256SUMS
 ```
 

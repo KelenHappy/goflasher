@@ -229,11 +229,11 @@ func TestEmbeddedHelperInvocationRequiresExactPrivateArgument(t *testing.T) {
 	}
 }
 
-func TestHelperCandidatesIncludeAppImageHelper(t *testing.T) {
-	got := helperCandidates("/tmp/.mount_GoFlasher/usr/bin/goflasher", "/tmp/.mount_GoFlasher")
+func TestHelperCandidatesIncludeExecutableRelativeHelper(t *testing.T) {
+	got := helperCandidates("/opt/goflasher/usr/bin/goflasher")
 	want := []string{
 		helperExecutable,
-		"/tmp/.mount_GoFlasher/usr/libexec/goflasher-helper",
+		"/opt/goflasher/usr/libexec/goflasher-helper",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("helper candidates = %#v, want %#v", got, want)

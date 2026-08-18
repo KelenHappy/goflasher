@@ -61,5 +61,5 @@ not parse images, enumerate caller-selected paths, mount filesystems, or expose
 a general-purpose root service. Polkit uses `auth_admin` without retained
 authorization, so users should expect an authentication prompt for each raw
 write/read-back/flush phase. Package ownership of both the helper and policy is
-part of the trust boundary; AppImage users must install the bundled, auditable
-copies into fixed root-owned locations before raw access can work.
+part of the trust boundary; both must live in fixed root-owned locations, which
+the Debian, RPM, and Arch Linux packages provide.

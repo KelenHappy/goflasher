@@ -50,29 +50,14 @@ the exact boundary and the native-API migration direction.
 
 ## Install
 
-Run the AppImage:
-
-```sh
-chmod +x GoFlasher-*-x86_64.AppImage
-./GoFlasher-*-x86_64.AppImage
-```
-
 On Linux, GoFlasher always uses its bundled Fyne image chooser. Image selection
 does not call XDG Desktop Portal, D-Bus, `kdialog`, Zenity, Dolphin, or Nautilus,
 so it requires no desktop-specific package. The chooser title, Choose button,
 and Cancel button use GoFlasher's English or Traditional Chinese localization.
 
-The AppImage includes its privileged helper and uses it directly through
-`pkexec`, so no separate helper installation is required. To use the named
-GoFlasher polkit action instead of the system's generic `pkexec` action, an
-administrator may install the bundled policy and a stable copy of the helper:
-
-```sh
-./GoFlasher-*-x86_64.AppImage --appimage-extract
-sudo install -m 0755 squashfs-root/usr/libexec/goflasher-helper /usr/libexec/goflasher-helper
-sudo install -m 0644 squashfs-root/usr/share/goflasher/org.goflasher.usbwriter.policy \
-  /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy
-```
+The Debian, RPM, and Arch Linux packages install the privileged helper and the
+named GoFlasher polkit action to their fixed root-owned system paths; no
+separate helper installation is required.
 
 Install the Debian package on Debian or Ubuntu:
 

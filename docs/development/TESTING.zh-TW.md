@@ -39,10 +39,9 @@ Linux image chooser應開啟內建Fyne browser而不呼叫desktop portal；檢�
 在可丟棄VM確認：
 
 1. `sha256sum --check SHA256SUMS` 成功；
-2. AppImage在 `chmod +x` 後可啟動；
-3. Debian package可用 `apt install ./goflasher_*.deb` 安裝；
-4. desktop launcher以一般使用者開啟GoFlasher；
-5. 選檔及取消不會錯誤改變application state。
+2. Debian package可用 `apt install ./goflasher_*.deb` 安裝；
+3. desktop launcher以一般使用者開啟GoFlasher；
+4. 選檔及取消不會錯誤改變application state。
 
 ## 有版本的實體硬體驗收
 
