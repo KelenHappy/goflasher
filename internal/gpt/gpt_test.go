@@ -113,7 +113,7 @@ func TestPartitionWriterAtIsBoundedAndAtomicOnRejection(t *testing.T) {
 	for _, x := range []struct {
 		off int64
 		n   int
-	}{{-1, 1}, {0, 2048*512 + 1}, {2048 * 512, 1}} {
+	}{{-1, 1}, {0, 2048*512 + 1}, {2048 * 512, 1}, {math.MaxInt64, 1}} {
 		if n, err := w.WriteAt(make([]byte, x.n), x.off); err == nil || n != 0 {
 			t.Fatalf("write=(%d,%v)", n, err)
 		}

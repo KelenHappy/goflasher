@@ -287,3 +287,13 @@ func (p *PartitionWriterAt) WriteAt(b []byte, off int64) (int, error) {
 	}
 	return p.w.WriteAt(b, int64(p.base+u))
 }
+
+// Sync flushes the backing device when it supports syncing. This makes a
+// partition view suitable for APIs which require both WriterAt and Sync while
+// preserving support for in-memory WriterAt implementations.
+func (p *PartitionWriterAt) Sync() error {
+	if s, ok := p.w.(interface{ Sync() error }); ok {
+		return s.Sync()
+	}
+	return nil
+}
