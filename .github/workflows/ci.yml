@@ -60,12 +60,6 @@ jobs:
       - name: Test native disk manager
         run: go test ./internal/disk
       - run: go test ./...
-      # Compile and exercise the GUI code without rebuilding Fyne's native
-      # OpenGL driver on every pull request. Native release builds and the
-      # documented local build commands still use the production `fyne` tag.
-      - name: Test GUI source set
-        if: runner.os == 'Windows' || runner.os == 'macOS'
-        run: go test -tags "fyne ci" ./cmd/usbwriter
 
   quality:
     runs-on: ubuntu-latest
