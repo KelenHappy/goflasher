@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
-	fynetest "fyne.io/fyne/v2/test"
+	fyneapp "fyne.io/fyne/v2/app"
 	core "github.com/goflasher/goflasher/internal/app"
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/i18n"
@@ -186,7 +186,7 @@ func TestRefreshAndLanguageChangeShareGUIThread(t *testing.T) {
 
 func newTestController(t *testing.T) *guiController {
 	t.Helper()
-	a := fynetest.NewApp()
+	a := fyneapp.NewWithID("org.goflasher.test")
 	t.Cleanup(a.Quit)
 	w := a.NewWindow("test")
 	tr := i18n.New("en")
