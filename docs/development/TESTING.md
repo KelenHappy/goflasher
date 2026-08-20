@@ -4,6 +4,10 @@
 
 ## Automated suite
 
+Unit tests use Go's standard `testing` package and standard-library helpers.
+Do not add assertion or mocking frameworks such as `testify`; small fakes should
+live beside the tests that need them.
+
 Run the complete headless test suite:
 
 ```sh
