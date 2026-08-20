@@ -176,6 +176,7 @@ func sectorsPerCluster(size uint64) uint64 {
 		return 64
 	}
 }
+
 // fatLabel writes into a fixed 11-byte, space-padded field. copy() bounds the
 // write to min(11, len(label)), so even if ValidLabel is ever loosened, an
 // over-long or arbitrary-byte label cannot overflow this field — the worst case
