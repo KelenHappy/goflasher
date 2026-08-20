@@ -148,7 +148,7 @@ func newFileServiceFixture(t *testing.T, payload []byte, targetMultiplier int) f
 func TestServiceEntersFlushingBeforeWriterClose(t *testing.T) {
 	payload := []byte("image payload")
 	dir := t.TempDir()
-	source := filepath.Join(dir, "source.iso")
+	source := filepath.Join(dir, "source.img")
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(source, payload, 0600); err != nil {
 		t.Fatal(err)

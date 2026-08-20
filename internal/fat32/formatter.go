@@ -23,14 +23,25 @@ const fatCount = uint64(2)
 type layout struct{ totalSectors, sectorsPerCluster, fatSectors, clusters uint64 }
 
 func Format(ctx context.Context, device Device, size uint64, label string, progress ProgressFunc) error {
+	return FormatPartition(ctx, device, size, label, progress)
+}
+
+// FormatPartition creates a FAT32 filesystem on a partition-relative device
+// view. partitionSize is the length of that view, not the size of the backing
+// disk. Callers formatting a partitioned disk must supply a bounded view so
+// every offset used below is relative to the beginning of the partition.
+//
+// Format remains the whole-device (superfloppy) entry point for callers which
+// intentionally erase and format an entire device.
+func FormatPartition(ctx context.Context, partition Device, partitionSize uint64, label string, progress ProgressFunc) error {
 	if !ValidLabel(label) {
 		return errors.New("invalid FAT32 volume label")
 	}
-	l, err := newLayout(size)
+	l, err := newLayout(partitionSize)
 	if err != nil {
 		return err
 	}
-	f := formatter{ctx: ctx, device: device, layout: l, label: label, progress: progress}
+	f := formatter{ctx: ctx, device: partition, layout: l, label: label, progress: progress}
 	return f.run()
 }
 func ValidLabel(label string) bool {
