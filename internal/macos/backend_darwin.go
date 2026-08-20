@@ -49,6 +49,7 @@ func NewBackend() *Backend { return NewBackendWithManager(disk.NewManager()) }
 func NewBackendWithManager(manager disk.Manager) *Backend {
 	return &Backend{manager: manager, openRaw: openRawFile, openFormat: openFormatTarget}
 }
+
 // exclusiveLockFlags requests a non-blocking advisory exclusive open lock for
 // writes. O_EXLOCK coordinates with DiskArbitration and Apple's own disk tools
 // (newfs, diskutil, hdiutil) so they do not auto-mount or write metadata to the
@@ -124,7 +125,13 @@ func (b *Backend) diskSnapshot(ctx context.Context, selected device.Device) (dis
 	if !fresh.IsAllowed {
 		return disk.Disk{}, ErrUnsupportedDevice
 	}
-	if !device.SameIdentity(selected, fresh) || selected.Size != fresh.Size || selected.Model != fresh.Model {
+	if !device.SameIdentity(selected, fresh) {
+		return disk.Disk{}, ErrDeviceChanged
+	}
+	if selected.Size != fresh.Size {
+		return disk.Disk{}, ErrDeviceChanged
+	}
+	if selected.Model != fresh.Model {
 		return disk.Disk{}, ErrDeviceChanged
 	}
 	return d, nil
@@ -164,27 +171,65 @@ func (b *Backend) open(ctx context.Context, selected device.Device, flag int) (*
 // fd's rdev to the freshly authorized BSD node prevents path replacement with
 // a different device number between refresh and open.
 func (b *Backend) validateOpenedDisk(ctx context.Context, authorized disk.Disk, fd uintptr) error {
+	opened, err := b.openedDiskStat(fd)
+	if err != nil {
+		return ErrDeviceChanged
+	}
+	fresh, err := b.refreshedAuthorizedDisk(ctx, authorized)
+	if err != nil {
+		return ErrDeviceChanged
+	}
+	if !b.matchesDeviceNode(fresh.Device, opened.Rdev) {
+		return ErrDeviceChanged
+	}
+	return nil
+}
+
+func (b *Backend) openedDiskStat(fd uintptr) (syscall.Stat_t, error) {
 	fstat := b.fstat
 	if fstat == nil {
 		fstat = syscall.Fstat
 	}
 	var opened syscall.Stat_t
-	if err := fstat(int(fd), &opened); err != nil || opened.Mode&syscall.S_IFMT != syscall.S_IFCHR {
-		return ErrDeviceChanged
+	if err := fstat(int(fd), &opened); err != nil {
+		return syscall.Stat_t{}, err
 	}
+	if opened.Mode&syscall.S_IFMT != syscall.S_IFCHR {
+		return syscall.Stat_t{}, ErrDeviceChanged
+	}
+	return opened, nil
+}
+
+func (b *Backend) refreshedAuthorizedDisk(ctx context.Context, authorized disk.Disk) (disk.Disk, error) {
 	fresh, err := b.manager.Refresh(ctx, authorized.ID)
-	if err != nil || fresh.Mounted || !deviceFromDisk(fresh).IsAllowed || !disk.SameIdentity(authorized, fresh) {
-		return ErrDeviceChanged
+	if err != nil {
+		return disk.Disk{}, err
 	}
+	if fresh.Mounted {
+		return disk.Disk{}, ErrDeviceChanged
+	}
+	if !deviceFromDisk(fresh).IsAllowed {
+		return disk.Disk{}, ErrDeviceChanged
+	}
+	if !disk.SameIdentity(authorized, fresh) {
+		return disk.Disk{}, ErrDeviceChanged
+	}
+	return fresh, nil
+}
+
+func (b *Backend) matchesDeviceNode(path string, rdev int32) bool {
 	stat := b.stat
 	if stat == nil {
 		stat = syscall.Stat
 	}
 	var node syscall.Stat_t
-	if err := stat(fresh.Device, &node); err != nil || node.Mode&syscall.S_IFMT != syscall.S_IFCHR || node.Rdev != opened.Rdev {
-		return ErrDeviceChanged
+	if err := stat(path, &node); err != nil {
+		return false
 	}
-	return nil
+	if node.Mode&syscall.S_IFMT != syscall.S_IFCHR {
+		return false
+	}
+	return node.Rdev == rdev
 }
 func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
 	return b.open(ctx, d, os.O_WRONLY)
@@ -210,25 +255,60 @@ func (b *Backend) Eject(ctx context.Context, selected device.Device) error {
 func (b *Backend) FormatFAT32(ctx context.Context, selected device.Device, label string, updates chan<- progress.Update) error {
 	ctx, cancel := context.WithTimeout(ctx, formatTimeout)
 	defer cancel()
-	d, err := b.diskSnapshot(ctx, selected)
+
+	label, err := formatLabel(label)
 	if err != nil {
 		return err
 	}
+	d, target, err := b.prepareFormat(ctx, selected)
+	if err != nil {
+		return err
+	}
+	defer target.Close()
+
+	if err = fat32.Format(ctx, target, d.Size, label, formatProgress(ctx, updates)); err != nil {
+		return fmt.Errorf("format FAT32: %w", err)
+	}
+	return nil
+}
+
+func formatProgress(ctx context.Context, updates chan<- progress.Update) func(uint64) {
+	return func(percent uint64) {
+		if updates == nil {
+			return
+		}
+		select {
+		case updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: percent, TotalBytes: 100}:
+		case <-ctx.Done():
+		default:
+		}
+	}
+}
+
+func formatLabel(label string) (string, error) {
 	if label == "" {
 		label = "GOFLASHER"
 	}
 	if !fat32.ValidLabel(label) {
-		return errors.New("format FAT32: invalid volume label")
+		return "", errors.New("format FAT32: invalid volume label")
 	}
-	if err = b.manager.Unmount(ctx, d); err != nil {
-		return err
+	return label, nil
+}
+
+func (b *Backend) prepareFormat(ctx context.Context, selected device.Device) (disk.Disk, formatTarget, error) {
+	d, err := b.diskSnapshot(ctx, selected)
+	if err != nil {
+		return disk.Disk{}, nil, err
+	}
+	if err := b.manager.Unmount(ctx, d); err != nil {
+		return disk.Disk{}, nil, err
 	}
 	d, err = b.diskSnapshot(ctx, selected)
 	if err != nil {
-		return err
+		return disk.Disk{}, nil, err
 	}
 	if d.Mounted {
-		return ErrUnmountFailed
+		return disk.Disk{}, nil, ErrUnmountFailed
 	}
 	opener := b.openFormat
 	if opener == nil {
@@ -236,24 +316,13 @@ func (b *Backend) FormatFAT32(ctx context.Context, selected device.Device, label
 	}
 	target, err := opener(d.Device)
 	if err != nil {
-		return fmt.Errorf("format FAT32: %w", err)
+		return disk.Disk{}, nil, fmt.Errorf("format FAT32: %w", err)
 	}
-	defer target.Close()
-	if err = b.validateOpenedDisk(ctx, d, target.Fd()); err != nil {
-		return fmt.Errorf("format FAT32: %w", err)
+	if err := b.validateOpenedDisk(ctx, d, target.Fd()); err != nil {
+		_ = target.Close()
+		return disk.Disk{}, nil, fmt.Errorf("format FAT32: %w", err)
 	}
-	if err = fat32.Format(ctx, target, d.Size, label, func(percent uint64) {
-		if updates != nil {
-			select {
-			case updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: percent, TotalBytes: 100}:
-			case <-ctx.Done():
-			default:
-			}
-		}
-	}); err != nil {
-		return fmt.Errorf("format FAT32: %w", err)
-	}
-	return nil
+	return d, target, nil
 }
 func wholeDiskNumber(identifier string) (uint32, bool) {
 	digits := strings.TrimPrefix(identifier, "disk")

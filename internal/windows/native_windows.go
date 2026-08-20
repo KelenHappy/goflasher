@@ -142,6 +142,10 @@ func parseStorageDeviceIDs(b []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return parseStorageIdentifiers(descriptor, count)
+}
+
+func parseStorageIdentifiers(descriptor []byte, count uint32) (string, error) {
 	off := 12
 	var found string
 	for i := uint32(0); i < count; i++ {
