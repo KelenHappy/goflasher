@@ -66,10 +66,7 @@ type commandHelper struct {
 }
 
 func newCommandHelper() privilegedHelper {
-	executable, err := os.Executable()
-	if err != nil {
-		executable = helperExecutable
-	}
+	executable := currentExecutable()
 	// Only existence and an exec bit are checked, not a hash or signature.
 	// App-level integrity verification here would be theater: the helper lives at
 	// a root-owned path, so an attacker able to replace it is already root and
@@ -77,7 +74,7 @@ func newCommandHelper() privilegedHelper {
 	// Integrity is instead owned by the package manager (rpm -V / dpkg --verify)
 	// and, on macOS, codesign of the separately signed helper.
 	for _, candidate := range helperCandidates(executable) {
-		if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
+		if executableFile(candidate) {
 			return &commandHelper{executable: candidate}
 		}
 	}
@@ -89,6 +86,25 @@ func newCommandHelper() privilegedHelper {
 	// /usr/libexec, tried first above, so this path is reached only by a bare GUI
 	// binary with no accompanying helper — not by any shipped artifact.
 	return &commandHelper{executable: executable, arguments: []string{embeddedHelperArgument}}
+}
+
+func currentExecutable() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return helperExecutable
+	}
+	return executable
+}
+
+func executableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	return info.Mode().Perm()&0111 != 0
 }
 
 // helperCandidates picks which binary the GUI hands to pkexec. This selection
@@ -603,20 +619,7 @@ func validateDeviceNode(env helperEnvironment, name string, major, minor uint32)
 }
 
 func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.File, error) {
-	flags := os.O_RDONLY
-	if req.Mode == modeFormatFAT32 {
-		// The in-process formatter uses random-access writes and syncs the
-		// completed filesystem, so its validated descriptor must be read/write.
-		flags = os.O_RDWR
-	} else if req.Mode == modeWrite {
-		// Keep each large stream write tied to actual device progress instead of
-		// letting Linux accept the entire image into the page cache at RAM speed.
-		// Besides producing meaningful throughput/ETA figures, this bounds the
-		// otherwise very long and apparently frozen Sync at the end of a write.
-		flags = os.O_WRONLY | syscall.O_SYNC
-	} else if req.Mode != modeRead {
-		flags = os.O_WRONLY
-	}
+	flags := deviceOpenFlags(req.Mode)
 	opener := env.openFile
 	if opener == nil {
 		opener = os.OpenFile
@@ -632,10 +635,40 @@ func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.
 	return f, nil
 }
 
+func deviceOpenFlags(mode operationMode) int {
+	switch mode {
+	case modeFormatFAT32:
+		// The in-process formatter uses random-access writes and syncs the
+		// completed filesystem, so its validated descriptor must be read/write.
+		return os.O_RDWR
+	case modeWrite:
+		// Keep each large stream write tied to actual device progress instead of
+		// letting Linux accept the entire image into the page cache at RAM speed.
+		// Besides producing meaningful throughput/ETA figures, this bounds the
+		// otherwise very long and apparently frozen Sync at the end of a write.
+		return os.O_WRONLY | syscall.O_SYNC
+	case modeRead:
+		return os.O_RDONLY
+	default:
+		return os.O_WRONLY
+	}
+}
+
 // validateOpenedDevice binds the final authorization decision to the kernel
 // object referenced by f. Opening a raw device does not itself write bytes, so
 // every destructive mode reaches this check before its first write or ioctl.
 func validateOpenedDevice(req privilegedRequest, env helperEnvironment, expectedName string, f *os.File) error {
+	if err := validateOpenedDescriptor(req, env, f); err != nil {
+		return err
+	}
+	name, err := revalidateResolvedDevice(req, env, expectedName)
+	if err != nil {
+		return err
+	}
+	return revalidateDeviceSafety(req, env, name)
+}
+
+func validateOpenedDescriptor(req privilegedRequest, env helperEnvironment, f *os.File) error {
 	var st syscall.Stat_t
 	fstat := env.fstat
 	if fstat == nil {
@@ -644,16 +677,33 @@ func validateOpenedDevice(req privilegedRequest, env helperEnvironment, expected
 	if err := fstat(int(f.Fd()), &st); err != nil {
 		return fmt.Errorf("fstat opened device: %w", err)
 	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK || unix.Major(uint64(st.Rdev)) != req.Major || unix.Minor(uint64(st.Rdev)) != req.Minor {
+	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
 		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
 	}
+	if unix.Major(uint64(st.Rdev)) != req.Major {
+		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
+	}
+	if unix.Minor(uint64(st.Rdev)) != req.Minor {
+		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
+	}
+	return nil
+}
+
+func revalidateResolvedDevice(req privilegedRequest, env helperEnvironment, expectedName string) (string, error) {
 	name, real, err := resolveDevice(req, env)
-	if err != nil || name != expectedName {
-		return fmt.Errorf("%w: opened device no longer resolves", ErrDeviceChanged)
+	if err != nil {
+		return "", fmt.Errorf("%w: opened device no longer resolves", ErrDeviceChanged)
 	}
-	if _, _, err = validateDeviceMetadata(req, filepath.Join(env.SysClassBlock, name), real); err != nil {
-		return fmt.Errorf("revalidate opened device metadata: %w", err)
+	if name != expectedName {
+		return "", fmt.Errorf("%w: opened device no longer resolves", ErrDeviceChanged)
 	}
+	if _, _, err := validateDeviceMetadata(req, filepath.Join(env.SysClassBlock, name), real); err != nil {
+		return "", fmt.Errorf("revalidate opened device metadata: %w", err)
+	}
+	return name, nil
+}
+
+func revalidateDeviceSafety(req privilegedRequest, env helperEnvironment, name string) error {
 	// Mount and swap state may also have changed while open() was pending.
 	unsafe, err := mountedOrSystem(name, req.Major, req.Minor, env)
 	if err != nil {
@@ -691,22 +741,37 @@ func deviceMounted(name string, major, minor uint32, mounts map[devNumber][]stri
 		if len(points) == 0 {
 			continue
 		}
-		mounted, err := topology.nameForNumber(number)
-		if err != nil {
-			if number.major == 0 {
-				continue
-			}
-			return false, err
-		}
-		backed, err := topology.dependsOn(mounted, name)
+		mounted, err := mountBacksDevice(number, name, major, minor, topology)
 		if err != nil {
 			return false, err
 		}
-		if sameDevice(number, major, minor) || backed {
+		if mounted {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func mountBacksDevice(number devNumber, name string, major, minor uint32, topology *blockTopology) (bool, error) {
+	mounted, usable, err := mountedDeviceName(number, topology)
+	if err != nil || !usable {
+		return false, err
+	}
+	if sameDevice(number, major, minor) {
+		return true, nil
+	}
+	return topology.dependsOn(mounted, name)
+}
+
+func mountedDeviceName(number devNumber, topology *blockTopology) (string, bool, error) {
+	name, err := topology.nameForNumber(number)
+	if err == nil {
+		return name, true, nil
+	}
+	if number.major == 0 {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 func sameDevice(number devNumber, major, minor uint32) bool {
