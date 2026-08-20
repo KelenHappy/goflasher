@@ -4,6 +4,9 @@
 
 ## 自動化測試
 
+Unit test使用Go標準`testing` package與standard-library helper。不要加入
+`testify`等assertion或mock framework；小型fake應放在需要它的test旁。
+
 執行完整headless suite：
 
 ```sh
