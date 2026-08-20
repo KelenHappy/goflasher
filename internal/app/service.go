@@ -42,8 +42,8 @@ const (
 var ErrInstallerBuilderUnavailable = errors.New("FAT32 Windows installer builder is unavailable")
 var ErrCompressedWindowsInstallerUnsupported = errors.New("compressed Windows installer ISO is unsupported")
 
-func planWorkflow(info image.Info) (workflow, error) {
-	kind, err := image.Classify(info)
+func planWorkflow(ctx context.Context, info image.Info) (workflow, error) {
+	kind, err := image.ClassifyContext(ctx, info)
 	if err != nil {
 		return 0, err
 	}
@@ -78,7 +78,7 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 		return out, err
 	}
 	defer func() { err = errors.Join(err, info.CloseSource()) }()
-	workflow, err := planWorkflow(info)
+	workflow, err := planWorkflow(ctx, info)
 	if err != nil {
 		return out, err
 	}

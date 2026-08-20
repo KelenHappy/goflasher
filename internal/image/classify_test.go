@@ -1,6 +1,7 @@
 package image
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"os"
@@ -54,6 +55,60 @@ func TestClassifyLinuxHybridISOByFilesystemAndPartitionTable(t *testing.T) {
 	}
 }
 
+func TestHybridClassificationRejectsInvalidPartitionAndIncompleteWindows(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]byte)
+	}{
+		{name: "zero start LBA", mutate: func(b []byte) { binary.LittleEndian.PutUint32(b[446+8:], 0) }},
+		{name: "out of bounds", mutate: func(b []byte) {
+			binary.LittleEndian.PutUint32(b[446+8:], 39)
+			binary.LittleEndian.PutUint32(b[446+12:], 2)
+		}},
+		{name: "incomplete Windows signals", mutate: func(b []byte) {
+			root := b[20*2048 : 21*2048]
+			off := 0
+			for root[off] != 0 {
+				off += int(root[off])
+			}
+			copy(root[off:], isoRecord(35, 1, []byte("BOOTMGR;1"), false))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := installerISO(false, true)
+			tt.mutate(b)
+			path := filepath.Join(t.TempDir(), "linux.iso")
+			if err := os.WriteFile(path, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+			info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionNone})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer info.CloseSource()
+			if got, err := Classify(info); got != UnknownImage || !errors.Is(err, ErrUnsafeClassification) {
+				t.Fatalf("Classify() = (%s, %v)", got, err)
+			}
+		})
+	}
+}
+
+type countingReader struct{ calls int }
+
+func (r *countingReader) Read(p []byte) (int, error) { r.calls++; return copy(p, "data"), nil }
+func TestContextReaderHonorsCancellationBeforeReading(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	underlying := &countingReader{}
+	if n, err := (contextReader{ctx: ctx, reader: underlying}).Read(make([]byte, 4)); n != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Read() = (%d, %v)", n, err)
+	}
+	if underlying.calls != 0 {
+		t.Fatalf("underlying reads = %d", underlying.calls)
+	}
+}
+
 // installerISO constructs a minimal ISO9660 tree used to exercise the parser,
 // without relying on host ISO authoring tools.
 func installerISO(complete, hybrid bool) []byte {
@@ -77,6 +132,14 @@ func installerISO(complete, hybrid bool) []byte {
 		21: {isoRecord(21, 2048, []byte{0}, true), isoRecord(20, 2048, []byte{1}, true), isoRecord(31, 1, []byte("BOOT.WIM;1"), false)},
 		22: {isoRecord(22, 2048, []byte{0}, true), isoRecord(20, 2048, []byte{1}, true), isoRecord(23, 2048, []byte("BOOT"), true)},
 		23: {isoRecord(23, 2048, []byte{0}, true), isoRecord(22, 2048, []byte{1}, true), isoRecord(33, 1, []byte("BOOTX64.EFI;1"), false)},
+	}
+	if hybrid {
+		dirs = map[uint32][][]byte{
+			20: {isoRecord(20, 2048, []byte{0}, true), isoRecord(20, 2048, []byte{1}, true), isoRecord(24, 2048, []byte(".DISK"), true)},
+			24: {isoRecord(24, 2048, []byte{0}, true), isoRecord(20, 2048, []byte{1}, true), isoRecord(34, 1, []byte("INFO;1"), false)},
+		}
+		binary.LittleEndian.PutUint32(b[446+8:], 1)
+		binary.LittleEndian.PutUint32(b[446+12:], 159)
 	}
 	if complete {
 		dirs[21] = append(dirs[21], isoRecord(32, 1, []byte("INSTALL.WIM;1"), false))

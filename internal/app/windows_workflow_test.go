@@ -58,18 +58,39 @@ func TestCompressedWindowsRejectedAndLinuxHybridRawWritten(t *testing.T) {
 	for suffix, encode := range encoders {
 		t.Run("windows."+suffix, func(t *testing.T) { runCompressedWorkflowTest(t, encode(windowsISOFixture()), suffix, false) })
 		t.Run("linux."+suffix, func(t *testing.T) {
-			p := windowsISOFixture()
-			i := bytes.Index(p, []byte("INSTALL.ESD"))
-			if i < 0 {
-				t.Fatal("fixture entry missing")
-			}
-			p[i] = 'X'
+			p := linuxHybridISOFixture(t)
 			p[446+4] = 0x17
-			binary.LittleEndian.PutUint32(p[446+12:], 40)
+			binary.LittleEndian.PutUint32(p[446+8:], 1)
+			binary.LittleEndian.PutUint32(p[446+12:], 159)
 			p[510], p[511] = 0x55, 0xaa
 			runCompressedWorkflowTest(t, encode(p), suffix, true)
 		})
 	}
+}
+
+func linuxHybridISOFixture(t *testing.T) []byte {
+	t.Helper()
+	p := windowsISOFixture()
+	for old, replacement := range map[string]string{"BOOTMGR": "README1", "BOOT.WIM": "KERNEL01", "INSTALL.ESD": "FILESYSTEM1", "BOOTX64.EFI": "STARTUP.BIN"} {
+		i := bytes.Index(p, []byte(old))
+		if i < 0 || len(old) != len(replacement) {
+			t.Fatalf("invalid fixture replacement %s", old)
+		}
+		copy(p[i:], replacement)
+	}
+	root := p[20*2048 : 21*2048]
+	off := 0
+	for root[off] != 0 {
+		off += int(root[off])
+	}
+	copy(root[off:], appISORecord(24, 2048, []byte(".DISK"), true))
+	dir := p[24*2048 : 25*2048]
+	off = 0
+	for _, rec := range [][]byte{appISORecord(24, 2048, []byte{0}, true), appISORecord(20, 2048, []byte{1}, true), appISORecord(34, 1, []byte("INFO;1"), false)} {
+		copy(dir[off:], rec)
+		off += len(rec)
+	}
+	return p
 }
 func runCompressedWorkflowTest(t *testing.T, data []byte, suffix string, wantRaw bool) {
 	path := filepath.Join(t.TempDir(), "source.iso."+suffix)
