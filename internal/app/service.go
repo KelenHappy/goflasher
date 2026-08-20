@@ -32,6 +32,34 @@ type Service struct {
 	State   *StateMachine
 }
 
+type workflow int
+
+const (
+	workflowRawWrite workflow = iota
+	workflowFAT32Installer
+)
+
+var ErrInstallerBuilderUnavailable = errors.New("FAT32 Windows installer builder is unavailable")
+var ErrCompressedWindowsInstallerUnsupported = errors.New("compressed Windows installer ISO is unsupported")
+
+func planWorkflow(info image.Info) (workflow, error) {
+	kind, err := image.Classify(info)
+	if err != nil {
+		return 0, err
+	}
+	switch kind {
+	case image.RawDiskImage, image.LinuxHybridISO:
+		return workflowRawWrite, nil
+	case image.WindowsInstallerISO:
+		if info.Compression != image.CompressionNone {
+			return 0, ErrCompressedWindowsInstallerUnsupported
+		}
+		return workflowFAT32Installer, nil
+	default:
+		return 0, image.ErrUnsafeClassification
+	}
+}
+
 // Run owns the destructive workflow. Safety checks are deliberately repeated
 // by the backend immediately before opening the block device.
 func (s *Service) Run(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (RunResult, error) {
@@ -50,6 +78,16 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 		return out, err
 	}
 	defer func() { err = errors.Join(err, info.CloseSource()) }()
+	workflow, err := planWorkflow(info)
+	if err != nil {
+		return out, err
+	}
+	if workflow == workflowFAT32Installer {
+		// Never fall back to a raw write: until the builder (including its
+		// libwim ABI and source-format checks) is available, fail closed before
+		// unmounting or opening the destination.
+		return out, ErrInstallerBuilderUnavailable
+	}
 	if info.UncompressedSize > target.Size {
 		return out, writer.ErrTargetTooSmall
 	}

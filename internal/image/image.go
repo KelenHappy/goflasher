@@ -49,6 +49,20 @@ type Source struct {
 	identity os.FileInfo
 }
 
+// RetainedReaderAt exposes the already-open, identity-checked source for
+// parsers which require random access. The returned handle is borrowed: the
+// Info remains responsible for closing it.
+func (i Info) RetainedReaderAt() (io.ReaderAt, int64, io.Closer, error) {
+	if err := i.ValidateSource(); err != nil {
+		return nil, 0, nil, err
+	}
+	return i.source.file, i.source.identity.Size(), borrowedSource{i.source.file}, nil
+}
+
+type borrowedSource struct{ io.ReaderAt }
+
+func (borrowedSource) Close() error { return nil }
+
 func (i Info) HasRetainedSource() bool { return i.source != nil }
 
 func (i Info) CloseSource() error {
