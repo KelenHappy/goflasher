@@ -113,107 +113,24 @@ func (s *Service) Preview(ctx context.Context, info image.Info, target device.De
 }
 
 func (s *Service) runWorkflow(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (out RunResult, err error) {
-	trackPlanningState := s.State.State() != Idle
-	if trackPlanningState {
-		if err = s.State.Transition(Inspecting); err != nil {
-			return out, err
-		}
-	}
-	sendStage(ctx, updates, progress.StageInspecting)
-	info, err = inspectImage(ctx, info)
+	info, plan, err := s.inspectAndPlan(ctx, info, target, updates)
 	if err != nil {
 		return out, err
 	}
 	defer func() { err = errors.Join(err, info.CloseSource()) }()
-	if trackPlanningState {
-		if err = s.State.Transition(Planning); err != nil {
-			return out, err
-		}
-	}
-	sendStage(ctx, updates, progress.StagePlanning)
-	var splitPreflight func(context.Context) error
-	if preflight, ok := s.InstallerSplitter.(interface{ Preflight(context.Context) error }); ok {
-		splitPreflight = preflight.Preflight
-	}
-	_, windowsSupported := s.Backend.(WindowsInstallerBackend)
-	plan, err := (WorkflowPlanner{TemporarySpace: s.TemporarySpace, SplitPreflight: splitPreflight, WindowsSupported: windowsSupported}).Plan(ctx, info, target)
+	out.PlanKind = plan.Kind
+	windowsBackend, effectiveSplitter, cleanup, err := s.prepareWindowsInstaller(ctx, info, &plan, updates)
 	if err != nil {
 		return out, err
 	}
-	out.PlanKind = plan.Kind
-	var windowsBackend WindowsInstallerBackend
-	effectiveSplitter := s.InstallerSplitter
-	if plan.Kind == PlanWindowsInstaller {
-		var ok bool
-		windowsBackend, ok = s.Backend.(WindowsInstallerBackend)
-		if !ok || s.InstallerSplitter == nil && plan.Windows.InstallStrategy() == installer.SplitWIM {
-			return out, ErrInstallerBuilderUnavailable
-		}
-		if plan.Windows.InstallStrategy() == installer.SplitWIM {
-			r, _, _, retainedErr := info.RetainedReaderAt()
-			if retainedErr != nil {
-				return out, retainedErr
-			}
-			if err = s.State.Transition(StagingWIM); err != nil {
-				return out, err
-			}
-			sendStage(ctx, updates, progress.StageStagingWIM)
-			finalized, prepared, cleanup, prepareErr := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
-				if transitionErr := s.State.Transition(SplittingWIM); transitionErr != nil {
-					return transitionErr
-				}
-				sendStage(ctx, updates, progress.StageSplittingWIM)
-				return nil
-			})
-			if prepareErr != nil {
-				return out, errors.Join(installer.ErrWIMSplitFailure, prepareErr)
-			}
-			defer func() { err = errors.Join(err, cleanup.Close()) }()
-			plan.Windows = finalized
-			effectiveSplitter = prepared
-		}
-	}
+	defer func() { err = errors.Join(err, cleanup()) }()
 	if err = s.unmountDevice(ctx, target); err != nil {
 		return out, err
 	}
 	releaseDevice := newDeviceRelease(s.Backend, target)
 	defer func() { err = errors.Join(err, releaseDevice()) }()
-	if plan.Kind == PlanRawWrite {
-		if err = (RawWriteExecutor{service: s}).Execute(ctx, info, target, opts, updates, &out); err != nil {
-			return out, err
-		}
-	} else {
-		executor := WindowsInstallerExecutor{backend: windowsBackend, splitter: effectiveSplitter, state: s.State}
-		if err = executor.Execute(ctx, plan.Windows, info, target, updates, &out); err != nil {
-			return out, err
-		}
-		if err = s.State.Transition(Flushing); err != nil {
-			return out, err
-		}
-		sendStage(ctx, updates, progress.StageFlushing)
-		if err = s.Backend.Flush(ctx, target); err != nil {
-			return out, fmt.Errorf("flush: %w", err)
-		}
-		if err = s.State.Transition(VerifyingFilesystem); err != nil {
-			return out, err
-		}
-		sendStage(ctx, updates, progress.StageVerifyingFilesystem)
-		reader, openErr := windowsBackend.OpenInstallerReader(ctx, target)
-		if openErr != nil {
-			return out, openErr
-		}
-		verification, verifyErr := verify.VerifyInstaller(ctx, reader, target.Size, out.installerManifest, verify.InstallerOptions{
-			SplitWIMPolicySize: plan.Windows.SplitWIMPolicySize(), RequireSplitWIM: plan.Windows.InstallStrategy() == installer.SplitWIM,
-		})
-		closeErr := reader.Close()
-		if verifyErr != nil || closeErr != nil {
-			return out, errors.Join(verifyErr, closeErr)
-		}
-		out.FilesWritten = verification.FilesVerified
-		out.WIMParts = verification.WIMParts
-		out.ManifestSHA256 = verification.ManifestSHA256
-		out.SemanticVerified = true
-		out.SemanticVerification = "raw target GPT, FAT32, paths, sizes, and file hashes verified"
+	if err = s.executePlan(ctx, plan, info, target, opts, updates, windowsBackend, effectiveSplitter, &out); err != nil {
+		return out, err
 	}
 	if err = s.ejectDevice(ctx, target, opts.Eject, updates, &out); err != nil {
 		return out, err
@@ -227,11 +144,122 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 	return out, nil
 }
 
-func inspectImage(ctx context.Context, info image.Info) (image.Info, error) {
-	if info.UncompressedSize > 0 && info.SHA256 != "" && info.HasRetainedSource() {
-		return info, nil
+func (s *Service) inspectAndPlan(ctx context.Context, info image.Info, target device.Device, updates chan<- progress.Update) (image.Info, WorkflowPlan, error) {
+	trackState := s.State.State() != Idle
+	if trackState {
+		if err := s.State.Transition(Inspecting); err != nil {
+			return info, WorkflowPlan{}, err
+		}
 	}
-	return image.InspectContext(ctx, info)
+	sendStage(ctx, updates, progress.StageInspecting)
+	inspected, err := inspectImage(ctx, info)
+	if err != nil {
+		return info, WorkflowPlan{}, err
+	}
+	if trackState {
+		if err := s.State.Transition(Planning); err != nil {
+			return inspected, WorkflowPlan{}, errors.Join(err, inspected.CloseSource())
+		}
+	}
+	sendStage(ctx, updates, progress.StagePlanning)
+	var splitPreflight func(context.Context) error
+	if preflight, ok := s.InstallerSplitter.(interface{ Preflight(context.Context) error }); ok {
+		splitPreflight = preflight.Preflight
+	}
+	_, windowsSupported := s.Backend.(WindowsInstallerBackend)
+	plan, err := (WorkflowPlanner{TemporarySpace: s.TemporarySpace, SplitPreflight: splitPreflight, WindowsSupported: windowsSupported}).Plan(ctx, inspected, target)
+	if err != nil {
+		return inspected, WorkflowPlan{}, errors.Join(err, inspected.CloseSource())
+	}
+	return inspected, plan, nil
+}
+
+func (s *Service) prepareWindowsInstaller(ctx context.Context, info image.Info, plan *WorkflowPlan, updates chan<- progress.Update) (WindowsInstallerBackend, installer.WIMSplitter, func() error, error) {
+	noCleanup := func() error { return nil }
+	if plan.Kind != PlanWindowsInstaller {
+		return nil, s.InstallerSplitter, noCleanup, nil
+	}
+	backend, ok := s.Backend.(WindowsInstallerBackend)
+	if !ok || s.InstallerSplitter == nil && plan.Windows.InstallStrategy() == installer.SplitWIM {
+		return nil, nil, noCleanup, ErrInstallerBuilderUnavailable
+	}
+	if plan.Windows.InstallStrategy() != installer.SplitWIM {
+		return backend, s.InstallerSplitter, noCleanup, nil
+	}
+	r, _, _, err := info.RetainedReaderAt()
+	if err != nil {
+		return nil, nil, noCleanup, err
+	}
+	if err := s.State.Transition(StagingWIM); err != nil {
+		return nil, nil, noCleanup, err
+	}
+	sendStage(ctx, updates, progress.StageStagingWIM)
+	finalized, prepared, cleanup, err := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
+		if err := s.State.Transition(SplittingWIM); err != nil {
+			return err
+		}
+		sendStage(ctx, updates, progress.StageSplittingWIM)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, noCleanup, errors.Join(installer.ErrWIMSplitFailure, err)
+	}
+	plan.Windows = finalized
+	return backend, prepared, cleanup.Close, nil
+}
+
+func (s *Service) executePlan(ctx context.Context, plan WorkflowPlan, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update, windowsBackend WindowsInstallerBackend, splitter installer.WIMSplitter, out *RunResult) error {
+	if plan.Kind == PlanRawWrite {
+		return (RawWriteExecutor{service: s}).Execute(ctx, info, target, opts, updates, out)
+	}
+	executor := WindowsInstallerExecutor{backend: windowsBackend, splitter: splitter, state: s.State}
+	if err := executor.Execute(ctx, plan.Windows, info, target, updates, out); err != nil {
+		return err
+	}
+	return s.flushAndVerifyInstaller(ctx, plan.Windows, target, updates, windowsBackend, out)
+}
+
+func (s *Service) flushAndVerifyInstaller(ctx context.Context, plan *installer.BuildPlan, target device.Device, updates chan<- progress.Update, backend WindowsInstallerBackend, out *RunResult) error {
+	if err := s.State.Transition(Flushing); err != nil {
+		return err
+	}
+	sendStage(ctx, updates, progress.StageFlushing)
+	if err := s.Backend.Flush(ctx, target); err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+	if err := s.State.Transition(VerifyingFilesystem); err != nil {
+		return err
+	}
+	sendStage(ctx, updates, progress.StageVerifyingFilesystem)
+	reader, err := backend.OpenInstallerReader(ctx, target)
+	if err != nil {
+		return err
+	}
+	verification, verifyErr := verify.VerifyInstaller(ctx, reader, target.Size, out.installerManifest, verify.InstallerOptions{
+		SplitWIMPolicySize: plan.SplitWIMPolicySize(), RequireSplitWIM: plan.InstallStrategy() == installer.SplitWIM,
+	})
+	if err := errors.Join(verifyErr, reader.Close()); err != nil {
+		return err
+	}
+	out.FilesWritten = verification.FilesVerified
+	out.WIMParts = verification.WIMParts
+	out.ManifestSHA256 = verification.ManifestSHA256
+	out.SemanticVerified = true
+	out.SemanticVerification = "raw target GPT, FAT32, paths, sizes, and file hashes verified"
+	return nil
+}
+
+func inspectImage(ctx context.Context, info image.Info) (image.Info, error) {
+	if info.UncompressedSize == 0 {
+		return image.InspectContext(ctx, info)
+	}
+	if info.SHA256 == "" {
+		return image.InspectContext(ctx, info)
+	}
+	if !info.HasRetainedSource() {
+		return image.InspectContext(ctx, info)
+	}
+	return info, nil
 }
 
 func (s *Service) unmountDevice(ctx context.Context, target device.Device) error {

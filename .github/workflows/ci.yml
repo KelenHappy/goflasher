@@ -16,7 +16,6 @@ permissions:
 jobs:
   bundled-wimlib:
     name: Bundled wimlib (${{ matrix.os }}-${{ matrix.arch }})
-    if: vars.WIMLIB_SOURCE_URL != ''
     strategy:
       fail-fast: false
       matrix:
@@ -42,12 +41,33 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang-18 make pkg-config libssl-dev libxml2-dev
       - name: Fetch pinned source release
         run: |
-          source packaging/wimlib/BUILD.lock
-          test "$WIMLIB_SOURCE_URL" = 'https://wimlib.net/downloads/wimlib-1.14.5.tar.gz'
-          curl --fail --location --proto '=https' --tlsv1.2 "$WIMLIB_SOURCE_URL" -o "$RUNNER_TEMP/wimlib-1.14.5.tar.gz"
+          set -euo pipefail
+          lock=packaging/wimlib/BUILD.lock
+          test -f "$lock"
+          # shellcheck disable=SC1090
+          source "$lock"
+          for value in WIMLIB_VERSION WIMLIB_SOURCE WIMLIB_SOURCE_URL WIMLIB_SOURCE_SHA256; do
+            test -n "${!value:-}"
+          done
+          test "$WIMLIB_SOURCE" = "wimlib-$WIMLIB_VERSION.tar.gz"
+          test "${WIMLIB_SOURCE_URL##*/}" = "$WIMLIB_SOURCE"
+          case "$WIMLIB_SOURCE_URL" in
+            https://*) ;;
+            *) echo 'WIMLIB_SOURCE_URL must use HTTPS' >&2; exit 65 ;;
+          esac
+          [[ "$WIMLIB_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          source_path="$RUNNER_TEMP/$WIMLIB_SOURCE"
+          curl --fail --location --proto '=https' --tlsv1.2 "$WIMLIB_SOURCE_URL" -o "$source_path"
+          if command -v sha256sum >/dev/null; then
+            actual=$(sha256sum "$source_path" | awk '{print $1}')
+          else
+            actual=$(shasum -a 256 "$source_path" | awk '{print $1}')
+          fi
+          test "$actual" = "$WIMLIB_SOURCE_SHA256"
+          printf 'WIMLIB_SOURCE_PATH=%s\n' "$source_path" >> "$GITHUB_ENV"
       - name: Build and verify native artifact
         run: |
-          packaging/wimlib/build.sh "$RUNNER_TEMP/wimlib-1.14.5.tar.gz" "$RUNNER_TEMP/wimlib-out"
+          packaging/wimlib/build.sh "$WIMLIB_SOURCE_PATH" "$RUNNER_TEMP/wimlib-out"
           library=$(find "$RUNNER_TEMP/wimlib-out" -maxdepth 1 -type f \( -name 'libwim.so.15' -o -name 'libwim.15.dylib' \) -print -quit)
           hash=$(awk '{print $1}' "$RUNNER_TEMP/wimlib-out/SHA256SUMS")
           packaging/wimlib/verify.sh "$library" '${{ matrix.os }}' '${{ matrix.arch }}' "$hash" "$RUNNER_TEMP/wimlib-out/smoke.wim"
