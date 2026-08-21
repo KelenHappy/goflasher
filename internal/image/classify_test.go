@@ -26,6 +26,28 @@ func TestClassifyWindowsInstallerByManifest(t *testing.T) {
 	}
 }
 
+func TestCanonicalPreSplitWindowsInstallSet(t *testing.T) {
+	base := map[string]bool{
+		"sources/boot.wim": true, "bootmgr": true,
+		"efi/boot/bootx64.efi": true, "sources/install.swm": true,
+		"sources/install2.swm": true,
+	}
+	if !hasCanonicalInstallImage(base) {
+		t.Fatal("contiguous pre-split SWM set was not recognized")
+	}
+	for name, paths := range map[string]map[string]bool{
+		"missing first":  {"sources/install2.swm": true},
+		"missing middle": {"sources/install.swm": true, "sources/install3.swm": true},
+		"malformed":      {"sources/install.swm": true, "sources/install02.swm": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if hasCanonicalInstallImage(paths) {
+				t.Fatal("invalid SWM set was recognized")
+			}
+		})
+	}
+}
+
 func TestClassifyISOFailClosedWithoutCompleteManifest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "windows-installer.iso")
 	if err := os.WriteFile(path, installerISO(false, false), 0600); err != nil {

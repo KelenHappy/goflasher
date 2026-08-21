@@ -91,6 +91,28 @@ func TestSplitTemporarySpaceIncludesMaximumOutputAndFilesystemOverhead(t *testin
 	}
 }
 
+func TestPreparedSplitGeometryReplacesSourceSizeEstimate(t *testing.T) {
+	plan := &BuildPlan{
+		strategy: SplitWIM, splitSize: 100, splitParts: 2,
+		esp:     ESPLayout{Size: 1 << 20},
+		fat:     FATLayoutEstimate{ClusterSize: 64, FileClusters: 4, DirectoryClusters: 1},
+		planned: []plannedEntry{{source: installeriso.Entry{Path: "sources/install.wim", Size: 200}}},
+	}
+	finalized, err := plan.withPreparedSplitGeometry([]uint64{90, 90, 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized.splitParts != 3 {
+		t.Fatalf("parts=%d, want actual libwim count 3", finalized.splitParts)
+	}
+	if finalized.fat.FileClusters != 5 {
+		t.Fatalf("file clusters=%d, want allocation-unit-rounded actual parts", finalized.fat.FileClusters)
+	}
+	if plan.splitParts != 2 || plan.fat.FileClusters != 4 {
+		t.Fatal("finalizing geometry mutated the preview plan")
+	}
+}
+
 func TestBuildPlanProbesSplitSupportBeforeCompletingPreflight(t *testing.T) {
 	probeErr := errors.New("bundled libwim unavailable")
 	manifest := installeriso.Manifest{Entries: []installeriso.Entry{

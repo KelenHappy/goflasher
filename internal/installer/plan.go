@@ -126,6 +126,68 @@ func (p *BuildPlan) VerificationManifest() []VerificationEntry {
 	return append([]VerificationEntry(nil), p.verification...)
 }
 
+// withPreparedSplitGeometry returns a new immutable plan whose FAT allocation
+// and part count come from libwim's already validated output, rather than the
+// source-size estimate used by Preview.
+func (p *BuildPlan) withPreparedSplitGeometry(sizes []uint64) (*BuildPlan, error) {
+	if p == nil || p.strategy != SplitWIM || len(sizes) == 0 {
+		return nil, fmt.Errorf("%w: missing prepared split geometry", ErrVerification)
+	}
+	wimEntry, ok := plannedBySource(p, "sources/install.wim")
+	if !ok {
+		return nil, fmt.Errorf("%w: planned WIM is missing", ErrVerification)
+	}
+	var actualClusters uint64
+	for _, size := range sizes {
+		if size == 0 || size > p.splitSize || size > maxFATFileSize {
+			return nil, fmt.Errorf("%w: invalid prepared split part size", ErrVerification)
+		}
+		actualClusters += ceilDiv(size, p.fat.ClusterSize)
+	}
+	var estimatedClusters uint64
+	remaining := wimEntry.source.Size
+	for i := 0; i < p.splitParts; i++ {
+		size := min(remaining, p.splitSize)
+		estimatedClusters += ceilDiv(size, p.fat.ClusterSize)
+		remaining -= size
+	}
+	q := *p
+	q.manifest = cloneManifest(p.manifest)
+	q.verification = append([]VerificationEntry(nil), p.verification...)
+	q.planned = append([]plannedEntry(nil), p.planned...)
+	q.splitParts = len(sizes)
+	if actualClusters >= estimatedClusters {
+		q.fat.FileClusters += actualClusters - estimatedClusters
+	} else {
+		q.fat.FileClusters -= estimatedClusters - actualClusters
+	}
+	// The initial plan accounts for the original install.wim directory entry.
+	// Add the extra entries produced by the actual canonical SWM set.
+	oldEntryBytes := fatDirectoryEntryBytes("install.wim")
+	var actualEntryBytes uint64
+	for i := range sizes {
+		name := "install.swm"
+		if i > 0 {
+			name = "install" + strconv.Itoa(i+1) + ".swm"
+		}
+		actualEntryBytes += fatDirectoryEntryBytes(name)
+	}
+	if actualEntryBytes > oldEntryBytes {
+		delta := actualEntryBytes - oldEntryBytes
+		q.fat.DirectoryBytes += delta
+		q.fat.DirectoryClusters += ceilDiv(delta, q.fat.ClusterSize)
+	}
+	q.fat.AllocationBytes = (q.fat.FileClusters+q.fat.DirectoryClusters)*q.fat.ClusterSize + q.fat.FATBytes + 32*logicalSectorSize
+	if q.fat.AllocationBytes > q.esp.Size {
+		return nil, fmt.Errorf("%w: %w: prepared split set needs %d bytes, ESP has %d", ErrNoSpace, ErrTargetTooSmall, q.fat.AllocationBytes, q.esp.Size)
+	}
+	return &q, nil
+}
+
+func fatDirectoryEntryBytes(name string) uint64 {
+	return uint64(32 * (2 + (len([]rune(name))+12)/13))
+}
+
 // NewBuildPlan performs the complete, non-destructive preflight. sourceSize is
 // the immutable ISO descriptor's size, not a pathname stat made later.
 func NewBuildPlan(ctx context.Context, source io.ReaderAt, sourceSize uint64, manifest installeriso.Manifest, options PlanOptions) (*BuildPlan, error) {

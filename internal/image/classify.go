@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	installeriso "github.com/goflasher/goflasher/internal/installer/iso"
@@ -22,7 +23,7 @@ const (
 )
 
 var ErrUnsafeClassification = errors.New("image cannot be safely classified")
-var requiredWindowsPaths = [][]string{{"sources/boot.wim"}, {"sources/install.wim", "sources/install.esd"}, {"bootmgr"}, {"efi/boot/bootx64.efi"}}
+var requiredWindowsPaths = [][]string{{"sources/boot.wim"}, {"bootmgr"}, {"efi/boot/bootx64.efi"}}
 
 // Classify uses the retained descriptor. Compressed ISO streams are decoded to
 // an anonymous, retained temporary descriptor and classified again; the raw
@@ -101,7 +102,7 @@ func classifyReader(r io.ReaderAt, size int64, lease io.Closer) (Kind, error) {
 	for _, e := range fs.Manifest().Entries {
 		paths[strings.ToLower(e.Path)] = true
 	}
-	win := true
+	win := hasCanonicalInstallImage(paths)
 	for _, alts := range requiredWindowsPaths {
 		found := false
 		for _, p := range alts {
@@ -119,6 +120,40 @@ func classifyReader(r io.ReaderAt, size int64, lease io.Closer) (Kind, error) {
 		return LinuxHybridISO, nil
 	}
 	return UnknownImage, fmt.Errorf("%w: unsupported ISO content", ErrUnsafeClassification)
+}
+
+// hasCanonicalInstallImage recognizes either a single WIM/ESD or an existing
+// contiguous install.swm, install2.swm, ... set. Any install*.swm spelling
+// outside that convention makes the set ambiguous and therefore unsupported.
+func hasCanonicalInstallImage(paths map[string]bool) bool {
+	if paths["sources/install.wim"] || paths["sources/install.esd"] {
+		return true
+	}
+	seen := map[int]bool{}
+	for name := range paths {
+		if !strings.HasPrefix(name, "sources/install") || !strings.HasSuffix(name, ".swm") {
+			continue
+		}
+		n := 1
+		if name != "sources/install.swm" {
+			var err error
+			text := strings.TrimSuffix(strings.TrimPrefix(name, "sources/install"), ".swm")
+			n, err = strconv.Atoi(text)
+			if err != nil || n < 2 || name != fmt.Sprintf("sources/install%d.swm", n) {
+				return false
+			}
+		}
+		seen[n] = true
+	}
+	if len(seen) == 0 {
+		return false
+	}
+	for n := 1; n <= len(seen); n++ {
+		if !seen[n] {
+			return false
+		}
+	}
+	return true
 }
 func hasWindowsInstallerSignals(paths map[string]bool) bool {
 	for p := range paths {

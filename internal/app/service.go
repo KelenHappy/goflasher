@@ -158,7 +158,7 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 				return out, err
 			}
 			sendStage(ctx, updates, progress.StageStagingWIM)
-			prepared, cleanup, prepareErr := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
+			finalized, prepared, cleanup, prepareErr := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
 				if transitionErr := s.State.Transition(SplittingWIM); transitionErr != nil {
 					return transitionErr
 				}
@@ -169,6 +169,7 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 				return out, errors.Join(installer.ErrWIMSplitFailure, prepareErr)
 			}
 			defer func() { err = errors.Join(err, cleanup.Close()) }()
+			plan.Windows = finalized
 			effectiveSplitter = prepared
 		}
 	}

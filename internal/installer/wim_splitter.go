@@ -56,34 +56,44 @@ func (s *NativeWIMSplitter) Preflight(ctx context.Context) error {
 // PrepareSplitWIM stages, parses, splits, and validates install.wim without a
 // target handle. The returned splitter only replays the retained validated
 // parts and cleanup removes all staged data.
-func PrepareSplitWIM(ctx context.Context, plan *BuildPlan, source io.ReaderAt, splitter WIMSplitter, onSplitting func() error) (WIMSplitter, io.Closer, error) {
+func PrepareSplitWIM(ctx context.Context, plan *BuildPlan, source io.ReaderAt, splitter WIMSplitter, onSplitting func() error) (*BuildPlan, WIMSplitter, io.Closer, error) {
 	if plan == nil || source == nil || plan.strategy != SplitWIM {
-		return nil, nil, fmt.Errorf("%w: invalid split preparation input", ErrVerification)
+		return nil, nil, nil, fmt.Errorf("%w: invalid split preparation input", ErrVerification)
 	}
 	preparer, ok := splitter.(wimPreparer)
 	if !ok {
-		return nil, nil, ErrSplitterRequired
+		return nil, nil, nil, ErrSplitterRequired
 	}
 	wimEntry, ok := plannedBySource(plan, "sources/install.wim")
 	if !ok {
-		return nil, nil, fmt.Errorf("%w: planned WIM is missing", ErrVerification)
+		return nil, nil, nil, fmt.Errorf("%w: planned WIM is missing", ErrVerification)
 	}
 	expected := verificationHash(plan, wimEntry.destination, wimEntry.source.Size)
 	if expected == "" {
-		return nil, nil, fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
+		return nil, nil, nil, fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
 	}
 	reader := newExtentReader(source, wimEntry.source.Extents, wimEntry.source.Size)
 	prepared, cleanup, err := preparer.PrepareWithProgress(ctx, reader, wimEntry.source.Size, expected, plan.splitSize, onSplitting)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if prepared == nil || cleanup == nil {
 		if cleanup != nil {
 			_ = cleanup.Close()
 		}
-		return nil, nil, fmt.Errorf("%w: split preparation returned incomplete result", ErrVerification)
+		return nil, nil, nil, fmt.Errorf("%w: split preparation returned incomplete result", ErrVerification)
 	}
-	return prepared, cleanup, nil
+	geometry, ok := prepared.(interface{ PreparedPartSizes() []uint64 })
+	if !ok {
+		_ = cleanup.Close()
+		return nil, nil, nil, fmt.Errorf("%w: prepared split geometry is unavailable", ErrVerification)
+	}
+	finalized, err := plan.withPreparedSplitGeometry(geometry.PreparedPartSizes())
+	if err != nil {
+		_ = cleanup.Close()
+		return nil, nil, nil, err
+	}
+	return finalized, prepared, cleanup, nil
 }
 
 func (s *NativeWIMSplitter) Split(ctx context.Context, source io.Reader, sourceSize uint64, expectedSHA256 string, partSize uint64, emit func(SplitPart) error) (err error) {
@@ -173,6 +183,16 @@ func (p *preparedNativeWIM) Split(ctx context.Context, _ io.Reader, sourceSize u
 		}
 	}
 	return nil
+}
+
+func (p *preparedNativeWIM) PreparedPartSizes() []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sizes := make([]uint64, len(p.parts))
+	for i, part := range p.parts {
+		sizes[i] = part.Size
+	}
+	return sizes
 }
 
 func (p *preparedNativeWIM) Close() error {
