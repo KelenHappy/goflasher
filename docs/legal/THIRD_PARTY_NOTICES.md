@@ -53,25 +53,29 @@ Linux packages have the same obligations and install these texts below
 
 ## wimlib / libwim — NOT YET CLEARED FOR RELEASE
 
-- Intended version: 1.14.4
+- Intended version: 1.14.5
 - Intended purpose: open and split WIM files through the PureGo bridge
-- Overall license classification: **unconfirmed for the actual artifact**
-- Compatibility with GoFlasher GPL-3.0 distribution: **unconfirmed**
+- Library license: LGPL-2.1-or-later
+- Compatibility: compatible with distribution as part of GoFlasher under
+  GPL-3.0, subject to the artifact-specific conditions below
 
-No legal conclusion is inferred from the repository name, an upstream landing
-page, or one top-level COPYING file. Before a libwim artifact may ship, the
-release record must inventory the exact source snapshot, every applicable
+The LGPL-2.1-or-later classification applies to the wimlib 1.14.5 library; it
+does not reclassify GoFlasher, optional wimlib components, or native transitive
+dependencies. Before a libwim artifact may ship, the release record must verify
+the exact bundled artifact against the exact source snapshot, every applicable
 source-header and license/notice file, build configuration, enabled optional
-features, and every linked or bundled native transitive dependency. Each item
-must receive its own license classification and GPL-3.0 compatibility analysis.
+features, and every linked or bundled native transitive dependency. Each
+transitive component retains its own license and obligations.
 
 The release record must also contain the source and binary SHA-256 values,
 toolchain and linker versions, flags, downstream patches, dependency report,
 license texts, legal approval, and a tested Corresponding Source offer/location
 including build/install scripts and any material needed for relinking where
-applicable. Until those facts are captured from the actual release artifact,
-libwim distribution is blocked; GoFlasher must report the Windows builder as
-unavailable.
+applicable. The package must preserve LGPL notices and license text, permit
+replacement of the shared library, and must not prohibit reverse engineering
+for debugging modifications to the library. Until those facts and obligations
+are verified against the actual release artifact, libwim distribution is
+blocked; GoFlasher must report the Windows builder as unavailable.
 
 ## UEFI components — PROHIBITED
 

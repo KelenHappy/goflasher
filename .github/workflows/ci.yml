@@ -43,11 +43,11 @@ jobs:
       - name: Fetch pinned source release
         run: |
           source packaging/wimlib/BUILD.lock
-          test "$WIMLIB_SOURCE_URL" = 'https://wimlib.net/downloads/wimlib-1.14.4.tar.gz'
-          curl --fail --location --proto '=https' --tlsv1.2 "$WIMLIB_SOURCE_URL" -o "$RUNNER_TEMP/wimlib-1.14.4.tar.gz"
+          test "$WIMLIB_SOURCE_URL" = 'https://wimlib.net/downloads/wimlib-1.14.5.tar.gz'
+          curl --fail --location --proto '=https' --tlsv1.2 "$WIMLIB_SOURCE_URL" -o "$RUNNER_TEMP/wimlib-1.14.5.tar.gz"
       - name: Build and verify native artifact
         run: |
-          packaging/wimlib/build.sh "$RUNNER_TEMP/wimlib-1.14.4.tar.gz" "$RUNNER_TEMP/wimlib-out"
+          packaging/wimlib/build.sh "$RUNNER_TEMP/wimlib-1.14.5.tar.gz" "$RUNNER_TEMP/wimlib-out"
           library=$(find "$RUNNER_TEMP/wimlib-out" -maxdepth 1 -type f \( -name 'libwim.so.15' -o -name 'libwim.15.dylib' \) -print -quit)
           hash=$(awk '{print $1}' "$RUNNER_TEMP/wimlib-out/SHA256SUMS")
           packaging/wimlib/verify.sh "$library" '${{ matrix.os }}' '${{ matrix.arch }}' "$hash" "$RUNNER_TEMP/wimlib-out/smoke.wim"

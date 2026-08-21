@@ -43,7 +43,7 @@ install -m644 "$(go env GOROOT)/LICENSE" "$CONTENTS/Resources/legal/licenses/gol
 if [[ -n "$LIBWIM_DYLIB" ]]; then
   DYLIB="$CONTENTS/Frameworks/libwim.15.dylib"
   install -m 755 "$LIBWIM_DYLIB" "$DYLIB"
-  WIMLIB_COMPLIANCE_RECORD=${WIMLIB_COMPLIANCE_RECORD:-} "$ROOT/packaging/legal/install-wimlib-record.sh" "$CONTENTS/Resources/legal/wimlib-1.14.4"
+  WIMLIB_COMPLIANCE_RECORD=${WIMLIB_COMPLIANCE_RECORD:-} "$ROOT/packaging/legal/install-wimlib-record.sh" "$CONTENTS/Resources/legal/wimlib-1.14.5"
   DYLIB_ARCHS=$(lipo -archs "$DYLIB")
   if [[ " $DYLIB_ARCHS " != *" $PLIST_ARCH "* ]]; then
     echo "libwim does not contain required architecture $PLIST_ARCH: $DYLIB_ARCHS" >&2

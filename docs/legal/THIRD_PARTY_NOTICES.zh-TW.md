@@ -46,18 +46,20 @@ Linux package亦有相同義務，並將文字安裝於
 
 ## wimlib / libwim — 尚未核准發布
 
-- 預定版本：1.14.4
+- 預定版本：1.14.5
 - 預定用途：透過PureGo bridge開啟及分割WIM
-- 實際artifact整體授權分類：**未確認**
-- 與GoFlasher GPL-3.0散布方式相容性：**未確認**
+- Library授權：LGPL-2.1-or-later
+- 相容性：可作為GoFlasher的一部分依GPL-3.0散布，但必須滿足下列artifact-specific條件
 
-不得從專案名稱、upstream首頁或單一頂層COPYING推定結論。發布前必須以實際source
+LGPL-2.1-or-later分類適用於wimlib 1.14.5 library，不會把GoFlasher、optional component
+或native transitive dependency重新分類。發布前必須以實際bundled artifact核對精確source
 snapshot、全部適用source header與license/notice、build configuration、啟用的optional
-feature，以及每個實際link或bundle的native transitive dependency逐項分類及分析GPL-3.0
-相容性。Release record亦須保存source/binary SHA-256、toolchain/linker版本、flags、patch、
-dependency report、license text、legal approval，以及已驗證可取得且包含build/install與
-適用relink材料的Corresponding Source。在完成前禁止散布libwim，Windows builder必須顯示
- unavailable。
+feature，以及每個實際link或bundle的native transitive dependency。Release record亦須保存
+source/binary SHA-256、toolchain/linker版本、flags、patch、dependency report、license text、
+legal approval，以及已驗證可取得且包含build/install與適用relink材料的Corresponding
+Source。Package必須保留LGPL notice與license text、允許替換shared library，且不得禁止為
+debug library修改而進行reverse engineering。在完成artifact-specific驗證前禁止散布libwim，
+Windows builder必須顯示unavailable。
 
 ## UEFI component — 禁止進入release
 

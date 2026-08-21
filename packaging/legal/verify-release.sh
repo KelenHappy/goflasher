@@ -26,6 +26,8 @@ if [[ -n "$lib" ]]; then
     test -s "$record/$item" || { echo "incomplete libwim compliance record: $item" >&2; exit 65; }
   done
   grep -Fxq APPROVED "$record/LEGAL_APPROVED" || { echo "libwim legal approval missing" >&2; exit 65; }
+  grep -Fq 'LGPL-2.1-or-later' "$record/license-inventory.txt" || { echo "libwim LGPL-2.1-or-later classification missing" >&2; exit 65; }
+  grep -Eiq 'replacement|relink' "$record/corresponding-source.txt" || { echo "libwim replacement/relink instructions missing" >&2; exit 65; }
   actual=$(shasum -a 256 "$lib" | awk '{print $1}')
   grep -Fqx "$actual" "$record/artifact.sha256" || { echo "libwim artifact hash not approved" >&2; exit 65; }
   test -d "$record/licenses" && test -n "$(find "$record/licenses" -type f -print -quit)" || { echo "libwim license payload missing" >&2; exit 65; }

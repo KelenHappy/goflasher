@@ -86,7 +86,7 @@ func TestPackagedLinuxLibraryPathIsPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != "/usr/lib/goflasher/lib/wimlib/1.14.4/libwim.so.15" || root != "/usr/lib/goflasher" {
+	if path != "/usr/lib/goflasher/lib/wimlib/1.14.5/libwim.so.15" || root != "/usr/lib/goflasher" {
 		t.Fatalf("path=%q root=%q", path, root)
 	}
 }

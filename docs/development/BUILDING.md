@@ -85,7 +85,7 @@ DMG, and validates its staple. Without that explicit library input, unsigned
 development DMGs remain raw-writer-only and WIM preflight fails closed.
 
 The native build recipe is locked in `packaging/wimlib/BUILD.lock`: wimlib
-1.14.4, Ubuntu 24.04/Clang 18 or Xcode 16.4 Apple Clang, and the recorded
+1.14.5, Ubuntu 24.04/Clang 18 or Xcode 16.4 Apple Clang, and the recorded
 configure flags. CI builds Linux amd64 and both macOS architectures (Linux
 arm64 is not currently a release target), then checks architecture, dynamic
 dependencies, exported symbols, artifact SHA-256, the library-reported ABI and

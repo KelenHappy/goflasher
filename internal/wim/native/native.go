@@ -1,6 +1,6 @@
 // Package native is the only package that owns libwim native handles.
 //
-// Function declarations below are transcribed from the bundled wimlib 1.14.4
+// Function declarations below are transcribed from the bundled wimlib 1.14.5
 // include/wimlib.h. C int and enum values are int32, uint64_t is uint64, and
 // WIMStruct pointers and TCHAR pointers are represented by uintptr.
 package native
@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	BundledVersion       = "1.14.4"
-	BundledVersionCode   = uint32((1 << 20) | (14 << 10) | 4)
+	BundledVersion       = "1.14.5"
+	BundledVersionCode   = uint32((1 << 20) | (14 << 10) | 5)
 	maxCStringResultSize = 4096
 )
 

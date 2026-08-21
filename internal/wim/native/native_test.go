@@ -4,6 +4,12 @@ package native
 
 import "testing"
 
+func TestBundledVersionIsPinnedToReviewedRelease(t *testing.T) {
+	if BundledVersion != "1.14.5" || BundledVersionCode != uint32((1<<20)|(14<<10)|5) {
+		t.Fatalf("bundled version=%s code=%#x", BundledVersion, BundledVersionCode)
+	}
+}
+
 func TestNativeCloseIsIdempotent(t *testing.T) {
 	var freed, cleaned int
 	library := &Library{initialized: true, fn: functions{free: func(uintptr) { freed++ }, globalCleanup: func() { cleaned++ }}}

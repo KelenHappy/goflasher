@@ -21,8 +21,8 @@ trap 'rm -rf "$stage"' EXIT
 
 install -Dm755 "$binary" "$stage/usr/bin/goflasher"
 if [[ -n "${LIBWIM_LIBRARY:-}" ]]; then
-  install -Dm755 "$LIBWIM_LIBRARY" "$stage/usr/lib/goflasher/lib/wimlib/1.14.4/libwim.so.15"
-  "$root/packaging/legal/install-wimlib-record.sh" "$stage/usr/share/doc/goflasher/third-party/wimlib-1.14.4"
+  install -Dm755 "$LIBWIM_LIBRARY" "$stage/usr/lib/goflasher/lib/wimlib/1.14.5/libwim.so.15"
+  "$root/packaging/legal/install-wimlib-record.sh" "$stage/usr/share/doc/goflasher/third-party/wimlib-1.14.5"
 fi
 go build -trimpath -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \

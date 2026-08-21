@@ -30,8 +30,8 @@ if [[ "$os" = macos ]]; then
   go build -o "$work/GoFlasher.app/Contents/MacOS/wim-smoke" "$root/cmd/wim-smoke"
   "$work/GoFlasher.app/Contents/MacOS/wim-smoke" "$smoke"
 else
-  mkdir -p "$work/app/lib/wimlib/1.14.4"
-  cp "$lib" "$work/app/lib/wimlib/1.14.4/libwim.so.15"
+  mkdir -p "$work/app/lib/wimlib/1.14.5"
+  cp "$lib" "$work/app/lib/wimlib/1.14.5/libwim.so.15"
   go build -o "$work/app/wim-smoke" "$root/cmd/wim-smoke"
   "$work/app/wim-smoke" "$smoke"
 fi
