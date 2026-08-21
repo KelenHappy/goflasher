@@ -1,4 +1,5 @@
-// Package wim provides a handle-free Go API around the bundled libwim.
+// Package wim splits Windows images using the platform backend: trusted system
+// DISM on Windows and GoFlasher's bundled libwim on Linux and macOS.
 package wim
 
 import (
@@ -6,13 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-
-	"github.com/goflasher/goflasher/internal/wim/native"
 )
 
 type ProgressFunc func(completed, total uint64)
@@ -24,143 +21,29 @@ type Part struct {
 
 var ErrUnsupported = errors.New("WIM splitting is unsupported")
 
-type nativeImage interface {
-	Split(string, uint64) error
-	Close() error
-}
-type nativeLibrary interface {
-	OpenWIM(string) (nativeImage, error)
-	Close() error
-}
+// Probe verifies that the compile-time-selected backend is available.
+func Probe() error { return backendProbe() }
 
-type libraryAdapter struct{ library *native.Library }
-
-func (a libraryAdapter) OpenWIM(path string) (nativeImage, error) { return a.library.OpenWIM(path) }
-func (a libraryAdapter) Close() error                             { return a.library.Close() }
-
-var openNative = func(path, root string) (nativeLibrary, error) {
-	library, err := native.Open(path, root)
-	if err != nil {
-		return nil, err
-	}
-	return libraryAdapter{library}, nil
-}
-
-// locateBundledLibrary is replaceable only by package tests. Production keeps
-// the platform-specific, application-controlled path policy in
-// bundledLibraryPath.
-var locateBundledLibrary = bundledLibraryPath
-
-// Probe loads, validates, initializes, and closes the bundled library without
-// opening a WIM. Callers use it during preflight, before opening a target.
-func Probe() (err error) {
-	libraryPath, libraryRoot, err := locateBundledLibrary()
-	if err != nil {
-		return err
-	}
-	lib, err := openNative(libraryPath, libraryRoot)
-	if err != nil {
-		return errors.Join(ErrUnsupported, err)
-	}
-	return lib.Close()
-}
-
-// Split uses the fixed bundled libwim and never exposes a WIMStruct or dynamic
-// library handle. Progress callbacks run synchronously on the calling Go
-// goroutine; no Go callback is passed to native code or invoked on its threads.
-func Split(ctx context.Context, sourcePath, outputDir string, partSize uint64, progress ProgressFunc) (parts []Part, err error) {
+// Split canonicalizes and validates its paths before invoking the
+// compile-time-selected platform backend.
+func Split(ctx context.Context, sourcePath, outputDir string, partSize uint64, progress ProgressFunc) ([]Part, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if partSize == 0 {
 		return nil, fmt.Errorf("%w: invalid part size", ErrUnsupported)
 	}
-	sourcePath, err = canonicalAbsolute(sourcePath)
-	if err != nil {
+	var err error
+	if sourcePath, err = canonicalAbsolute(sourcePath); err != nil {
 		return nil, err
 	}
-	outputDir, err = canonicalAbsolute(outputDir)
-	if err != nil {
+	if outputDir, err = canonicalAbsolute(outputDir); err != nil {
 		return nil, err
 	}
 	if err := rejectExistingParts(outputDir); err != nil {
 		return nil, err
 	}
-	libraryPath, libraryRoot, err := locateBundledLibrary()
-	if err != nil {
-		return nil, err
-	}
-	lib, err := openNative(libraryPath, libraryRoot)
-	if err != nil {
-		return nil, errors.Join(ErrUnsupported, err)
-	}
-	defer func() { err = errors.Join(err, lib.Close()) }()
-	image, err := lib.OpenWIM(sourcePath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { err = errors.Join(err, image.Close()) }()
-	if progress != nil {
-		progress(0, 1)
-	}
-	firstPart := filepath.Join(outputDir, "install.swm")
-	if err := image.Split(firstPart, partSize); err != nil {
-		removeParts(outputDir)
-		return nil, err
-	}
-	parts, err = discoverParts(outputDir)
-	if err != nil {
-		removeParts(outputDir)
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		removeParts(outputDir)
-		return nil, err
-	}
-	if progress != nil {
-		progress(1, 1)
-	}
-	return parts, nil
-}
-
-func bundledLibraryPath() (string, string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return "", "", errors.Join(ErrUnsupported, err)
-	}
-	executable, err = filepath.EvalSymlinks(executable)
-	if err != nil {
-		return "", "", errors.Join(ErrUnsupported, err)
-	}
-	return bundledLibraryPathFor(executable, runtime.GOOS)
-}
-
-func bundledLibraryPathFor(executable, goos string) (string, string, error) {
-	if goos == "darwin" {
-		root := path.Dir(executable)
-		// Only accept the canonical application-bundle layout. In particular,
-		// never fall back to the working directory, DYLD_LIBRARY_PATH, or a
-		// system libwim when the signed nested library is absent.
-		contents := path.Dir(root)
-		if path.Base(root) != "MacOS" || path.Base(contents) != "Contents" {
-			return "", "", fmt.Errorf("%w: executable is not in a macOS application bundle", ErrUnsupported)
-		}
-		return path.Join(contents, "Frameworks", "libwim.15.dylib"), contents, nil
-	}
-	if goos == "linux" {
-		if path.Clean(executable) == "/usr/bin/goflasher" {
-			root := path.Join("/usr/lib/goflasher/lib/wimlib", native.BundledVersion)
-			return path.Join(root, "libwim.so.15"), "/usr/lib/goflasher", nil
-		}
-		root := path.Dir(executable)
-		return path.Join(root, "lib", "wimlib", native.BundledVersion, "libwim.so.15"), root, nil
-	}
-	root := filepath.Dir(executable)
-	name := "libwim.so.15"
-	if goos == "windows" {
-		name = "libwim-15.dll"
-	}
-	return filepath.Join(root, "lib", "wimlib", native.BundledVersion, name), root, nil
+	return backendSplit(ctx, sourcePath, outputDir, partSize, progress)
 }
 
 func canonicalAbsolute(name string) (string, error) {

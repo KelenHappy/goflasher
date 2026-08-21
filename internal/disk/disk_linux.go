@@ -22,6 +22,11 @@ type linuxManager struct {
 	udisks        udisks.Client
 }
 
+type linuxDiskState struct {
+	mounts map[[2]uint64][]string
+	swaps  map[string]bool
+}
+
 // NewManager returns the native Linux implementation without exposing it in
 // the common API.
 func NewManager() Manager {
@@ -47,62 +52,83 @@ func (m *linuxManager) List(ctx context.Context) ([]Disk, error) {
 	if err != nil {
 		return nil, err
 	}
+	state := linuxDiskState{mounts: mounts, swaps: swaps}
 	result := make([]Disk, 0, len(entries))
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		name := entry.Name()
-		class := filepath.Join(m.sysClassBlock, name)
-		if pathExists(filepath.Join(class, "partition")) {
-			continue
-		}
-		real, err := filepath.EvalSymlinks(class)
-		if err != nil {
-			continue
-		}
-		major, minor, ok := linuxDeviceNumber(readText(filepath.Join(class, "dev")))
+		disk, ok := m.diskFromEntry(entry.Name(), state)
 		if !ok {
 			continue
 		}
-		serial := readText(filepath.Join(class, "device/serial"))
-		d := Disk{
-			Device:    filepath.Join(m.devRoot, name),
-			Vendor:    readText(filepath.Join(class, "device/vendor")),
-			Model:     readText(filepath.Join(class, "device/model")),
-			Serial:    serial,
-			Size:      readUint(filepath.Join(class, "size")) * 512,
-			Removable: readText(filepath.Join(class, "removable")) == "1",
-			External:  strings.Contains(real, "/usb"),
-		}
-		if d.External {
-			d.Bus = "usb"
-		}
-		for number, points := range mounts {
-			if number == [2]uint64{major, minor} || linuxParent(m.sysClassBlock, number) == name {
-				for _, point := range points {
-					d.MountPoints = appendUnique(d.MountPoints, point)
-				}
-			}
-		}
-		d.Mounted = len(d.MountPoints) != 0
-		for _, point := range d.MountPoints {
-			if point == "/" || point == "/boot" || point == "/boot/efi" || point == "/home" {
-				d.System = true
-			}
-		}
-		for swap := range swaps {
-			if linuxWholeName(m.sysClassBlock, filepath.Base(swap)) == name {
-				d.System = true
-			}
-		}
-		d.ID = serial
-		if d.ID == "" {
-			d.ID = fmt.Sprintf("%d:%d@%s", major, minor, real)
-		}
-		result = append(result, d)
+		result = append(result, disk)
 	}
 	return result, nil
+}
+
+func (m *linuxManager) diskFromEntry(name string, state linuxDiskState) (Disk, bool) {
+	class := filepath.Join(m.sysClassBlock, name)
+	if pathExists(filepath.Join(class, "partition")) {
+		return Disk{}, false
+	}
+	real, err := filepath.EvalSymlinks(class)
+	if err != nil {
+		return Disk{}, false
+	}
+	major, minor, ok := linuxDeviceNumber(readText(filepath.Join(class, "dev")))
+	if !ok {
+		return Disk{}, false
+	}
+	disk := m.readDisk(class, name, real)
+	disk.MountPoints = m.diskMountPoints(name, [2]uint64{major, minor}, state.mounts)
+	disk.Mounted = len(disk.MountPoints) != 0
+	disk.System = systemMountPointPresent(disk.MountPoints) || m.diskUsedForSwap(name, state.swaps)
+	if disk.ID == "" {
+		disk.ID = fmt.Sprintf("%d:%d@%s", major, minor, real)
+	}
+	return disk, true
+}
+
+func (m *linuxManager) readDisk(class, name, real string) Disk {
+	serial := readText(filepath.Join(class, "device/serial"))
+	disk := Disk{Device: filepath.Join(m.devRoot, name), Vendor: readText(filepath.Join(class, "device/vendor")), Model: readText(filepath.Join(class, "device/model")), Serial: serial, ID: serial, Size: readUint(filepath.Join(class, "size")) * 512, Removable: readText(filepath.Join(class, "removable")) == "1", External: strings.Contains(real, "/usb")}
+	if disk.External {
+		disk.Bus = "usb"
+	}
+	return disk
+}
+
+func (m *linuxManager) diskMountPoints(name string, deviceNumber [2]uint64, mounts map[[2]uint64][]string) []string {
+	var result []string
+	for number, points := range mounts {
+		if number != deviceNumber && linuxParent(m.sysClassBlock, number) != name {
+			continue
+		}
+		for _, point := range points {
+			result = appendUnique(result, point)
+		}
+	}
+	return result
+}
+
+func systemMountPointPresent(points []string) bool {
+	for _, point := range points {
+		switch point {
+		case "/", "/boot", "/boot/efi", "/home":
+			return true
+		}
+	}
+	return false
+}
+
+func (m *linuxManager) diskUsedForSwap(name string, swaps map[string]bool) bool {
+	for swap := range swaps {
+		if linuxWholeName(m.sysClassBlock, filepath.Base(swap)) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *linuxManager) Refresh(ctx context.Context, id string) (Disk, error) {
@@ -119,17 +145,18 @@ func (m *linuxManager) Refresh(ctx context.Context, id string) (Disk, error) {
 }
 
 func (m *linuxManager) Unmount(ctx context.Context, selected Disk) error {
-	fresh, err := m.revalidate(ctx, selected)
+	fresh, err := m.revalidateForDestructiveOperation(ctx, selected)
 	if err != nil {
 		return err
 	}
-	if fresh.System {
-		return ErrSystemDisk
+	if err := m.unmountPoints(ctx, fresh.MountPoints); err != nil {
+		return err
 	}
-	if !fresh.External || !fresh.Removable {
-		return ErrNotRemovable
-	}
-	for _, point := range fresh.MountPoints {
+	return m.verifyUnmounted(ctx, fresh.ID)
+}
+
+func (m *linuxManager) unmountPoints(ctx context.Context, points []string) error {
+	for _, point := range points {
 		source := linuxMountSource(m.mountInfo, point)
 		if source == "" {
 			return fmt.Errorf("%w: mount source for %s not found", ErrUnmountFailed, point)
@@ -138,7 +165,11 @@ func (m *linuxManager) Unmount(ctx context.Context, selected Disk) error {
 			return fmt.Errorf("%w: %s: %v", ErrUnmountFailed, source, err)
 		}
 	}
-	again, err := m.Refresh(ctx, fresh.ID)
+	return nil
+}
+
+func (m *linuxManager) verifyUnmounted(ctx context.Context, id string) error {
+	again, err := m.Refresh(ctx, id)
 	if err != nil {
 		return fmt.Errorf("%w: refresh after unmount: %v", ErrUnmountFailed, err)
 	}
@@ -146,6 +177,20 @@ func (m *linuxManager) Unmount(ctx context.Context, selected Disk) error {
 		return fmt.Errorf("%w: device remains mounted", ErrUnmountFailed)
 	}
 	return nil
+}
+
+func (m *linuxManager) revalidateForDestructiveOperation(ctx context.Context, selected Disk) (Disk, error) {
+	fresh, err := m.revalidate(ctx, selected)
+	if err != nil {
+		return Disk{}, err
+	}
+	if fresh.System {
+		return Disk{}, ErrSystemDisk
+	}
+	if !fresh.External || !fresh.Removable {
+		return Disk{}, ErrNotRemovable
+	}
+	return fresh, nil
 }
 
 func (m *linuxManager) Eject(ctx context.Context, selected Disk) error {
@@ -240,17 +285,31 @@ func linuxMountSource(path, point string) string {
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 10 || fields[4] != point {
-			continue
-		}
-		for i, field := range fields {
-			if field == "-" && i+2 < len(fields) {
-				return fields[i+2]
-			}
+		if source, ok := mountSourceForPoint(strings.Fields(scanner.Text()), point); ok {
+			return source
 		}
 	}
 	return ""
+}
+
+func mountSourceForPoint(fields []string, point string) (string, bool) {
+	if len(fields) < 10 || fields[4] != point {
+		return "", false
+	}
+	separator := indexOf(fields, "-")
+	if separator < 0 || separator+2 >= len(fields) {
+		return "", false
+	}
+	return fields[separator+2], true
+}
+
+func indexOf(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func linuxDeviceNumber(value string) (uint64, uint64, bool) {

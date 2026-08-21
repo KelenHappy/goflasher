@@ -632,9 +632,17 @@ func validateAndOpen(req privilegedRequest, env helperEnvironment) (*os.File, er
 }
 
 func (req privilegedRequest) valid() bool {
-	if !req.validProtocol() || req.Identity == "" || req.Capacity == 0 {
+	if !req.validProtocol() || !req.hasRequiredIdentity() {
 		return false
 	}
+	return req.validMode()
+}
+
+func (req privilegedRequest) hasRequiredIdentity() bool {
+	return req.Identity != "" && req.Capacity != 0
+}
+
+func (req privilegedRequest) validMode() bool {
 	switch req.Mode {
 	case modeWrite, modeRead, modeFlush, modeInstallerSession:
 		return true
@@ -1047,11 +1055,12 @@ func mountedOrSystem(name string, major, minor uint32, env helperEnvironment) (b
 }
 
 func deviceMounted(name string, major, minor uint32, mounts map[devNumber][]string, topology *blockTopology) (bool, error) {
+	target := devNumber{major: major, minor: minor}
 	for number, points := range mounts {
 		if len(points) == 0 {
 			continue
 		}
-		mounted, err := mountBacksDevice(number, name, major, minor, topology)
+		mounted, err := mountBacksDevice(number, target, name, topology)
 		if err != nil {
 			return false, err
 		}
@@ -1062,12 +1071,12 @@ func deviceMounted(name string, major, minor uint32, mounts map[devNumber][]stri
 	return false, nil
 }
 
-func mountBacksDevice(number devNumber, name string, major, minor uint32, topology *blockTopology) (bool, error) {
+func mountBacksDevice(number, target devNumber, name string, topology *blockTopology) (bool, error) {
 	mounted, usable, err := mountedDeviceName(number, topology)
 	if err != nil || !usable {
 		return false, err
 	}
-	if sameDevice(number, major, minor) {
+	if number == target {
 		return true, nil
 	}
 	return topology.dependsOn(mounted, name)
@@ -1082,10 +1091,6 @@ func mountedDeviceName(number devNumber, topology *blockTopology) (string, bool,
 		return "", false, nil
 	}
 	return "", false, err
-}
-
-func sameDevice(number devNumber, major, minor uint32) bool {
-	return number.major == major && number.minor == minor
 }
 
 func deviceUsedForSwap(name, devRoot string, swaps map[string]bool, topology *blockTopology) (bool, error) {

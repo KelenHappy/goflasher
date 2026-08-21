@@ -18,8 +18,8 @@ import (
 type wimSplitFunc func(context.Context, string, string, uint64, wim.ProgressFunc) ([]wim.Part, error)
 
 // NativeWIMSplitter stages only install.wim in a private temporary directory,
-// invokes the bundled libwim, validates its complete output set, and streams
-// each part to the executor. Native handles never escape internal/wim.
+// invokes the platform WIM backend, validates its complete output set, and
+// streams each part to the executor. Backend details never escape internal/wim.
 type NativeWIMSplitter struct {
 	split wimSplitFunc
 	probe func() error

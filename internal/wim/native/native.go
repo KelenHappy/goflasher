@@ -1,4 +1,6 @@
-// Package native is the only package that owns libwim native handles.
+//go:build linux || darwin
+
+// Package native is the Unix-only package that owns libwim native handles.
 //
 // Function declarations below are transcribed from the bundled wimlib 1.14.5
 // include/wimlib.h. C int and enum values are int32, uint64_t is uint64, and
@@ -6,7 +8,6 @@
 package native
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -15,18 +16,7 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const (
-	BundledVersion       = "1.14.5"
-	BundledVersionCode   = uint32((1 << 20) | (14 << 10) | 5)
-	maxCStringResultSize = 4096
-)
-
-var (
-	ErrUnsupported   = errors.New("bundled libwim is unavailable or incompatible")
-	ErrABIMismatch   = errors.New("bundled libwim ABI/version mismatch")
-	ErrInvalidPath   = errors.New("libwim path is not application-controlled")
-	ErrLibraryClosed = errors.New("libwim library is closed")
-)
+const maxCStringResultSize = 4096
 
 type functions struct {
 	globalInit       func(int32) int32                           // int wimlib_global_init(int)
