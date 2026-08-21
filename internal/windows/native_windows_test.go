@@ -283,6 +283,24 @@ func TestVolumesForDiskZeroVolumeSuccess(t *testing.T) {
 	}
 }
 
+func TestMountedDiskNumbersQueriesEachVolumeOnce(t *testing.T) {
+	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
+	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
+	enumerateVolumes = func() ([]string, error) { return []string{"one", "two"}, nil }
+	calls := 0
+	queryVolumeDisks = func(v string) ([]uint32, error) {
+		calls++
+		if v == "one" {
+			return []uint32{1, 2}, nil
+		}
+		return []uint32{2, 3}, nil
+	}
+	mounted, err := mountedDiskNumbers()
+	if err != nil || calls != 2 || !mounted[1] || !mounted[2] || !mounted[3] {
+		t.Fatalf("mounted=%v calls=%d error=%v", mounted, calls, err)
+	}
+}
+
 func TestTopologyComparisonDetectsRace(t *testing.T) {
 	if !sameVolumes([]string{"a", "b"}, []string{"b", "a"}) {
 		t.Fatal("same topology rejected because order changed")

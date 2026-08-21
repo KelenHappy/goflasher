@@ -34,6 +34,14 @@ type InstallerResult struct {
 	ManifestSHA256 string
 }
 
+// InstallerRequest describes the raw target and expected installer contents.
+type InstallerRequest struct {
+	Reader     io.ReaderAt
+	TargetSize uint64
+	Manifest   []installer.VerificationEntry
+	Options    InstallerOptions
+}
+
 type fatVolume struct {
 	r                                                                     io.ReaderAt
 	base, size                                                            uint64
@@ -50,63 +58,85 @@ type fatFile struct {
 
 // VerifyInstaller rereads GPT, FAT metadata, directory trees, and file data
 // exclusively from the raw target. It does not trust Builder state.
-func VerifyInstaller(ctx context.Context, r io.ReaderAt, targetSize uint64, manifest []installer.VerificationEntry, options InstallerOptions) (InstallerResult, error) {
+func VerifyInstaller(ctx context.Context, request InstallerRequest) (InstallerResult, error) {
 	var result InstallerResult
-	if r == nil || targetSize < 512 || options.SplitWIMPolicySize == 0 {
+	if request.Reader == nil || request.TargetSize < 512 || request.Options.SplitWIMPolicySize == 0 {
 		return result, semantic("invalid verifier input")
 	}
-	start, end, err := verifyGPT(r, targetSize)
+	start, end, err := verifyGPT(request.Reader, request.TargetSize)
 	if err != nil {
 		return result, errors.Join(ErrGPTLayout, err)
 	}
-	v, err := openFAT(r, start*512, (end-start+1)*512)
+	v, err := openFAT(request.Reader, start*512, (end-start+1)*512)
 	if err != nil {
 		return result, errors.Join(ErrFAT32Filesystem, err)
 	}
 	if err = v.walk(ctx); err != nil {
 		return result, errors.Join(ErrFAT32Filesystem, err)
 	}
-	expected := make(map[string]installer.VerificationEntry, len(manifest))
-	for _, e := range manifest {
-		key := strings.ToLower(strings.ReplaceAll(e.Path, "\\", "/"))
-		if _, ok := expected[key]; ok {
-			return result, semantic("duplicate manifest path %s", e.Path)
-		}
-		expected[key] = e
-	}
-	for key, e := range expected {
-		actual, ok := v.files[key]
-		if !ok {
-			return result, semantic("manifest path missing: %s", e.Path)
-		}
-		if actual.size != e.Size {
-			return result, semantic("size mismatch for %s", e.Path)
-		}
-		h, err := v.hashFile(ctx, actual)
-		if err != nil {
-			return result, err
-		}
-		if h != e.SHA256 {
-			return result, semantic("hash mismatch for %s", e.Path)
-		}
-		result.FilesVerified++
-	}
-	for _, required := range []string{"efi/boot/bootx64.efi", "sources/boot.wim"} {
-		if _, ok := v.files[required]; !ok {
-			return result, semantic("required installer file missing: %s", required)
-		}
-	}
-	if options.RequireSplitWIM {
-		if _, ok := v.files["sources/install.wim"]; ok {
-			return result, semantic("oversized install.wim was copied")
-		}
-	}
-	result.WIMParts, err = verifySWM(v.files, options)
+	verified, err := v.verifyManifest(ctx, request.Manifest)
 	if err != nil {
 		return result, err
 	}
-	result.ManifestSHA256 = manifestHash(manifest)
+	result.FilesVerified = verified
+	if err := v.verifyRequiredFiles(request.Options); err != nil {
+		return result, err
+	}
+	result.WIMParts, err = verifySWM(v.files, request.Options)
+	if err != nil {
+		return result, err
+	}
+	result.ManifestSHA256 = manifestHash(request.Manifest)
 	return result, nil
+}
+
+func (v *fatVolume) verifyManifest(ctx context.Context, manifest []installer.VerificationEntry) (int, error) {
+	expected := make(map[string]installer.VerificationEntry, len(manifest))
+	for _, entry := range manifest {
+		key := strings.ToLower(strings.ReplaceAll(entry.Path, "\\", "/"))
+		if _, exists := expected[key]; exists {
+			return 0, semantic("duplicate manifest path %s", entry.Path)
+		}
+		expected[key] = entry
+	}
+	verified := 0
+	for key, entry := range expected {
+		if err := v.verifyManifestEntry(ctx, key, entry); err != nil {
+			return 0, err
+		}
+		verified++
+	}
+	return verified, nil
+}
+
+func (v *fatVolume) verifyManifestEntry(ctx context.Context, key string, expected installer.VerificationEntry) error {
+	actual, ok := v.files[key]
+	if !ok {
+		return semantic("manifest path missing: %s", expected.Path)
+	}
+	if actual.size != expected.Size {
+		return semantic("size mismatch for %s", expected.Path)
+	}
+	hash, err := v.hashFile(ctx, actual)
+	if err != nil {
+		return err
+	}
+	if hash != expected.SHA256 {
+		return semantic("hash mismatch for %s", expected.Path)
+	}
+	return nil
+}
+
+func (v *fatVolume) verifyRequiredFiles(options InstallerOptions) error {
+	for _, required := range []string{"efi/boot/bootx64.efi", "sources/boot.wim"} {
+		if _, ok := v.files[required]; !ok {
+			return semantic("required installer file missing: %s", required)
+		}
+	}
+	if _, copied := v.files["sources/install.wim"]; options.RequireSplitWIM && copied {
+		return semantic("oversized install.wim was copied")
+	}
+	return nil
 }
 
 func verifyGPT(r io.ReaderAt, size uint64) (uint64, uint64, error) {
@@ -121,18 +151,8 @@ func verifyGPT(r io.ReaderAt, size uint64) (uint64, uint64, error) {
 	if total < 68 {
 		return 0, 0, semantic("target too small for GPT")
 	}
-	primary, err := readAt(r, 512, 512)
+	primary, backup, err := readGPTHeaders(r, total)
 	if err != nil {
-		return 0, 0, err
-	}
-	backup, err := readAt(r, (total-1)*512, 512)
-	if err != nil {
-		return 0, 0, err
-	}
-	if err = verifyGPTHeader(primary, 1, total-1); err != nil {
-		return 0, 0, err
-	}
-	if err = verifyGPTHeader(backup, total-1, 1); err != nil {
 		return 0, 0, err
 	}
 	count, sizeEntry := binary.LittleEndian.Uint32(primary[80:84]), binary.LittleEndian.Uint32(primary[84:88])
@@ -140,11 +160,7 @@ func verifyGPT(r io.ReaderAt, size uint64) (uint64, uint64, error) {
 		return 0, 0, semantic("invalid GPT entry geometry")
 	}
 	bytesN := uint64(count) * uint64(sizeEntry)
-	pa, err := readAt(r, binary.LittleEndian.Uint64(primary[72:80])*512, bytesN)
-	if err != nil {
-		return 0, 0, err
-	}
-	ba, err := readAt(r, binary.LittleEndian.Uint64(backup[72:80])*512, bytesN)
+	pa, ba, err := readGPTArrays(r, primary, backup, bytesN)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -157,20 +173,51 @@ func verifyGPT(r io.ReaderAt, size uint64) (uint64, uint64, error) {
 	if !bytes.Equal(primary[56:72], backup[56:72]) || binary.LittleEndian.Uint64(primary[40:48]) != binary.LittleEndian.Uint64(backup[40:48]) || binary.LittleEndian.Uint64(primary[48:56]) != binary.LittleEndian.Uint64(backup[48:56]) {
 		return 0, 0, semantic("primary and backup GPT metadata differ")
 	}
+	first, last := binary.LittleEndian.Uint64(primary[40:48]), binary.LittleEndian.Uint64(primary[48:56])
+	return findESP(pa, sizeEntry, first, last)
+}
+
+func readGPTHeaders(r io.ReaderAt, total uint64) ([]byte, []byte, error) {
+	primary, err := readAt(r, 512, 512)
+	if err != nil {
+		return nil, nil, err
+	}
+	backup, err := readAt(r, (total-1)*512, 512)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := verifyGPTHeader(primary, 1, total-1); err != nil {
+		return nil, nil, err
+	}
+	if err := verifyGPTHeader(backup, total-1, 1); err != nil {
+		return nil, nil, err
+	}
+	return primary, backup, nil
+}
+
+func readGPTArrays(r io.ReaderAt, primary, backup []byte, size uint64) ([]byte, []byte, error) {
+	primaryArray, err := readAt(r, binary.LittleEndian.Uint64(primary[72:80])*512, size)
+	if err != nil {
+		return nil, nil, err
+	}
+	backupArray, err := readAt(r, binary.LittleEndian.Uint64(backup[72:80])*512, size)
+	return primaryArray, backupArray, err
+}
+
+func findESP(entries []byte, entrySize uint32, first, last uint64) (uint64, uint64, error) {
 	var found int
 	var start, end uint64
-	for off := uint64(0); off < bytesN; off += uint64(sizeEntry) {
-		e := pa[off : off+uint64(sizeEntry)]
-		if bytes.Equal(e[:16], make([]byte, 16)) {
+	for offset := uint64(0); offset < uint64(len(entries)); offset += uint64(entrySize) {
+		entry := entries[offset : offset+uint64(entrySize)]
+		if bytes.Equal(entry[:16], make([]byte, 16)) {
 			continue
 		}
 		found++
-		if !bytes.Equal(e[:16], gpt.EFITypeGUID.MarshalBinary()) {
+		if !bytes.Equal(entry[:16], gpt.EFITypeGUID.MarshalBinary()) {
 			return 0, 0, semantic("non-ESP GPT partition")
 		}
-		start, end = binary.LittleEndian.Uint64(e[32:40]), binary.LittleEndian.Uint64(e[40:48])
+		start, end = binary.LittleEndian.Uint64(entry[32:40]), binary.LittleEndian.Uint64(entry[40:48])
 	}
-	first, last := binary.LittleEndian.Uint64(primary[40:48]), binary.LittleEndian.Uint64(primary[48:56])
 	if found != 1 || start < first || end > last || start > end {
 		return 0, 0, semantic("invalid single ESP bounds")
 	}
@@ -278,20 +325,9 @@ func (v *fatVolume) walkDir(ctx context.Context, first uint32, parent string, di
 	}
 	dirs[first] = true
 	defer delete(dirs, first)
-	chain, err := v.chain(first, "dir:"+parent)
+	data, err := v.directoryData(ctx, first, parent)
 	if err != nil {
 		return err
-	}
-	var data []byte
-	for _, c := range chain {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		b, e := v.cluster(c)
-		if e != nil {
-			return e
-		}
-		data = append(data, b...)
 	}
 	var lfn [][]byte
 	for off := 0; off+32 <= len(data); off += 32 {
@@ -315,27 +351,47 @@ func (v *fatVolume) walkDir(ctx context.Context, first uint32, parent string, di
 		if name == "" || name == "." || name == ".." || e[11]&0x08 != 0 {
 			continue
 		}
-		p := strings.ToLower(name)
-		if parent != "" {
-			p = parent + "/" + p
-		}
-		cluster := uint32(binary.LittleEndian.Uint16(e[26:28])) | uint32(binary.LittleEndian.Uint16(e[20:22]))<<16
-		size := uint64(binary.LittleEndian.Uint32(e[28:32]))
-		if e[11]&0x10 != 0 {
-			if err := v.walkDir(ctx, cluster, p, dirs); err != nil {
-				return err
-			}
-		} else {
-			if _, exists := v.files[p]; exists {
-				return semantic("duplicate FAT path %s", p)
-			}
-			v.files[p] = fatFile{p, size, cluster}
-			if _, err := v.chain(cluster, "file:"+p); err != nil {
-				return err
-			}
+		if err := v.addDirectoryEntry(ctx, e, parent, name, dirs); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (v *fatVolume) directoryData(ctx context.Context, first uint32, parent string) ([]byte, error) {
+	chain, err := v.chain(first, "dir:"+parent)
+	if err != nil {
+		return nil, err
+	}
+	var data []byte
+	for _, cluster := range chain {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		block, err := v.cluster(cluster)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, block...)
+	}
+	return data, nil
+}
+
+func (v *fatVolume) addDirectoryEntry(ctx context.Context, entry []byte, parent, name string, dirs map[uint32]bool) error {
+	path := strings.ToLower(name)
+	if parent != "" {
+		path = parent + "/" + path
+	}
+	cluster := uint32(binary.LittleEndian.Uint16(entry[26:28])) | uint32(binary.LittleEndian.Uint16(entry[20:22]))<<16
+	if entry[11]&0x10 != 0 {
+		return v.walkDir(ctx, cluster, path, dirs)
+	}
+	if _, exists := v.files[path]; exists {
+		return semantic("duplicate FAT path %s", path)
+	}
+	v.files[path] = fatFile{path, uint64(binary.LittleEndian.Uint32(entry[28:32])), cluster}
+	_, err := v.chain(cluster, "file:"+path)
+	return err
 }
 func shortName(e []byte) string {
 	base := strings.TrimSpace(string(e[:8]))
@@ -389,16 +445,12 @@ func (v *fatVolume) hashFile(ctx context.Context, f fatFile) (string, error) {
 func verifySWM(files map[string]fatFile, o InstallerOptions) (int, error) {
 	parts := map[int]fatFile{}
 	for p, f := range files {
-		if p == "sources/install.swm" {
-			parts[1] = f
-			continue
+		n, matched, err := swmPartNumber(p)
+		if err != nil {
+			return 0, err
 		}
-		if strings.HasPrefix(p, "sources/install") && strings.HasSuffix(p, ".swm") {
-			var n int
-			if _, err := fmt.Sscanf(p, "sources/install%d.swm", &n); err != nil || n < 2 || p != fmt.Sprintf("sources/install%d.swm", n) {
-				return 0, semantic("invalid SWM name %s", p)
-			}
-			if _, ok := parts[n]; ok {
+		if matched {
+			if _, duplicate := parts[n]; duplicate {
 				return 0, semantic("duplicate SWM part")
 			}
 			parts[n] = f
@@ -407,16 +459,37 @@ func verifySWM(files map[string]fatFile, o InstallerOptions) (int, error) {
 	if o.RequireSplitWIM && len(parts) == 0 {
 		return 0, semantic("split WIM set missing")
 	}
-	for i := 1; i <= len(parts); i++ {
-		f, ok := parts[i]
-		if !ok {
-			return 0, semantic("non-contiguous SWM set")
-		}
-		if f.size == 0 || f.size > o.SplitWIMPolicySize {
-			return 0, semantic("invalid SWM part size")
-		}
+	if err := validateSWMParts(parts, o.SplitWIMPolicySize); err != nil {
+		return 0, err
 	}
 	return len(parts), nil
+}
+
+func swmPartNumber(path string) (int, bool, error) {
+	if path == "sources/install.swm" {
+		return 1, true, nil
+	}
+	if !strings.HasPrefix(path, "sources/install") || !strings.HasSuffix(path, ".swm") {
+		return 0, false, nil
+	}
+	var number int
+	if _, err := fmt.Sscanf(path, "sources/install%d.swm", &number); err != nil || number < 2 || path != fmt.Sprintf("sources/install%d.swm", number) {
+		return 0, false, semantic("invalid SWM name %s", path)
+	}
+	return number, true, nil
+}
+
+func validateSWMParts(parts map[int]fatFile, maximum uint64) error {
+	for number := 1; number <= len(parts); number++ {
+		part, ok := parts[number]
+		if !ok {
+			return semantic("non-contiguous SWM set")
+		}
+		if part.size == 0 || part.size > maximum {
+			return semantic("invalid SWM part size")
+		}
+	}
+	return nil
 }
 func manifestHash(entries []installer.VerificationEntry) string {
 	c := append([]installer.VerificationEntry(nil), entries...)

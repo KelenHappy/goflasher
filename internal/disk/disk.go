@@ -45,25 +45,36 @@ type Disk struct {
 	TransportSerial string
 }
 
+type identity struct {
+	id, device, registryID, registryPath string
+	mediaID, transportSerial, wwn        string
+	serial                               string
+	size                                 uint64
+}
+
 // SameIdentity compares the fields that must survive a destructive-operation
 // revalidation. Callers do not need to understand platform identity schemes.
 func SameIdentity(a, b Disk) bool {
-	if a.ID == "" || a.ID != b.ID || a.Device == "" || a.Device != b.Device || a.Size == 0 || a.Size != b.Size {
+	if !hasRequiredIdentity(a) {
 		return false
 	}
-	if a.RegistryID != b.RegistryID || a.RegistryPath != b.RegistryPath {
+	return diskIdentity(a) == diskIdentity(b)
+}
+
+func hasRequiredIdentity(d Disk) bool {
+	if d.ID == "" || d.Device == "" {
 		return false
 	}
-	if (a.MediaID != "" || b.MediaID != "") && (a.MediaID == "" || a.MediaID != b.MediaID) {
-		return false
+	return d.Size != 0
+}
+
+func diskIdentity(d Disk) identity {
+	return identity{
+		id: d.ID, device: d.Device, size: d.Size,
+		registryID: d.RegistryID, registryPath: d.RegistryPath,
+		mediaID: d.MediaID, transportSerial: d.TransportSerial,
+		wwn: d.WWN, serial: d.Serial,
 	}
-	if (a.TransportSerial != "" || b.TransportSerial != "") && (a.TransportSerial == "" || a.TransportSerial != b.TransportSerial) {
-		return false
-	}
-	if (a.WWN != "" || b.WWN != "") && (a.WWN == "" || a.WWN != b.WWN) {
-		return false
-	}
-	return (a.Serial == "" && b.Serial == "") || (a.Serial != "" && a.Serial == b.Serial)
 }
 
 // Manager is the complete cross-platform disk-management surface. Each

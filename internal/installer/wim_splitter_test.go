@@ -86,10 +86,10 @@ func TestNativeWIMPrepareCompletesBeforePartsAreConsumed(t *testing.T) {
 		}
 		return []wim.Part{{Path: part, Size: uint64(len(payload))}}, nil
 	}}
-	prepared, cleanup, err := splitter.PrepareWithProgress(context.Background(), bytes.NewReader(payload), uint64(len(payload)), hex.EncodeToString(sum[:]), 4096, func() error {
+	prepared, cleanup, err := splitter.prepareWithProgress(context.Background(), wimPreparation{source: bytes.NewReader(payload), sourceSize: uint64(len(payload)), expectedHash: hex.EncodeToString(sum[:]), partSize: 4096, onSplitting: func() error {
 		splittingReported = true
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}

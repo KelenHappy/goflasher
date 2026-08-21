@@ -216,9 +216,9 @@ func (s *Service) prepareSplitWIM(ctx context.Context, info image.Info, plan *Wo
 		return nil, nil, err
 	}
 	sendStage(ctx, updates, progress.StageStagingWIM)
-	finalized, prepared, cleanup, err := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
+	finalized, prepared, cleanup, err := installer.PrepareSplitWIM(ctx, installer.SplitWIMPreparation{Plan: plan.Windows, Source: r, Splitter: s.InstallerSplitter, OnSplitting: func() error {
 		return s.startWIMSplit(ctx, updates)
-	})
+	}})
 	if err != nil {
 		return nil, nil, errors.Join(installer.ErrWIMSplitFailure, err)
 	}
@@ -261,8 +261,9 @@ func (s *Service) flushAndVerifyInstaller(ctx context.Context, plan *installer.B
 	if err != nil {
 		return err
 	}
-	verification, verifyErr := verify.VerifyInstaller(ctx, reader, target.Size, out.installerManifest, verify.InstallerOptions{
-		SplitWIMPolicySize: plan.SplitWIMPolicySize(), RequireSplitWIM: plan.InstallStrategy() == installer.SplitWIM,
+	verification, verifyErr := verify.VerifyInstaller(ctx, verify.InstallerRequest{
+		Reader: reader, TargetSize: target.Size, Manifest: out.installerManifest,
+		Options: verify.InstallerOptions{SplitWIMPolicySize: plan.SplitWIMPolicySize(), RequireSplitWIM: plan.InstallStrategy() == installer.SplitWIM},
 	})
 	if err := errors.Join(verifyErr, reader.Close()); err != nil {
 		return err
