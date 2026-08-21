@@ -22,6 +22,11 @@ type ioBindings struct {
 	cf             cfBindings
 }
 
+type registryProperty struct {
+	key string
+	dst *string
+}
+
 func bindIOKit(lib uintptr, cf cfBindings) (ioBindings, error) {
 	var i ioBindings
 	i.cf = cf
@@ -36,85 +41,106 @@ func bindIOKit(lib uintptr, cf cfBindings) (ioBindings, error) {
 	return i, nil
 }
 func (f *Frameworks) RegistryIdentity(bsd string) (RegistryIdentity, error) {
-	z := append([]byte(bsd), 0)
-	m := f.io.matching(0, 0, &z[0])
-	if m == 0 {
-		return RegistryIdentity{}, fmt.Errorf("IOBSDNameMatching(%q) returned NULL", bsd)
-	}
-	cur := f.io.getService(0, m)
-	if cur == 0 {
-		return RegistryIdentity{}, fmt.Errorf("IOServiceGetMatchingService(%q) returned 0", bsd)
+	cur, err := f.registryService(bsd)
+	if err != nil {
+		return RegistryIdentity{}, err
 	}
 	out := RegistryIdentity{}
 	for depth := 0; depth < 64 && cur != 0; depth++ {
-		var id uint64
-		if f.io.registryID(cur, &id) == 0 && out.EntryID == "" {
-			out.EntryID = strconv.FormatUint(id, 16)
-		}
-		buf := make([]byte, 4096)
-		plane := append([]byte("IOService"), 0)
-		if f.io.getPath(cur, &plane[0], &buf[0]) == 0 && out.Path == "" {
-			out.Path = cString(buf)
-		}
-		name := make([]byte, 128)
-		_ = f.io.getName(cur, &name[0])
-		n := strings.ToLower(cString(name))
-		if strings.Contains(n, "usb") {
-			out.USBAncestor = true
-		}
-		properties := []struct {
-			key string
-			dst *string
-		}{{"USB Vendor Name", &out.Vendor}, {"USB Product Name", &out.Product}, {"Vendor Identification", &out.Vendor}, {"Product Name", &out.Product}}
-		if depth == 0 {
-			properties = append(properties,
-				struct {
-					key string
-					dst *string
-				}{"UUID", &out.MediaID},
-				struct {
-					key string
-					dst *string
-				}{"GUID", &out.MediaID},
-				struct {
-					key string
-					dst *string
-				}{"Media UUID", &out.MediaID})
-		} else if out.USBAncestor {
-			properties = append(properties, struct {
-				key string
-				dst *string
-			}{"USB Serial Number", &out.TransportSerial})
-		}
-		for _, p := range properties {
-			{
-				if *p.dst != "" {
-					continue
-				}
-				k, e := f.cf.newString(p.key)
-				if e != nil {
-					continue
-				}
-				v := f.io.createProperty(cur, k, 0, 0)
-				f.cf.api.release(k)
-				if v != 0 {
-					if s, ok := f.cf.goString(v); ok {
-						*p.dst = s
-					}
-					f.cf.api.release(v)
-				}
-			}
-		}
-		var parent uint32
-		status := f.io.getParent(cur, &plane[0], &parent)
-		f.io.release(cur)
-		cur = 0
-		if status != 0 {
-			break
-		}
-		cur = parent
+		f.readRegistryEntry(cur, depth, &out)
+		cur = f.registryParent(cur)
 	}
 	return out, nil
+}
+
+func (f *Frameworks) registryService(bsd string) (uint32, error) {
+	name := append([]byte(bsd), 0)
+	matching := f.io.matching(0, 0, &name[0])
+	if matching == 0 {
+		return 0, fmt.Errorf("IOBSDNameMatching(%q) returned NULL", bsd)
+	}
+	service := f.io.getService(0, matching)
+	if service == 0 {
+		return 0, fmt.Errorf("IOServiceGetMatchingService(%q) returned 0", bsd)
+	}
+	return service, nil
+}
+
+func (f *Frameworks) readRegistryEntry(entry uint32, depth int, out *RegistryIdentity) {
+	f.readRegistryID(entry, out)
+	f.readRegistryPath(entry, out)
+	f.detectUSBAncestor(entry, out)
+	f.readRegistryProperties(entry, registryProperties(depth, out))
+}
+
+func (f *Frameworks) readRegistryID(entry uint32, out *RegistryIdentity) {
+	var id uint64
+	if out.EntryID == "" && f.io.registryID(entry, &id) == 0 {
+		out.EntryID = strconv.FormatUint(id, 16)
+	}
+}
+
+func (f *Frameworks) readRegistryPath(entry uint32, out *RegistryIdentity) {
+	if out.Path != "" {
+		return
+	}
+	buffer := make([]byte, 4096)
+	plane := []byte("IOService\x00")
+	if f.io.getPath(entry, &plane[0], &buffer[0]) == 0 {
+		out.Path = cString(buffer)
+	}
+}
+
+func (f *Frameworks) detectUSBAncestor(entry uint32, out *RegistryIdentity) {
+	name := make([]byte, 128)
+	_ = f.io.getName(entry, &name[0])
+	out.USBAncestor = out.USBAncestor || strings.Contains(strings.ToLower(cString(name)), "usb")
+}
+
+func registryProperties(depth int, out *RegistryIdentity) []registryProperty {
+	properties := []registryProperty{{"USB Vendor Name", &out.Vendor}, {"USB Product Name", &out.Product}, {"Vendor Identification", &out.Vendor}, {"Product Name", &out.Product}}
+	if depth == 0 {
+		return append(properties, registryProperty{"UUID", &out.MediaID}, registryProperty{"GUID", &out.MediaID}, registryProperty{"Media UUID", &out.MediaID})
+	}
+	if out.USBAncestor {
+		return append(properties, registryProperty{"USB Serial Number", &out.TransportSerial})
+	}
+	return properties
+}
+
+func (f *Frameworks) readRegistryProperties(entry uint32, properties []registryProperty) {
+	for _, property := range properties {
+		if *property.dst == "" {
+			f.readRegistryProperty(entry, property)
+		}
+	}
+}
+
+func (f *Frameworks) readRegistryProperty(entry uint32, property registryProperty) {
+	key, err := f.cf.newString(property.key)
+	if err != nil {
+		return
+	}
+	value := f.io.createProperty(entry, key, 0, 0)
+	f.cf.api.release(key)
+	if value == 0 {
+		return
+	}
+	defer f.cf.api.release(value)
+	if text, ok := f.cf.goString(value); ok {
+		*property.dst = text
+	}
+}
+
+func (f *Frameworks) registryParent(entry uint32) uint32 {
+	plane := []byte("IOService\x00")
+	var parent uint32
+	status := f.io.getParent(entry, &plane[0], &parent)
+	f.io.release(entry)
+	if status != 0 {
+		return 0
+	}
+	return parent
 }
 func cString(b []byte) string {
 	for i, v := range b {

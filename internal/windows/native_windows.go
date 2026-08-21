@@ -357,6 +357,10 @@ func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
 }
 
 func enumerateDiskRecords(ctx context.Context, systems map[uint32]bool, pnp map[uint32]pnpDisk) ([]diskRecord, error) {
+	mounted, err := mountedDiskNumbers()
+	if err != nil {
+		return nil, err
+	}
 	var out []diskRecord
 	for i := uint32(0); i < 256; i++ {
 		r, found, err := inspectDiskNumber(ctx, i)
@@ -367,24 +371,20 @@ func enumerateDiskRecords(ctx context.Context, systems map[uint32]bool, pnp map[
 			continue
 		}
 		p, hasPnP := pnp[i]
-		r, err = completeDiskRecord(r, systems[i], p, hasPnP)
-		if err != nil {
-			return nil, fmt.Errorf("determine mounted state for PhysicalDrive%d: %w", i, err)
-		}
+		r = completeDiskRecord(r, systems[i], mounted[i], p, hasPnP)
 		out = append(out, r)
 	}
 	return out, nil
 }
 
-func completeDiskRecord(r diskRecord, system bool, pnp pnpDisk, hasPnP bool) (diskRecord, error) {
+func completeDiskRecord(r diskRecord, system, mounted bool, pnp pnpDisk, hasPnP bool) diskRecord {
 	r.IsSystemDisk = system
+	r.Mounted = mounted
 	if hasPnP {
 		r.SysfsPath, r.devInst = pnp.instance, pnp.devInst
 		r.usbAncestor = r.usbAncestor || pnp.usb
 	}
-	mounted, err := diskHasVolume(r.deviceNumber)
-	r.Mounted = mounted
-	return r, err
+	return r
 }
 
 func inspectDiskNumber(ctx context.Context, number uint32) (diskRecord, bool, error) {
@@ -427,16 +427,16 @@ func (f *winFile) WriteAt(p []byte, off int64) (int, error) {
 	return f.f.WriteAt(p, off)
 }
 
-func (f *winFile) Close() error { 
-	return f.f.Close() 
+func (f *winFile) Close() error {
+	return f.f.Close()
 }
 
-func (f *winFile) Flush() error { 
-	return f.f.Sync() 
+func (f *winFile) Flush() error {
+	return f.f.Sync()
 }
 
-func (f *winFile) Sync() error  { 
-	return windows.FlushFileBuffers(windows.Handle(f.f.Fd())) 
+func (f *winFile) Sync() error {
+	return windows.FlushFileBuffers(windows.Handle(f.f.Fd()))
 }
 
 func (a *winAPI) openDisk(ctx context.Context, r diskRecord, write bool) (nativeFile, error) {
@@ -860,6 +860,24 @@ func volumesForDisk(n uint32) ([]string, error) {
 	return volumesForDiskUsing(n, queryVolumeDisks)
 }
 
+func mountedDiskNumbers() (map[uint32]bool, error) {
+	vs, err := enumerateVolumes()
+	if err != nil {
+		return nil, fmt.Errorf("%w: enumerate Windows volumes: %w", ErrVolumeTopologyUnavailable, err)
+	}
+	mounted := make(map[uint32]bool)
+	for _, v := range vs {
+		disks, err := queryVolumeDisks(v)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrVolumeTopologyUnavailable, err)
+		}
+		for _, disk := range disks {
+			mounted[disk] = true
+		}
+	}
+	return mounted, nil
+}
+
 func volumesForDiskUsing(n uint32, query func(string) ([]uint32, error)) ([]string, error) {
 	vs, err := enumerateVolumes()
 	if err != nil {
@@ -887,11 +905,6 @@ func containsDisk(disks []uint32, target uint32) bool {
 		}
 	}
 	return false
-}
-
-func diskHasVolume(n uint32) (bool, error) {
-	v, err := volumesForDisk(n)
-	return len(v) > 0, err
 }
 
 func systemDiskNumbers() (map[uint32]bool, error) {

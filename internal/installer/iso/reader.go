@@ -41,6 +41,31 @@ type Entry struct {
 }
 type Manifest struct{ Entries []Entry }
 
+type usedExtent struct {
+	start, end uint64
+	path       string
+}
+
+type udfMetadata struct {
+	size                 uint64
+	extended, allocation uint32
+	start                int
+	typeCode             byte
+	allocationType       uint16
+}
+
+type udfChild struct {
+	block uint32
+	name  string
+}
+
+type isoWalker struct {
+	reader *Reader
+	joliet bool
+	seen   map[uint32]bool
+	out    *[]Entry
+}
+
 type Reader struct {
 	source   io.ReaderAt
 	size     uint64
@@ -117,7 +142,8 @@ func (r *Reader) readISO9660() ([]Entry, bool, error) {
 		found = true
 		joliet := b[0] == 2
 		var entries []Entry
-		if err := r.walkISO(b[156:190], "", joliet, 0, map[uint32]bool{}, &entries); err != nil {
+		walker := isoWalker{r, joliet, map[uint32]bool{}, &entries}
+		if err := walker.walk(b[156:190], "", 0); err != nil {
 			return nil, true, err
 		}
 		// Prefer Joliet because it preserves the names Windows media actually uses.
@@ -179,7 +205,7 @@ func (r *Reader) readUDF() ([]Entry, error) {
 	}
 	root := binary.LittleEndian.Uint32(fsd[404:408])
 	var out []Entry
-	if err := r.walkUDF(partitionStart, root, "", 0, map[uint32]bool{}, &out, true); err != nil {
+	if err := r.walkUDF(partitionStart, root, "", 0, map[uint32]bool{}, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -192,7 +218,7 @@ func (r *Reader) udfBlock(part, block uint32) ([]byte, error) {
 	}
 	return r.bytes(off*uint64(sectorSize), uint64(sectorSize))
 }
-func (r *Reader) walkUDF(part, block uint32, prefix string, depth int, seen map[uint32]bool, out *[]Entry, root bool) error {
+func (r *Reader) walkUDF(part, block uint32, prefix string, depth int, seen map[uint32]bool, out *[]Entry) error {
 	if depth > maxDepth {
 		return fmt.Errorf("%w: directory depth", ErrInvalidImage)
 	}
@@ -205,69 +231,38 @@ func (r *Reader) walkUDF(part, block uint32, prefix string, depth int, seen map[
 	if err != nil {
 		return err
 	}
-	tag := binary.LittleEndian.Uint16(fe[:2])
-	var info uint64
-	var ea, ad uint32
-	var start int
-	switch tag {
-	case 261:
-		info = binary.LittleEndian.Uint64(fe[56:64])
-		ea = binary.LittleEndian.Uint32(fe[168:172])
-		ad = binary.LittleEndian.Uint32(fe[172:176])
-		start = 176
-	case 266:
-		info = binary.LittleEndian.Uint64(fe[64:72])
-		ea = binary.LittleEndian.Uint32(fe[208:212])
-		ad = binary.LittleEndian.Uint32(fe[212:216])
-		start = 216
-	default:
-		return fmt.Errorf("%w: unsupported UDF file entry", ErrInvalidImage)
-	}
-	if fe[27] == 12 {
-		return fmt.Errorf("%w: symlink-like entry", ErrInvalidImage)
-	}
-	allocType := binary.LittleEndian.Uint16(fe[34:36]) & 7
-	if uint64(start)+uint64(ea)+uint64(ad) > uint64(len(fe)) {
-		return fmt.Errorf("%w: allocation descriptors", ErrInvalidImage)
-	}
-	exts, err := r.udfExtents(part, fe[start+int(ea):start+int(ea)+int(ad)], allocType)
+	metadata, err := parseUDFMetadata(fe)
 	if err != nil {
 		return err
 	}
-	if fe[27] != 4 {
+	if metadata.typeCode == 12 {
+		return fmt.Errorf("%w: symlink-like entry", ErrInvalidImage)
+	}
+	exts, err := r.udfExtents(part, metadata.descriptors(fe), metadata.allocationType)
+	if err != nil {
+		return err
+	}
+	if metadata.typeCode != 4 {
 		return fmt.Errorf("%w: root is not directory", ErrInvalidImage)
 	}
-	data, err := r.readExtents(exts, info)
+	data, err := r.readExtents(exts, metadata.size)
 	if err != nil {
 		return err
 	}
 	for pos := 0; pos+38 <= len(data); {
-		if binary.LittleEndian.Uint16(data[pos:pos+2]) != 257 {
-			return fmt.Errorf("%w: malformed file identifier", ErrInvalidImage)
+		child, next, skip, err := parseUDFChild(data, pos)
+		if err != nil {
+			return err
 		}
-		flags := data[pos+18]
-		nl := int(data[pos+19])
-		iu := int(binary.LittleEndian.Uint16(data[pos+36 : pos+38]))
-		n := 38 + iu + nl
-		n = (n + 3) &^ 3
-		if n <= 0 || pos+n > len(data) {
-			return fmt.Errorf("%w: truncated file identifier", ErrInvalidImage)
-		}
-		nameb := data[pos+38+iu : pos+38+iu+nl]
-		child := binary.LittleEndian.Uint32(data[pos+24 : pos+28])
-		pos += n
-		if flags&0x0c != 0 {
+		pos = next
+		if skip {
 			continue
 		}
-		name, err := decodeOSTA(nameb)
+		p, err := normalize(prefix, child.name)
 		if err != nil {
 			return err
 		}
-		p, err := normalize(prefix, name)
-		if err != nil {
-			return err
-		}
-		childFE, err := r.udfBlock(part, child)
+		childFE, err := r.udfBlock(part, child.block)
 		if err != nil {
 			return err
 		}
@@ -275,7 +270,7 @@ func (r *Reader) walkUDF(part, block uint32, prefix string, depth int, seen map[
 		if typ == 12 {
 			return fmt.Errorf("%w: symlink-like entry", ErrInvalidImage)
 		}
-		ce, err := r.udfEntry(part, child, p)
+		ce, err := r.udfEntry(part, child.block, p)
 		if err != nil {
 			return err
 		}
@@ -284,48 +279,70 @@ func (r *Reader) walkUDF(part, block uint32, prefix string, depth int, seen map[
 			return fmt.Errorf("%w: too many entries", ErrInvalidImage)
 		}
 		if typ == 4 {
-			if err := r.walkUDF(part, child, p, depth+1, seen, out, false); err != nil {
+			if err := r.walkUDF(part, child.block, p, depth+1, seen, out); err != nil {
 				return err
 			}
 		}
 	}
-	_ = root
 	return nil
+}
+
+func parseUDFMetadata(block []byte) (udfMetadata, error) {
+	var metadata udfMetadata
+	switch binary.LittleEndian.Uint16(block[:2]) {
+	case 261:
+		metadata = udfMetadata{binary.LittleEndian.Uint64(block[56:64]), binary.LittleEndian.Uint32(block[168:172]), binary.LittleEndian.Uint32(block[172:176]), 176, block[27], binary.LittleEndian.Uint16(block[34:36]) & 7}
+	case 266:
+		metadata = udfMetadata{binary.LittleEndian.Uint64(block[64:72]), binary.LittleEndian.Uint32(block[208:212]), binary.LittleEndian.Uint32(block[212:216]), 216, block[27], binary.LittleEndian.Uint16(block[34:36]) & 7}
+	default:
+		return udfMetadata{}, fmt.Errorf("%w: unsupported UDF file entry", ErrInvalidImage)
+	}
+	if uint64(metadata.start)+uint64(metadata.extended)+uint64(metadata.allocation) > uint64(len(block)) {
+		return udfMetadata{}, fmt.Errorf("%w: allocation descriptors", ErrInvalidImage)
+	}
+	return metadata, nil
+}
+
+func (m udfMetadata) descriptors(block []byte) []byte {
+	start := m.start + int(m.extended)
+	return block[start : start+int(m.allocation)]
+}
+
+func parseUDFChild(data []byte, position int) (udfChild, int, bool, error) {
+	if binary.LittleEndian.Uint16(data[position:position+2]) != 257 {
+		return udfChild{}, 0, false, fmt.Errorf("%w: malformed file identifier", ErrInvalidImage)
+	}
+	nameLength := int(data[position+19])
+	implementationLength := int(binary.LittleEndian.Uint16(data[position+36 : position+38]))
+	length := (38 + implementationLength + nameLength + 3) &^ 3
+	if length <= 0 || position+length > len(data) {
+		return udfChild{}, 0, false, fmt.Errorf("%w: truncated file identifier", ErrInvalidImage)
+	}
+	if data[position+18]&0x0c != 0 {
+		return udfChild{}, position + length, true, nil
+	}
+	name, err := decodeOSTA(data[position+38+implementationLength : position+38+implementationLength+nameLength])
+	child := udfChild{binary.LittleEndian.Uint32(data[position+24 : position+28]), name}
+	return child, position + length, false, err
 }
 func (r *Reader) udfEntry(part, block uint32, p string) (Entry, error) {
 	b, err := r.udfBlock(part, block)
 	if err != nil {
 		return Entry{}, err
 	}
-	tag := binary.LittleEndian.Uint16(b[:2])
-	var size uint64
-	var ea, ad uint32
-	var st int
-	if tag == 261 {
-		size = binary.LittleEndian.Uint64(b[56:64])
-		ea = binary.LittleEndian.Uint32(b[168:172])
-		ad = binary.LittleEndian.Uint32(b[172:176])
-		st = 176
-	} else if tag == 266 {
-		size = binary.LittleEndian.Uint64(b[64:72])
-		ea = binary.LittleEndian.Uint32(b[208:212])
-		ad = binary.LittleEndian.Uint32(b[212:216])
-		st = 216
-	} else {
-		return Entry{}, fmt.Errorf("%w: file entry tag", ErrInvalidImage)
+	metadata, err := parseUDFMetadata(b)
+	if err != nil {
+		return Entry{}, err
 	}
-	if uint64(st)+uint64(ea)+uint64(ad) > uint64(len(b)) {
-		return Entry{}, fmt.Errorf("%w: allocation descriptors", ErrInvalidImage)
-	}
-	ex, err := r.udfExtents(part, b[st+int(ea):st+int(ea)+int(ad)], binary.LittleEndian.Uint16(b[34:36])&7)
+	ex, err := r.udfExtents(part, metadata.descriptors(b), metadata.allocationType)
 	if err != nil {
 		return Entry{}, err
 	}
 	typ := File
-	if b[27] == 4 {
+	if metadata.typeCode == 4 {
 		typ = Directory
 	}
-	return Entry{Path: p, Type: typ, Extents: ex, Size: size, DestinationFATPath: fatPath(p)}, nil
+	return Entry{Path: p, Type: typ, Extents: ex, Size: metadata.size, DestinationFATPath: fatPath(p)}, nil
 }
 func (r *Reader) udfExtents(part uint32, b []byte, t uint16) ([]Extent, error) {
 	var step, posoff int
@@ -397,7 +414,7 @@ func decodeOSTA(b []byte) (string, error) {
 	}
 }
 
-func (r *Reader) walkISO(rec []byte, prefix string, joliet bool, depth int, seen map[uint32]bool, out *[]Entry) error {
+func (w isoWalker) walk(rec []byte, prefix string, depth int) error {
 	if depth > maxDepth {
 		return fmt.Errorf("%w: directory depth", ErrInvalidImage)
 	}
@@ -405,12 +422,12 @@ func (r *Reader) walkISO(rec []byte, prefix string, joliet bool, depth int, seen
 		return fmt.Errorf("%w: directory record", ErrInvalidImage)
 	}
 	ext, size := binary.LittleEndian.Uint32(rec[2:6]), binary.LittleEndian.Uint32(rec[10:14])
-	if seen[ext] {
+	if w.seen[ext] {
 		return fmt.Errorf("%w: directory cycle", ErrInvalidImage)
 	}
-	seen[ext] = true
-	defer delete(seen, ext)
-	b, err := r.bytes(uint64(ext)*uint64(sectorSize), uint64(size))
+	w.seen[ext] = true
+	defer delete(w.seen, ext)
+	b, err := w.reader.bytes(uint64(ext)*uint64(sectorSize), uint64(size))
 	if err != nil {
 		return err
 	}
@@ -434,7 +451,7 @@ func (r *Reader) walkISO(rec []byte, prefix string, joliet bool, depth int, seen
 		if nl == 1 && (nb[0] == 0 || nb[0] == 1) {
 			continue
 		}
-		name := decodeName(nb, joliet)
+		name := decodeName(nb, w.joliet)
 		name = strings.TrimSuffix(name, ";1")
 		p, err := normalize(prefix, name)
 		if err != nil {
@@ -447,25 +464,25 @@ func (r *Reader) walkISO(rec []byte, prefix string, joliet bool, depth int, seen
 			e.Type = Directory
 		}
 		if idx, ok := pending[p]; ok && !dir {
-			(*out)[idx].Extents = append((*out)[idx].Extents, e.Extents...)
-			if (*out)[idx].Size > ^uint64(0)-e.Size {
+			(*w.out)[idx].Extents = append((*w.out)[idx].Extents, e.Extents...)
+			if (*w.out)[idx].Size > ^uint64(0)-e.Size {
 				return fmt.Errorf("%w: multi-extent overflow", ErrInvalidImage)
 			}
-			(*out)[idx].Size += e.Size
+			(*w.out)[idx].Size += e.Size
 			if x[25]&0x80 == 0 {
 				delete(pending, p)
 			}
 			continue
 		}
-		*out = append(*out, e)
+		*w.out = append(*w.out, e)
 		if !dir && x[25]&0x80 != 0 {
-			pending[p] = len(*out) - 1
+			pending[p] = len(*w.out) - 1
 		}
-		if len(*out) > maxEntries {
+		if len(*w.out) > maxEntries {
 			return fmt.Errorf("%w: too many entries", ErrInvalidImage)
 		}
 		if dir {
-			if err := r.walkISO(x, p, joliet, depth+1, seen, out); err != nil {
+			if err := w.walk(x, p, depth+1); err != nil {
 				return err
 			}
 		}
@@ -506,43 +523,53 @@ func fatPath(p string) string { return strings.ReplaceAll(p, "/", "\\") }
 func (r *Reader) validate(es []Entry) error {
 	paths := map[string]bool{}
 	fold := map[string]string{}
-	type used struct {
-		a, b uint64
-		p    string
-	}
-	var spans []used
+	var spans []usedExtent
 	for _, e := range es {
-		if e.Path == "" || paths[e.Path] {
-			return fmt.Errorf("%w: duplicate path", ErrInvalidImage)
+		entrySpans, err := r.validateEntry(e, paths, fold)
+		if err != nil {
+			return err
 		}
-		paths[e.Path] = true
-		k := norm.NFC.String(cases.Fold().String(e.Path))
-		if old, ok := fold[k]; ok && old != e.Path {
-			return fmt.Errorf("%w: case or Unicode collision", ErrInvalidImage)
-		}
-		fold[k] = e.Path
-		if e.Type != File && e.Type != Directory {
-			return fmt.Errorf("%w: symlink-like entry", ErrInvalidImage)
-		}
-		var total uint64
-		for _, x := range e.Extents {
-			if x.Offset > r.size || x.Length > r.size-x.Offset || total > x.Length+total {
-				return fmt.Errorf("%w: extent overflow", ErrInvalidImage)
-			}
-			total += x.Length
-			if x.Length > 0 {
-				spans = append(spans, used{x.Offset, x.Offset + x.Length, e.Path})
-			}
-		}
-		if e.Type == File && total < e.Size {
-			return fmt.Errorf("%w: short extent", ErrInvalidImage)
-		}
+		spans = append(spans, entrySpans...)
 	}
-	sort.Slice(spans, func(i, j int) bool { return spans[i].a < spans[j].a })
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	for i := 1; i < len(spans); i++ {
-		if spans[i].a < spans[i-1].b && spans[i].p != spans[i-1].p {
+		if spans[i].start < spans[i-1].end && spans[i].path != spans[i-1].path {
 			return fmt.Errorf("%w: extent collision", ErrInvalidImage)
 		}
 	}
 	return nil
+}
+
+func (r *Reader) validateEntry(entry Entry, paths map[string]bool, folded map[string]string) ([]usedExtent, error) {
+	if entry.Path == "" || paths[entry.Path] {
+		return nil, fmt.Errorf("%w: duplicate path", ErrInvalidImage)
+	}
+	paths[entry.Path] = true
+	key := norm.NFC.String(cases.Fold().String(entry.Path))
+	if old, exists := folded[key]; exists && old != entry.Path {
+		return nil, fmt.Errorf("%w: case or Unicode collision", ErrInvalidImage)
+	}
+	folded[key] = entry.Path
+	if entry.Type != File && entry.Type != Directory {
+		return nil, fmt.Errorf("%w: symlink-like entry", ErrInvalidImage)
+	}
+	return r.validateEntryExtents(entry)
+}
+
+func (r *Reader) validateEntryExtents(entry Entry) ([]usedExtent, error) {
+	var total uint64
+	var spans []usedExtent
+	for _, extent := range entry.Extents {
+		if extent.Offset > r.size || extent.Length > r.size-extent.Offset || total > extent.Length+total {
+			return nil, fmt.Errorf("%w: extent overflow", ErrInvalidImage)
+		}
+		total += extent.Length
+		if extent.Length > 0 {
+			spans = append(spans, usedExtent{extent.Offset, extent.Offset + extent.Length, entry.Path})
+		}
+	}
+	if entry.Type == File && total < entry.Size {
+		return nil, fmt.Errorf("%w: short extent", ErrInvalidImage)
+	}
+	return spans, nil
 }
