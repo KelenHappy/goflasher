@@ -153,21 +153,35 @@ func parseStorageIdentifiers(descriptor []byte, count uint32) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if identifiersConflict(found, value) {
-			return "", errors.New("conflicting WWN identifiers")
+		found, err = mergeStorageIdentifier(found, value)
+		if err != nil {
+			return "", err
 		}
-		if value != "" {
-			found = value
+		if err := validateStorageIdentifierLink(next, i+1, count); err != nil {
+			return "", err
 		}
-		if next == 0 {
-			if i+1 != count {
-				return "", errors.New("incomplete STORAGE_IDENTIFIER list")
-			}
-			break
+		if next != 0 {
+			off += next
 		}
-		off += next
 	}
 	return found, nil
+}
+
+func mergeStorageIdentifier(found, value string) (string, error) {
+	if identifiersConflict(found, value) {
+		return "", errors.New("conflicting WWN identifiers")
+	}
+	if value != "" {
+		return value, nil
+	}
+	return found, nil
+}
+
+func validateStorageIdentifierLink(next int, parsed, count uint32) error {
+	if next == 0 && parsed != count {
+		return errors.New("incomplete STORAGE_IDENTIFIER list")
+	}
+	return nil
 }
 
 func parseStorageDeviceIDDescriptor(b []byte) ([]byte, uint32, error) {

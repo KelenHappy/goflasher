@@ -1,0 +1,232 @@
+name: Package Checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux packages
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            gcc \
+            libgl1-mesa-dev \
+            xorg-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            rpm \
+            zstd
+
+      - name: Build binary
+        run: |
+          mkdir -p dist
+
+          go build \
+            -trimpath \
+            -tags fyne \
+            -ldflags "-s -w" \
+            -o dist/goflasher \
+            ./cmd/usbwriter
+
+      - name: Build packages
+        run: |
+          packaging/make-deb.sh \
+            dist/goflasher \
+            0.0.0-ci_build \
+            dist
+
+          packaging/make-rpm.sh \
+            dist/goflasher \
+            0.0.0-ci \
+            dist
+
+          packaging/make-arch.sh \
+            dist/goflasher \
+            0.0.0-ci \
+            dist
+
+      - name: Validate Debian package
+        run: |
+          deb=dist/goflasher_0.0.0-ci.build_amd64.deb
+
+          test -f "$deb"
+
+          dpkg-deb --contents "$deb" \
+            | grep -F THIRD_PARTY_NOTICES.md
+
+          dpkg-deb --contents "$deb" \
+            | grep -F THIRD_PARTY_NOTICES.zh-TW.md
+
+          dpkg-deb --contents "$deb" \
+            | grep -F github.com_ulikunitz_xz_LICENSE
+
+          dpkg-deb --contents "$deb" \
+            | grep -F github.com_ebitengine_purego_LICENSE
+
+      - name: Validate RPM package
+        run: |
+          rpm_path=$(
+            find dist \
+              -maxdepth 1 \
+              -name 'goflasher-0.0.0_ci-1*.rpm' \
+              -print \
+              -quit
+          )
+
+          test -n "$rpm_path"
+
+          rpm -qlp "$rpm_path" \
+            | grep -F THIRD_PARTY_NOTICES.md
+
+          rpm -qlp "$rpm_path" \
+            | grep -F THIRD_PARTY_NOTICES.zh-TW.md
+
+          rpm -qlp "$rpm_path" \
+            | grep -F github.com_ulikunitz_xz_LICENSE
+
+          rpm -qlp "$rpm_path" \
+            | grep -F github.com_ebitengine_purego_LICENSE
+
+      - name: Validate Arch package
+        run: |
+          arch_path=dist/goflasher-0.0.0_ci-1-x86_64.pkg.tar.zst
+
+          test -f "$arch_path"
+
+          tar --zstd -tf "$arch_path" \
+            | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md
+
+          tar --zstd -tf "$arch_path" \
+            | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.zh-TW.md
+
+          tar --zstd -tf "$arch_path" \
+            | grep -F ./usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE
+
+          tar --zstd -tf "$arch_path" \
+            | grep -F ./usr/share/doc/goflasher/third-party/github.com_ebitengine_purego_LICENSE
+
+          tar --zstd -xOf "$arch_path" ./.PKGINFO \
+            | grep -F 'depend = polkit'
+
+  windows:
+    name: Windows portable package
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build executable with UAC manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          windres=$(
+            command -v windres ||
+            find \
+              /c/mingw64 \
+              /c/msys64/mingw64 \
+              -name windres.exe \
+              -print \
+              -quit \
+              2>/dev/null
+          )
+
+          test -n "$windres"
+
+          "$windres" \
+            --target=pe-x86-64 \
+            -I packaging/windows \
+            packaging/windows/goflasher.rc \
+            -O coff \
+            -o cmd/usbwriter/goflasher_windows_amd64.syso
+
+          mkdir -p dist
+
+          go build \
+            -trimpath \
+            -tags fyne \
+            -ldflags "-s -w" \
+            -o dist/GoFlasher.exe \
+            ./cmd/usbwriter
+
+          rm cmd/usbwriter/goflasher_windows_amd64.syso
+
+          mt=$(
+            find '/c/Program Files (x86)/Windows Kits/10/bin' \
+              -path '*/x64/mt.exe' \
+              -print \
+              2>/dev/null \
+              | sort -V \
+              | tail -1
+          )
+
+          test -n "$mt"
+
+          exe_win=$(cygpath -w "$PWD/dist/GoFlasher.exe")
+          manifest_win=$(cygpath -w "$PWD/dist/embedded.manifest")
+
+          MSYS2_ARG_CONV_EXCL='*' \
+            "$mt" \
+            -nologo \
+            "-inputresource:${exe_win};#1" \
+            "-out:${manifest_win}"
+
+          grep -F requireAdministrator dist/embedded.manifest
+
+          rm dist/embedded.manifest
+
+      - name: Package portable build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          go run ./packaging/windows \
+            --executable dist/GoFlasher.exe \
+            --version 0.0.0-ci \
+            --output dist
+
+      - name: Validate portable package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root=dist/GoFlasher-0.0.0-ci-windows-amd64
+
+          test -f "$root/GoFlasher.exe"
+          test -f "$root/README-Windows.txt"
+          test -f "$root/THIRD_PARTY_NOTICES.md"
+          test -f "$root/THIRD_PARTY_NOTICES.zh-TW.md"
+
+          test -n "$(
+            find "$root/licenses" \
+              -type f \
+              -print \
+              -quit
+          )"
+
+          (
+            cd dist
+            sha256sum \
+              --check \
+              GoFlasher-0.0.0-ci-windows-amd64.zip.sha256
+          )

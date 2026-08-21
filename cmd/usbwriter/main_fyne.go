@@ -213,6 +213,13 @@ func (c *guiController) setTheme(mode themeMode) {
 func (c *guiController) setLanguage(locale i18n.Locale) {
 	c.tr = i18n.New(string(locale))
 	configureFyneTranslations(string(locale))
+	c.translateControls()
+	c.translateSelectionDetails()
+	c.translateOperationStatus()
+	c.view.window.Content().Refresh()
+}
+
+func (c *guiController) translateControls() {
 	tr := c.tr
 	c.view.window.SetTitle(tr.T("window.title"))
 	c.view.verifyCheck.SetText(tr.T("option.verify"))
@@ -230,6 +237,10 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 	c.view.imageInfoCard.SetTitle(tr.T("card.image_info"))
 	c.view.optionsCard.SetTitle(tr.T("card.options"))
 	c.view.progressCard.SetTitle(tr.T("card.progress"))
+}
+
+func (c *guiController) translateSelectionDetails() {
+	tr := c.tr
 	if c.selected.Path == "" {
 		c.view.deviceDetail.SetText(tr.T("device.none"))
 	} else {
@@ -240,6 +251,10 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 	} else {
 		c.view.imageInfo.SetText(tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
 	}
+}
+
+func (c *guiController) translateOperationStatus() {
+	tr := c.tr
 	if c.operation == operationFormatting {
 		c.view.status.SetText(tr.T("status.formatting"))
 		c.view.metrics.SetText(tr.T("metrics.empty"))
@@ -254,7 +269,6 @@ func (c *guiController) setLanguage(locale i18n.Locale) {
 			c.view.metrics.SetText(tr.T("metrics.empty"))
 		}
 	}
-	c.view.window.Content().Refresh()
 }
 
 func (c *guiController) appendLog(message string) {
@@ -496,31 +510,41 @@ func (c *guiController) finishPreview(preview core.PlanSummary, err error) {
 		return
 	}
 	if err != nil {
-		_ = c.machine.Transition(core.Ready)
-		c.lock(false)
-		c.view.start.SetText(c.tr.T("action.start"))
-		if errors.Is(err, context.Canceled) {
-			c.view.status.SetText(c.tr.T("status.cancelled"))
-			return
-		}
-		dialog.ShowError(fmt.Errorf("%s: %w", c.tr.T(core.ErrorMessageID(err)), err), c.view.window)
+		c.finishPreviewError(err)
 		return
 	}
-	bodyText := c.tr.T("confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial, filepath.Base(c.info.Path), float64(c.info.CompressedSize)/(1<<20))
-	if preview.Class == string(core.ImageWindowsISO) {
-		split := c.tr.T("bool.false")
-		reason := c.tr.T("plan.split.reason.none")
-		if preview.SplitRequired {
-			split = c.tr.T("bool.true")
-			reason = c.tr.T("plan.split.reason.fat32")
-		}
-		bodyText += "\n\n" + c.tr.T("plan.windows.summary", preview.PartitionTable, preview.Filesystem, preview.BootMode, split, reason, float64(preview.RequiredCapacity)/(1<<30), float64(preview.RequiredTemporarySpace)/(1<<30), float64(preview.AvailableTemporarySpace)/(1<<30))
-	}
-	body := widget.NewLabel(bodyText)
+	body := widget.NewLabel(c.previewConfirmationText(preview))
 	body.Wrapping = fyne.TextWrapWord
 	confirm := dialog.NewCustomConfirm(c.tr.T("confirm.title"), c.tr.T("confirm.accept"), c.tr.T("action.cancel"), body, c.confirmWrite, c.view.window)
 	confirm.SetDismissText(c.tr.T("action.cancel"))
 	confirm.Show()
+}
+
+func (c *guiController) finishPreviewError(err error) {
+	_ = c.machine.Transition(core.Ready)
+	c.lock(false)
+	c.view.start.SetText(c.tr.T("action.start"))
+	if errors.Is(err, context.Canceled) {
+		c.view.status.SetText(c.tr.T("status.cancelled"))
+		return
+	}
+	dialog.ShowError(fmt.Errorf("%s: %w", c.tr.T(core.ErrorMessageID(err)), err), c.view.window)
+}
+
+func (c *guiController) previewConfirmationText(preview core.PlanSummary) string {
+	bodyText := c.tr.T("confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial, filepath.Base(c.info.Path), float64(c.info.CompressedSize)/(1<<20))
+	if preview.Class == string(core.ImageWindowsISO) {
+		split, reason := c.localizedSplitPlan(preview.SplitRequired)
+		bodyText += "\n\n" + c.tr.T("plan.windows.summary", preview.PartitionTable, preview.Filesystem, preview.BootMode, split, reason, float64(preview.RequiredCapacity)/(1<<30), float64(preview.RequiredTemporarySpace)/(1<<30), float64(preview.AvailableTemporarySpace)/(1<<30))
+	}
+	return bodyText
+}
+
+func (c *guiController) localizedSplitPlan(required bool) (string, string) {
+	if required {
+		return c.tr.T("bool.true"), c.tr.T("plan.split.reason.fat32")
+	}
+	return c.tr.T("bool.false"), c.tr.T("plan.split.reason.none")
 }
 
 func writingState(state core.State) bool {
@@ -606,25 +630,33 @@ func (c *guiController) finishWrite(result core.RunResult, runErr error) {
 		return
 	}
 	if runErr != nil {
-		c.view.status.SetText(c.tr.T("status.failed", userError(c.tr, runErr)))
-		c.appendLog(c.tr.T("log.error", runErr))
-		c.view.copyError.Show()
-		if c.machine.State() == core.Cancelled {
-			c.view.status.SetText(c.tr.T("status.cancelled"))
-		}
-		c.view.start.SetText(c.tr.T("action.retry"))
+		c.showWriteFailure(runErr)
 	} else {
-		c.view.status.SetText(c.tr.T("status.complete"))
-		c.view.bar.SetValue(1)
-		if result.PlanKind == core.PlanWindowsInstaller {
-			c.appendLog(c.tr.T("log.installer.complete", result.FilesWritten, result.WIMParts, localBool(c.tr, result.SemanticVerified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
-		} else {
-			c.appendLog(c.tr.T("log.complete", result.BytesWritten, localBool(c.tr, result.Verified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
-		}
-		c.view.metrics.SetText(c.tr.T("metrics.complete", result.AverageBytesPerSecond/(1<<20), result.Elapsed.Round(time.Second)))
-		c.view.start.SetText(c.tr.T("action.restart"))
+		c.showWriteSuccess(result)
 	}
 	c.lock(false)
+}
+
+func (c *guiController) showWriteFailure(runErr error) {
+	c.view.status.SetText(c.tr.T("status.failed", userError(c.tr, runErr)))
+	c.appendLog(c.tr.T("log.error", runErr))
+	c.view.copyError.Show()
+	if c.machine.State() == core.Cancelled {
+		c.view.status.SetText(c.tr.T("status.cancelled"))
+	}
+	c.view.start.SetText(c.tr.T("action.retry"))
+}
+
+func (c *guiController) showWriteSuccess(result core.RunResult) {
+	c.view.status.SetText(c.tr.T("status.complete"))
+	c.view.bar.SetValue(1)
+	if result.PlanKind == core.PlanWindowsInstaller {
+		c.appendLog(c.tr.T("log.installer.complete", result.FilesWritten, result.WIMParts, localBool(c.tr, result.SemanticVerified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
+	} else {
+		c.appendLog(c.tr.T("log.complete", result.BytesWritten, localBool(c.tr, result.Verified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
+	}
+	c.view.metrics.SetText(c.tr.T("metrics.complete", result.AverageBytesPerSecond/(1<<20), result.Elapsed.Round(time.Second)))
+	c.view.start.SetText(c.tr.T("action.restart"))
 }
 
 func overallProgress(update progress.Update, verify bool) float64 {
@@ -659,29 +691,26 @@ func verifyProgress(stage progress.Stage, ratio float64) float64 {
 
 func writeProgress(stage progress.Stage, ratio float64) float64 {
 	switch stage {
-	case progress.StageInspecting:
-		return 0.02
-	case progress.StagePlanning:
-		return 0.05
-	case progress.StageStagingWIM, progress.StageSplittingWIM:
-		return 0.10
-	case progress.StagePartitioning:
-		return 0.15
 	case progress.StageFormatting:
 		return ratio
 	case progress.StageExtracting:
 		return 0.30 + ratio*0.60
 	case progress.StageWriting, progress.StageDecompressWriting:
 		return ratio * 0.90
-	case progress.StageFlushing:
-		return 0.90
-	case progress.StageVerifyingFilesystem:
-		return 0.94
-	case progress.StageEjecting:
-		return 0.95
 	default:
-		return 0
+		return writeStageProgress[stage]
 	}
+}
+
+var writeStageProgress = map[progress.Stage]float64{
+	progress.StageInspecting:          0.02,
+	progress.StagePlanning:            0.05,
+	progress.StageStagingWIM:          0.10,
+	progress.StageSplittingWIM:        0.10,
+	progress.StagePartitioning:        0.15,
+	progress.StageFlushing:            0.90,
+	progress.StageVerifyingFilesystem: 0.94,
+	progress.StageEjecting:            0.95,
 }
 
 func advanceSelection(machine *core.StateMachine, counterpartSelected bool, waitingState, selectedState core.State) {
