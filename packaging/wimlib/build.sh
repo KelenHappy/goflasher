@@ -26,6 +26,10 @@ source_tar="$source_dir/$(basename "$source_arg")"
 mkdir -p "$output_arg"
 output=$(cd "$output_arg" && pwd)
 
+#
+# Verify pinned source hash.
+#
+
 if [[ ! "$WIMLIB_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
   echo "invalid or unreviewed WIMLIB_SOURCE_SHA256" >&2
   exit 65
@@ -46,6 +50,10 @@ if [[ "$actual_sha256" != "$WIMLIB_SOURCE_SHA256" ]]; then
   echo "actual:   $actual_sha256" >&2
   exit 65
 fi
+
+#
+# Verify build host/toolchain.
+#
 
 host_os=$(uname -s)
 
@@ -99,6 +107,11 @@ case "$host_os" in
       exit 69
     fi
 
+    if ! command -v install_name_tool >/dev/null 2>&1; then
+      echo "install_name_tool not found" >&2
+      exit 69
+    fi
+
     xcode_name=$(xcodebuild -version | sed -n '1p')
     xcode_build=$(xcodebuild -version | sed -n '2p')
     clang_version=$(clang --version | head -1)
@@ -120,6 +133,10 @@ case "$host_os" in
     ;;
 esac
 
+#
+# Prepare temporary source tree.
+#
+
 work=$(mktemp -d)
 
 cleanup() {
@@ -132,6 +149,7 @@ case "$host_os" in
   Linux)
     tar --no-same-owner -xf "$source_tar" -C "$work"
     ;;
+
   Darwin)
     tar -xf "$source_tar" -C "$work"
     ;;
@@ -144,18 +162,64 @@ if [[ ! -d "$src" ]]; then
   exit 65
 fi
 
+#
+# Configure and build wimlib.
+#
+
 echo "Configuring wimlib $WIMLIB_VERSION"
 
-(
-  cd "$src"
+case "$host_os" in
+  Linux)
+    (
+      cd "$src"
 
-  CC=clang ./configure \
-    --prefix=/usr \
-    "${WIMLIB_CONFIGURE_FLAGS[@]}"
+      CC=clang \
+      ./configure \
+        --prefix=/usr \
+        "${WIMLIB_CONFIGURE_FLAGS[@]}"
 
-  echo "Building wimlib $WIMLIB_VERSION"
-  make -j2
-)
+      echo "Building wimlib $WIMLIB_VERSION"
+      make -j2
+    )
+    ;;
+
+  Darwin)
+    (
+      cd "$src"
+
+      #
+      # Apple's linker rejects dylibs that use -undefined dynamic_lookup
+      # while being considered eligible for the dyld shared cache.
+      #
+      # wimlib/libtool uses dynamic_lookup while linking libwim, so mark
+      # this bundled application-private dylib as not eligible for the
+      # dyld shared cache.
+      #
+      darwin_ldflags="${LDFLAGS:-}"
+
+      if [[ -n "$darwin_ldflags" ]]; then
+        darwin_ldflags="$darwin_ldflags -Wl,-not_for_dyld_shared_cache"
+      else
+        darwin_ldflags="-Wl,-not_for_dyld_shared_cache"
+      fi
+
+      echo "Darwin LDFLAGS: $darwin_ldflags"
+
+      CC=clang \
+      LDFLAGS="$darwin_ldflags" \
+      ./configure \
+        --prefix=/usr \
+        "${WIMLIB_CONFIGURE_FLAGS[@]}"
+
+      echo "Building wimlib $WIMLIB_VERSION"
+      make -j2
+    )
+    ;;
+esac
+
+#
+# Copy native shared library into output directory.
+#
 
 case "$host_os" in
   Linux)
@@ -181,19 +245,17 @@ case "$host_os" in
 
     install -m755 "$library_source" "$library_output"
 
-    if ! command -v install_name_tool >/dev/null 2>&1; then
-      echo "install_name_tool not found" >&2
-      exit 69
-    fi
-
     install_name_tool \
       -id '@rpath/libwim.15.dylib' \
       "$library_output"
     ;;
 esac
 
-smoke_root="$work/smoke-root"
+#
+# Build a small smoke-test WIM using the newly built wimlib-imagex.
+#
 
+smoke_root="$work/smoke-root"
 mkdir -p "$smoke_root"
 
 printf '%s\n' \
@@ -219,41 +281,67 @@ if [[ ! -f "$output/smoke.wim" ]]; then
   exit 65
 fi
 
+#
+# Generate artifact SHA-256 manifest.
+#
+
 case "$host_os" in
   Linux)
+    if ! command -v sha256sum >/dev/null 2>&1; then
+      echo "sha256sum not available on Linux" >&2
+      exit 69
+    fi
+
     (
       cd "$output"
-
-      if ! command -v sha256sum >/dev/null 2>&1; then
-        echo "sha256sum not available on Linux" >&2
-        exit 69
-      fi
-
       sha256sum libwim.so.15 >SHA256SUMS
     )
     ;;
 
   Darwin)
+    if ! command -v shasum >/dev/null 2>&1; then
+      echo "shasum not available on macOS" >&2
+      exit 69
+    fi
+
     (
       cd "$output"
-
-      if ! command -v shasum >/dev/null 2>&1; then
-        echo "shasum not available on macOS" >&2
-        exit 69
-      fi
-
       shasum -a 256 libwim.15.dylib >SHA256SUMS
     )
     ;;
 esac
 
+#
+# Final diagnostics.
+#
+
+echo
 echo "Built artifact:"
 ls -l "$library_output"
 
+echo
 echo "Artifact SHA-256:"
 cat "$output/SHA256SUMS"
 
+echo
 echo "Smoke WIM:"
 ls -l "$output/smoke.wim"
 
+if [[ "$host_os" == "Darwin" ]]; then
+  echo
+  echo "Mach-O install name:"
+  otool -D "$library_output" || {
+    echo "failed to inspect dylib install name" >&2
+    exit 65
+  }
+
+  echo
+  echo "Mach-O dependencies:"
+  otool -L "$library_output" || {
+    echo "failed to inspect dylib dependencies" >&2
+    exit 65
+  }
+fi
+
+echo
 echo "Bundled wimlib build completed successfully."
