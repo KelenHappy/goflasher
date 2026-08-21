@@ -44,6 +44,7 @@ func openHandle(path string, access uint32) (windows.Handle, error) {
 	}
 	return windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 }
+
 func ioctl(h windows.Handle, code uint32, out []byte) error {
 	var p *byte
 	if len(out) > 0 {
@@ -52,6 +53,7 @@ func ioctl(h windows.Handle, code uint32, out []byte) error {
 	var n uint32
 	return windows.DeviceIoControl(h, code, nil, 0, p, uint32(len(out)), &n, nil)
 }
+
 func query(h windows.Handle, code uint32, size int) ([]byte, error) {
 	b := make([]byte, size)
 	var n uint32
@@ -74,6 +76,7 @@ func descriptorString(b []byte, off uint32) string {
 	}
 	return strings.TrimSpace(string(s))
 }
+
 func bytesIndex(b []byte, c byte) int {
 	for i, v := range b {
 		if v == c {
@@ -82,6 +85,7 @@ func bytesIndex(b []byte, c byte) int {
 	}
 	return -1
 }
+
 func busName(v byte) string {
 	return map[byte]string{1: "scsi", 3: "ata", 7: "usb", 8: "raid", 11: "sata", 17: "nvme", 14: "virtual", 15: "filebackedvirtual"}[v]
 }
@@ -408,21 +412,33 @@ func (f *winFile) Read(p []byte) (int, error) {
 	}
 	return f.f.Read(p)
 }
+
 func (f *winFile) Write(p []byte) (int, error) {
 	if err := f.ctx.Err(); err != nil {
 		return 0, err
 	}
 	return f.f.Write(p)
 }
+
 func (f *winFile) WriteAt(p []byte, off int64) (int, error) {
 	if err := f.ctx.Err(); err != nil {
 		return 0, err
 	}
 	return f.f.WriteAt(p, off)
 }
-func (f *winFile) Close() error { return f.f.Close() }
-func (f *winFile) Flush() error { return f.f.Sync() }
-func (f *winFile) Sync() error  { return windows.FlushFileBuffers(windows.Handle(f.f.Fd())) }
+
+func (f *winFile) Close() error { 
+	return f.f.Close() 
+}
+
+func (f *winFile) Flush() error { 
+	return f.f.Sync() 
+}
+
+func (f *winFile) Sync() error  { 
+	return windows.FlushFileBuffers(windows.Handle(f.f.Fd())) 
+}
+
 func (a *winAPI) openDisk(ctx context.Context, r diskRecord, write bool) (nativeFile, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -461,6 +477,7 @@ func (l handleLocks) Close() error {
 	}
 	return first
 }
+
 func (a *winAPI) lockVolumes(ctx context.Context, n uint32) (volumeLocks, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -537,6 +554,7 @@ func sameVolumes(a, b []string) bool {
 	}
 	return true
 }
+
 func (a *winAPI) eject(ctx context.Context, r diskRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -654,6 +672,7 @@ func setupStructureSize() int {
 	}
 	return 32
 }
+
 func deviceTreeIdentity(dev uint32) (string, bool) {
 	leaf, usb, cur := "", false, dev
 	for depth := 0; depth < 16 && cur != 0; depth++ {
@@ -678,6 +697,7 @@ func deviceTreeIdentity(dev uint32) (string, bool) {
 	}
 	return leaf, usb
 }
+
 func requestDeviceEject(dev uint32) error {
 	var veto uint32
 	name := make([]uint16, 512)
@@ -868,10 +888,12 @@ func containsDisk(disks []uint32, target uint32) bool {
 	}
 	return false
 }
+
 func diskHasVolume(n uint32) (bool, error) {
 	v, err := volumesForDisk(n)
 	return len(v) > 0, err
 }
+
 func systemDiskNumbers() (map[uint32]bool, error) {
 	root := os.Getenv("SystemRoot")
 	if !validSystemRoot(root) {
