@@ -127,7 +127,7 @@ func addFixtureDisk(t *testing.T, paths fixturePaths, disk fixtureDisk) {
 	}
 	base = filepath.Join(base, "block", disk.name)
 	requireNoError(t, os.MkdirAll(filepath.Join(base, "device"), 0755))
-	for path, value := range map[string]string{"dev": disk.devno, "size": "65536", "removable": boolDigit(disk.removable), "device/type": "0", "device/vendor": "Acme", "device/model": disk.model, "device/serial": disk.serial} {
+	for path, value := range map[string]string{"dev": disk.devno, "size": "65536", "removable": boolDigit(disk.removable), "queue/logical_block_size": "512", "device/type": "0", "device/vendor": "Acme", "device/model": disk.model, "device/serial": disk.serial} {
 		write(t, filepath.Join(base, path), value)
 	}
 	requireNoError(t, os.Symlink(base, filepath.Join(paths.class, disk.name)))

@@ -18,7 +18,14 @@ const (
 	// Ready indicates that both an image and target are available.
 	Ready State = "Ready"
 	// Confirming indicates that destructive work is awaiting user confirmation.
-	Confirming State = "Confirming"
+	Confirming   State = "Confirming"
+	Inspecting   State = "Inspecting"
+	Planning     State = "Planning"
+	StagingWIM   State = "StagingWIM"
+	SplittingWIM State = "SplittingWIM"
+	Partitioning State = "Partitioning"
+	Formatting   State = "Formatting"
+	Extracting   State = "Extracting"
 	// Unmounting indicates that mounted target filesystems are being detached.
 	Unmounting State = "Unmounting"
 	// Writing indicates that image data is being copied to the target.
@@ -26,7 +33,8 @@ const (
 	// Flushing indicates that buffered target writes are becoming durable.
 	Flushing State = "Flushing"
 	// Verifying indicates that target data is being read back and checked.
-	Verifying State = "Verifying"
+	Verifying           State = "Verifying"
+	VerifyingFilesystem State = "VerifyingFilesystem"
 	// Ejecting indicates that the target is being released for safe removal.
 	Ejecting State = "Ejecting"
 	// Completed indicates that all requested workflow steps succeeded.
@@ -38,19 +46,27 @@ const (
 )
 
 var transitions = map[State]map[State]bool{
-	Idle:           {ImageSelected: true, DeviceSelected: true},
-	ImageSelected:  {Idle: true, Ready: true},
-	DeviceSelected: {Idle: true, Ready: true},
-	Ready:          {Confirming: true, Idle: true},
-	Confirming:     {Ready: true, Unmounting: true, Cancelled: true, Failed: true},
-	Unmounting:     {Writing: true, Cancelled: true, Failed: true},
-	Writing:        {Flushing: true, Cancelled: true, Failed: true},
-	Flushing:       {Verifying: true, Ejecting: true, Completed: true, Failed: true},
-	Verifying:      {Ejecting: true, Completed: true, Cancelled: true, Failed: true},
-	Ejecting:       {Completed: true, Failed: true},
-	Completed:      {Idle: true},
-	Cancelled:      {Idle: true, Ready: true},
-	Failed:         {Idle: true, Ready: true},
+	Idle:                {ImageSelected: true, DeviceSelected: true},
+	ImageSelected:       {Idle: true, Ready: true},
+	DeviceSelected:      {Idle: true, Ready: true},
+	Ready:               {Confirming: true, Idle: true},
+	Confirming:          {Ready: true, Inspecting: true, Unmounting: true, Cancelled: true, Failed: true},
+	Inspecting:          {Planning: true, Cancelled: true, Failed: true},
+	Planning:            {Unmounting: true, StagingWIM: true, Cancelled: true, Failed: true},
+	Unmounting:          {Writing: true, Partitioning: true, Cancelled: true, Failed: true},
+	StagingWIM:          {SplittingWIM: true, Cancelled: true, Failed: true},
+	SplittingWIM:        {Unmounting: true, Cancelled: true, Failed: true},
+	Partitioning:        {Formatting: true, Cancelled: true, Failed: true},
+	Formatting:          {Extracting: true, Cancelled: true, Failed: true},
+	Extracting:          {Flushing: true, Cancelled: true, Failed: true},
+	Writing:             {Flushing: true, Cancelled: true, Failed: true},
+	Flushing:            {Verifying: true, VerifyingFilesystem: true, Ejecting: true, Completed: true, Failed: true},
+	Verifying:           {Ejecting: true, Completed: true, Cancelled: true, Failed: true},
+	VerifyingFilesystem: {Ejecting: true, Completed: true, Cancelled: true, Failed: true},
+	Ejecting:            {Completed: true, Failed: true},
+	Completed:           {Idle: true},
+	Cancelled:           {Idle: true, Ready: true},
+	Failed:              {Idle: true, Ready: true},
 }
 
 // StateMachine serializes workflow transitions because the GUI and worker

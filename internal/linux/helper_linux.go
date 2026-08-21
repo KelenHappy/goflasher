@@ -14,10 +14,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/fat32"
+	"github.com/goflasher/goflasher/internal/privilege"
 	"github.com/goflasher/goflasher/internal/progress"
 	"golang.org/x/sys/unix"
 )
@@ -30,27 +32,30 @@ var ErrAuthorizationCanceled = errors.New("authorization canceled")
 type operationMode string
 
 const (
-	modeWrite       operationMode = "write"
-	modeRead        operationMode = "read-back"
-	modeFlush       operationMode = "flush"
-	modeFormatFAT32 operationMode = "format-fat32"
+	modeWrite            operationMode = "write"
+	modeRead             operationMode = "read-back"
+	modeFlush            operationMode = "flush"
+	modeFormatFAT32      operationMode = "format-fat32"
+	modeInstallerSession operationMode = "installer-session"
 )
 
 // privilegedRequest deliberately has no device-path field. The privileged side
 // derives both sysfs and /dev names from the expected kernel device number.
 type privilegedRequest struct {
-	Identity string        `json:"identity"`
-	Serial   string        `json:"serial,omitempty"`
-	WWN      string        `json:"wwn,omitempty"`
-	Major    uint32        `json:"major"`
-	Minor    uint32        `json:"minor"`
-	Capacity uint64        `json:"capacity"`
-	Mode     operationMode `json:"mode"`
-	Label    string        `json:"label,omitempty"`
+	Version           uint32        `json:"version"`
+	Identity          string        `json:"identity"`
+	Serial            string        `json:"serial,omitempty"`
+	WWN               string        `json:"wwn,omitempty"`
+	Major             uint32        `json:"major"`
+	Minor             uint32        `json:"minor"`
+	Capacity          uint64        `json:"capacity"`
+	Mode              operationMode `json:"mode"`
+	Label             string        `json:"label,omitempty"`
+	LogicalSectorSize uint32        `json:"logical_sector_size,omitempty"`
 }
 
 func helperRequest(d device.Device, mode operationMode) privilegedRequest {
-	return privilegedRequest{Identity: d.ID, Serial: d.Serial, WWN: d.WWN, Major: d.Major, Minor: d.Minor, Capacity: d.Size, Mode: mode}
+	return privilegedRequest{Version: privilege.ProtocolVersion, Identity: d.ID, Serial: d.Serial, WWN: d.WWN, Major: d.Major, Minor: d.Minor, Capacity: d.Size, Mode: mode}
 }
 
 type privilegedHelper interface {
@@ -58,6 +63,9 @@ type privilegedHelper interface {
 	OpenReader(context.Context, privilegedRequest) (io.ReadCloser, error)
 	Flush(context.Context, privilegedRequest) error
 	FormatFAT32(context.Context, privilegedRequest, chan<- progress.Update) error
+}
+type installerSessionHelper interface {
+	OpenInstallerSession(context.Context, privilegedRequest) (*remoteInstallerSession, error)
 }
 
 type commandHelper struct {
@@ -355,6 +363,140 @@ func (h *commandHelper) FormatFAT32(ctx context.Context, r privilegedRequest, up
 	return nil
 }
 
+// Installer architecture decision: GPT/FAT construction stays in the
+// unprivileged process. The root helper exposes only this identity-bound,
+// capacity-bounded random-access operation stream; it never accepts a device
+// pathname, filesystem pathname, or arbitrary command to execute.
+type remoteInstallerSession struct {
+	mu     sync.Mutex
+	ctx    context.Context
+	input  io.WriteCloser
+	output *bufio.Reader
+	closer io.Closer
+	cmd    *exec.Cmd
+	closed bool
+}
+
+func (h *commandHelper) OpenInstallerSession(ctx context.Context, r privilegedRequest) (*remoteInstallerSession, error) {
+	r.Mode, r.Version, r.LogicalSectorSize = modeInstallerSession, privilege.ProtocolVersion, 512
+	cmd, in, out, _, err := h.start(ctx, r, nil)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := out.(*bufferedReadCloser)
+	if !ok {
+		_ = in.Close()
+		_ = out.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, errors.New("invalid helper session stream")
+	}
+	buffered, ok := reader.Reader.(*bufio.Reader)
+	if !ok {
+		_ = in.Close()
+		_ = out.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, errors.New("invalid buffered helper stream")
+	}
+	return &remoteInstallerSession{ctx: ctx, input: in, output: buffered, closer: out, cmd: cmd}, nil
+}
+
+func (s *remoteInstallerSession) WriteAt(p []byte, off int64) (int, error) {
+	if off < 0 || len(p) == 0 {
+		return 0, privilege.ErrInvalidTarget
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	written := 0
+	for written < len(p) {
+		n := min(len(p)-written, int(maxSessionTransfer))
+		if err := s.command(privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionWriteAt, Offset: uint64(off) + uint64(written), Length: uint32(n)}, p[written:written+n], nil); err != nil {
+			return written, err
+		}
+		written += n
+	}
+	return written, nil
+}
+func (s *remoteInstallerSession) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || len(p) == 0 {
+		return 0, privilege.ErrInvalidTarget
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	read := 0
+	for read < len(p) {
+		n := min(len(p)-read, int(maxSessionTransfer))
+		if err := s.command(privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionReadAt, Offset: uint64(off) + uint64(read), Length: uint32(n)}, nil, p[read:read+n]); err != nil {
+			return read, err
+		}
+		read += n
+	}
+	return read, nil
+}
+func (s *remoteInstallerSession) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.command(privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionFlush}, nil, nil)
+}
+func (s *remoteInstallerSession) command(c privilege.SessionCommand, write, read []byte) error {
+	if s.closed {
+		return os.ErrClosed
+	}
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	data, _ := json.Marshal(c)
+	data = append(data, '\n')
+	if _, err := s.input.Write(data); err != nil {
+		return err
+	}
+	if len(write) > 0 {
+		if _, err := s.input.Write(write); err != nil {
+			return err
+		}
+	}
+	line, err := s.output.ReadBytes('\n')
+	if err != nil {
+		return err
+	}
+	var response privilege.SessionResponse
+	if err = json.Unmarshal(line, &response); err != nil {
+		return err
+	}
+	if response.Version != privilege.ProtocolVersion {
+		return privilege.ErrIncompatible
+	}
+	if !response.OK {
+		return &privilege.SessionError{Code: response.Code, Message: response.Message}
+	}
+	if len(read) > 0 {
+		if response.Length != uint32(len(read)) {
+			return io.ErrUnexpectedEOF
+		}
+		_, err = io.ReadFull(s.output, read)
+		return err
+	}
+	return nil
+}
+func (s *remoteInstallerSession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	var commandErr error
+	if s.ctx.Err() != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+	} else {
+		commandErr = s.command(privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionClose}, nil, nil)
+	}
+	s.closed = true
+	_ = s.input.Close()
+	_ = s.closer.Close()
+	return errors.Join(commandErr, s.cmd.Wait())
+}
+
 type helperEnvironment struct {
 	SysDevBlock, SysClassBlock, MountInfo, Swaps, DevRoot string
 	openFile                                              func(string, int, os.FileMode) (*os.File, error)
@@ -392,6 +534,8 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 		err = flushAndInvalidate(f, func() error { return invalidateBlockCache(f) })
 	case modeFormatFAT32:
 		err = makeFAT32(f, req.Capacity, req.Label, errOut)
+	case modeInstallerSession:
+		err = runInstallerSession(req, f, payload, out, env)
 	default:
 		err = errors.New("unsupported operation mode")
 	}
@@ -464,6 +608,13 @@ func validateAndOpen(req privilegedRequest, env helperEnvironment) (*os.File, er
 }
 
 func (req privilegedRequest) valid() bool {
+	if req.Mode == modeInstallerSession {
+		if req.Version != privilege.ProtocolVersion || req.LogicalSectorSize < 512 || req.LogicalSectorSize&(req.LogicalSectorSize-1) != 0 {
+			return false
+		}
+	} else if req.Version != 0 && req.Version != privilege.ProtocolVersion {
+		return false
+	}
 	if req.Identity == "" {
 		return false
 	}
@@ -471,13 +622,92 @@ func (req privilegedRequest) valid() bool {
 		return false
 	}
 	switch req.Mode {
-	case modeWrite, modeRead, modeFlush:
+	case modeWrite, modeRead, modeFlush, modeInstallerSession:
 		return true
 	case modeFormatFAT32:
 		return fat32.ValidLabel(req.Label)
 	default:
 		return false
 	}
+}
+
+const maxSessionTransfer = uint32(4 << 20)
+
+func runInstallerSession(req privilegedRequest, target *os.File, input io.Reader, output io.Writer, env helperEnvironment) error {
+	reader := bufio.NewReader(input)
+	for {
+		line, err := reader.ReadSlice('\n')
+		if err != nil {
+			if errors.Is(err, bufio.ErrBufferFull) {
+				return sessionReply(output, false, "invalid-command", "command frame too large", 0)
+			}
+			return err
+		}
+		if len(line) > maxPrivilegedRequestBytes {
+			return sessionReply(output, false, "invalid-command", "command frame too large", 0)
+		}
+		var command privilege.SessionCommand
+		if err = json.Unmarshal(line, &command); err != nil {
+			return sessionReply(output, false, "invalid-command", err.Error(), 0)
+		}
+		if err = command.Validate(req.Capacity); err != nil {
+			return sessionReply(output, false, "invalid-command", err.Error(), 0)
+		}
+		if command.Length > maxSessionTransfer {
+			return sessionReply(output, false, "transfer-too-large", "session transfer exceeds bound", 0)
+		}
+		if command.Kind == privilege.SessionCancel || command.Kind == privilege.SessionClose {
+			return sessionReply(output, true, "", "", 0)
+		}
+		var writePayload []byte
+		if command.Kind == privilege.SessionWriteAt {
+			writePayload = make([]byte, command.Length)
+			if _, err = io.ReadFull(reader, writePayload); err != nil {
+				return err
+			}
+		}
+		name, _, err := resolveDevice(req, env)
+		if err == nil {
+			err = validateOpenedDevice(req, env, name, target)
+		}
+		if err != nil {
+			_ = sessionReply(output, false, "device-changed", err.Error(), 0)
+			return err
+		}
+		switch command.Kind {
+		case privilege.SessionWriteAt:
+			_, err = target.WriteAt(writePayload, int64(command.Offset))
+		case privilege.SessionReadAt:
+			buf := make([]byte, command.Length)
+			if _, err = target.ReadAt(buf, int64(command.Offset)); err == nil {
+				if err = sessionReply(output, true, "", "", command.Length); err == nil {
+					_, err = output.Write(buf)
+				}
+			}
+			if err == nil {
+				continue
+			}
+		case privilege.SessionFlush:
+			err = target.Sync()
+		}
+		if err != nil {
+			_ = sessionReply(output, false, "operation-failed", err.Error(), 0)
+			return err
+		}
+		if err = sessionReply(output, true, "", "", 0); err != nil {
+			return err
+		}
+	}
+}
+func sessionReply(w io.Writer, ok bool, code, message string, length uint32) error {
+	response := privilege.SessionResponse{Version: privilege.ProtocolVersion, OK: ok, Code: code, Message: message, Length: length}
+	data, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	_, err = w.Write(data)
+	return err
 }
 
 func makeFAT32(device *os.File, size uint64, label string, errOut io.Writer) error {
@@ -517,6 +747,9 @@ func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, 
 		return 0, 0, ErrDeviceChanged
 	}
 	if major != req.Major {
+		return 0, 0, ErrDeviceChanged
+	}
+	if req.Mode == modeInstallerSession && readTrim(filepath.Join(class, "queue/logical_block_size")) != fmt.Sprint(req.LogicalSectorSize) {
 		return 0, 0, ErrDeviceChanged
 	}
 	if minor != req.Minor {
@@ -641,6 +874,8 @@ func deviceOpenFlags(mode operationMode) int {
 		// The in-process formatter uses random-access writes and syncs the
 		// completed filesystem, so its validated descriptor must be read/write.
 		return os.O_RDWR
+	case modeInstallerSession:
+		return os.O_RDWR | syscall.O_SYNC
 	case modeWrite:
 		// Keep each large stream write tied to actual device progress instead of
 		// letting Linux accept the entire image into the page cache at RAM speed.

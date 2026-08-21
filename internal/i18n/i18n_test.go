@@ -61,3 +61,18 @@ func TestImageChooserLabelsAreLocalized(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsPlanAndProgressNeverFallBackInEnglishOrTraditionalChinese(t *testing.T) {
+	keys := []string{"plan.windows.summary", "plan.split.reason.none", "plan.split.reason.fat32", "stage.inspecting", "stage.planning", "stage.staging_wim", "stage.splitting_wim", "stage.formatting", "stage.extracting", "stage.verifying_filesystem"}
+	for _, locale := range []Locale{English, TraditionalChinese} {
+		for _, key := range keys {
+			message, ok := catalogs[locale][key]
+			if !ok || message == "" || message == key {
+				t.Errorf("%s has no explicit translation for %s", locale, key)
+			}
+		}
+	}
+	if catalogs[English]["plan.windows.summary"] == catalogs[TraditionalChinese]["plan.windows.summary"] {
+		t.Fatal("Traditional Chinese plan summary unintentionally falls back to English")
+	}
+}

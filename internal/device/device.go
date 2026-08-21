@@ -36,6 +36,22 @@ type FAT32Formatter interface {
 	FormatFAT32(context.Context, Device, string, chan<- progress.Update) error
 }
 
+// InstallerTarget is a bounded random-access raw session. Backends must bind
+// it to the selected device identity and revalidate safety for every command.
+type InstallerTarget interface {
+	io.WriterAt
+	Sync() error
+	Close() error
+}
+type InstallerReader interface {
+	io.ReaderAt
+	Close() error
+}
+type WindowsInstallerBackend interface {
+	OpenInstallerTarget(context.Context, Device) (InstallerTarget, error)
+	OpenInstallerReader(context.Context, Device) (InstallerReader, error)
+}
+
 // SameIdentity compares immutable kernel and hardware identifiers. A serial or
 // WWN mismatch is always fatal; major/minor and sysfs path protect devices that
 // do not expose either hardware identifier.

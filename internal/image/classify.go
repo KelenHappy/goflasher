@@ -62,8 +62,10 @@ func classifyDecoded(ctx context.Context, info Info) (Kind, error) {
 		return UnknownImage, err
 	}
 	name := f.Name()
-	_ = os.Remove(name)
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(name)
+	}()
 	if _, err = io.Copy(f, contextReader{ctx: ctx, reader: s}); err != nil {
 		return UnknownImage, err
 	}
@@ -146,6 +148,7 @@ func hasValidHybridMBR(r io.ReaderAt, sourceSize uint64) bool {
 		totalSectors++
 	}
 	var previousEnd uint64
+	var coversWholeImage bool
 	for i := 446; i < 510; i += 16 {
 		boot, partitionType := b[i], b[i+4]
 		start := uint64(binary.LittleEndian.Uint32(b[i+8 : i+12]))
@@ -153,7 +156,19 @@ func hasValidHybridMBR(r io.ReaderAt, sourceSize uint64) bool {
 		if partitionType == 0 && count == 0 {
 			continue
 		}
-		if (boot != 0 && boot != 0x80) || partitionType == 0 || start == 0 || count == 0 || start >= totalSectors || count > totalSectors-start {
+		if boot != 0 && boot != 0x80 {
+			return false
+		}
+		// Debian- and Ubuntu-style isohybrid images commonly include an MBR
+		// entry covering the complete image. It is metadata for the image as a
+		// whole (and is sometimes type 0), so embedded partitions may overlap
+		// it. Keep requiring an exact source-sized range to avoid treating an
+		// otherwise invalid zero-start entry as a covering entry.
+		if start == 0 && count == totalSectors {
+			coversWholeImage = true
+			continue
+		}
+		if partitionType == 0 || start == 0 || count == 0 || start >= totalSectors || count > totalSectors-start {
 			return false
 		}
 		if previousEnd != 0 && start < previousEnd {
@@ -163,5 +178,5 @@ func hasValidHybridMBR(r io.ReaderAt, sourceSize uint64) bool {
 	}
 	// A hybrid partition describes the optical image payload, rather than an
 	// arbitrary in-bounds range planted in the ISO system area.
-	return previousEnd == totalSectors
+	return coversWholeImage || previousEnd == totalSectors
 }

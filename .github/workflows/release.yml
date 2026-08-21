@@ -124,6 +124,7 @@ jobs:
           test -x "$work/deb/usr/bin/goflasher"
           test -x "$work/deb/usr/libexec/goflasher-helper"
           test -f "$work/deb/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
+          GOFLASHER_RELEASE_GATE=1 RELEASE_COMPLIANCE_RECORD="${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}" packaging/legal/verify-release.sh "$work/deb"
 
           arch=$(realpath "$(find dist -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)")
           mkdir "$work/arch"
@@ -131,6 +132,7 @@ jobs:
           test -x "$work/arch/usr/bin/goflasher"
           test -x "$work/arch/usr/libexec/goflasher-helper"
           test -f "$work/arch/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
+          GOFLASHER_RELEASE_GATE=1 RELEASE_COMPLIANCE_RECORD="${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}" packaging/legal/verify-release.sh "$work/arch"
 
       - name: Generate checksums
         run: |
@@ -196,6 +198,10 @@ jobs:
       - name: Package DMG
         env:
           SIGN_IDENTITY: ${{ vars.MACOS_PRODUCTION_READY == 'true' && secrets.MACOS_DEVELOPER_ID_APPLICATION || '' }}
+          LIBWIM_DYLIB: ${{ vars.MACOS_WINDOWS_BUILDER_READY == 'true' && vars.MACOS_LIBWIM_DYLIB_PATH || '' }}
+          APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
         run: |
           set -euo pipefail
           if [[ "${{ vars.MACOS_PRODUCTION_READY }}" == "true" ]]; then
@@ -210,25 +216,11 @@ jobs:
           trap 'hdiutil detach "$mount"' EXIT
           test -x "$mount/GoFlasher.app/Contents/MacOS/GoFlasher"
           test -x "$mount/GoFlasher.app/Contents/Library/HelperTools/org.goflasher.helper"
+          GOFLASHER_RELEASE_GATE=1 RELEASE_COMPLIANCE_RECORD="${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}" packaging/legal/verify-release.sh "$mount/GoFlasher.app"
+          if [[ "${{ vars.MACOS_WINDOWS_BUILDER_READY }}" == "true" ]]; then
+            test -x "$mount/GoFlasher.app/Contents/Frameworks/libwim.15.dylib"
+          fi
           plutil -lint "$mount/GoFlasher.app/Contents/Info.plist"
-      - name: Notarize, staple, and verify Gatekeeper
-        if: vars.MACOS_PRODUCTION_READY == 'true'
-        env:
-          APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "$APPLE_ID"
-          test -n "$APPLE_TEAM_ID"
-          test -n "$APPLE_APP_PASSWORD"
-          dmg="dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg"
-          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
-          xcrun stapler staple "$dmg"
-          xcrun stapler validate "$dmg"
-          mount=$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | sed 's|^.*\t||')
-          trap 'hdiutil detach "$mount"' EXIT
-          spctl --assess --type execute --verbose=2 "$mount/GoFlasher.app"
       - name: Generate checksum
         run: shasum -a 256 "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg" > "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

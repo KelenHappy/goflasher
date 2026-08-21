@@ -8,6 +8,7 @@ import (
 
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/image"
+	"github.com/goflasher/goflasher/internal/installer"
 	"github.com/goflasher/goflasher/internal/progress"
 	"github.com/goflasher/goflasher/internal/verify"
 	"github.com/goflasher/goflasher/internal/writer"
@@ -24,41 +25,25 @@ type RunResult struct {
 	Elapsed                    time.Duration
 	AverageBytesPerSecond      float64
 	Verified, Ejected          bool
+	PlanKind                   PlanKind
+	FilesWritten               int
+	ManifestSHA256             string
+	WIMParts                   int
+	SemanticVerified           bool
+	SemanticVerification       string
+	installerManifest          []installer.VerificationEntry
 }
 
 // Service coordinates the device workflow and its state transitions.
 type Service struct {
-	Backend device.Backend
-	State   *StateMachine
+	Backend           device.Backend
+	State             *StateMachine
+	TemporarySpace    uint64
+	InstallerSplitter installer.WIMSplitter
 }
-
-type workflow int
-
-const (
-	workflowRawWrite workflow = iota
-	workflowFAT32Installer
-)
 
 var ErrInstallerBuilderUnavailable = errors.New("FAT32 Windows installer builder is unavailable")
 var ErrCompressedWindowsInstallerUnsupported = errors.New("compressed Windows installer ISO is unsupported")
-
-func planWorkflow(ctx context.Context, info image.Info) (workflow, error) {
-	kind, err := image.ClassifyContext(ctx, info)
-	if err != nil {
-		return 0, err
-	}
-	switch kind {
-	case image.RawDiskImage, image.LinuxHybridISO:
-		return workflowRawWrite, nil
-	case image.WindowsInstallerISO:
-		if info.Compression != image.CompressionNone {
-			return 0, ErrCompressedWindowsInstallerUnsupported
-		}
-		return workflowFAT32Installer, nil
-	default:
-		return 0, image.ErrUnsafeClassification
-	}
-}
 
 // Run owns the destructive workflow. Safety checks are deliberately repeated
 // by the backend immediately before opening the block device.
@@ -67,43 +52,167 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if s.State == nil {
 		s.State = NewStateMachine()
 	}
+	if s.InstallerSplitter == nil {
+		s.InstallerSplitter = installer.NewNativeWIMSplitter()
+	}
+	if s.TemporarySpace == 0 {
+		s.TemporarySpace, _ = availableTemporarySpace()
+	}
 	out, err := s.runWorkflow(ctx, info, target, opts, updates)
 	s.finishRun(&out, err, time.Since(start))
 	return out, err
 }
 
+type ImageClass string
+
+const (
+	ImageLinuxRaw   ImageClass = "linux-raw"
+	ImageWindowsISO ImageClass = "windows-installer"
+)
+
+// PlanSummary is the read-only configuration presented before confirmation.
+type PlanSummary struct {
+	Class, PartitionTable, Filesystem, BootMode string
+	SplitRequired                               bool
+	SplitReason                                 string
+	RequiredCapacity, RequiredTemporarySpace    uint64
+	AvailableTemporarySpace                     uint64
+}
+
+func (s *Service) Preview(ctx context.Context, info image.Info, target device.Device) (summary PlanSummary, err error) {
+	if s.InstallerSplitter == nil {
+		s.InstallerSplitter = installer.NewNativeWIMSplitter()
+	}
+	if s.TemporarySpace == 0 {
+		s.TemporarySpace, _ = availableTemporarySpace()
+	}
+	info, err = inspectImage(ctx, info)
+	if err != nil {
+		return summary, err
+	}
+	defer func() { err = errors.Join(err, info.CloseSource()) }()
+	var preflight func(context.Context) error
+	if p, ok := s.InstallerSplitter.(interface{ Preflight(context.Context) error }); ok {
+		preflight = p.Preflight
+	}
+	_, supported := s.Backend.(WindowsInstallerBackend)
+	plan, err := (WorkflowPlanner{TemporarySpace: s.TemporarySpace, SplitPreflight: preflight, WindowsSupported: supported}).Plan(ctx, info, target)
+	if err != nil {
+		return summary, err
+	}
+	if plan.Kind == PlanRawWrite {
+		return PlanSummary{Class: string(ImageLinuxRaw)}, nil
+	}
+	split := plan.Windows.InstallStrategy() == installer.SplitWIM
+	reason := ""
+	if split {
+		reason = "install.wim exceeds the FAT32 single-file limit"
+	}
+	return PlanSummary{Class: string(ImageWindowsISO), PartitionTable: "GPT", Filesystem: "FAT32", BootMode: "UEFI x64 only", SplitRequired: split, SplitReason: reason,
+		RequiredCapacity: plan.Windows.RequiredTargetCapacity(), RequiredTemporarySpace: plan.Windows.TemporarySpaceRequired(), AvailableTemporarySpace: s.TemporarySpace}, nil
+}
+
 func (s *Service) runWorkflow(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (out RunResult, err error) {
+	trackPlanningState := s.State.State() != Idle
+	if trackPlanningState {
+		if err = s.State.Transition(Inspecting); err != nil {
+			return out, err
+		}
+	}
+	sendStage(ctx, updates, progress.StageInspecting)
 	info, err = inspectImage(ctx, info)
 	if err != nil {
 		return out, err
 	}
 	defer func() { err = errors.Join(err, info.CloseSource()) }()
-	workflow, err := planWorkflow(ctx, info)
+	if trackPlanningState {
+		if err = s.State.Transition(Planning); err != nil {
+			return out, err
+		}
+	}
+	sendStage(ctx, updates, progress.StagePlanning)
+	var splitPreflight func(context.Context) error
+	if preflight, ok := s.InstallerSplitter.(interface{ Preflight(context.Context) error }); ok {
+		splitPreflight = preflight.Preflight
+	}
+	_, windowsSupported := s.Backend.(WindowsInstallerBackend)
+	plan, err := (WorkflowPlanner{TemporarySpace: s.TemporarySpace, SplitPreflight: splitPreflight, WindowsSupported: windowsSupported}).Plan(ctx, info, target)
 	if err != nil {
 		return out, err
 	}
-	if workflow == workflowFAT32Installer {
-		// Never fall back to a raw write: until the builder (including its
-		// libwim ABI and source-format checks) is available, fail closed before
-		// unmounting or opening the destination.
-		return out, ErrInstallerBuilderUnavailable
-	}
-	if info.UncompressedSize > target.Size {
-		return out, writer.ErrTargetTooSmall
-	}
-	if err = info.VerifySourceContext(ctx); err != nil {
-		return out, err
+	out.PlanKind = plan.Kind
+	var windowsBackend WindowsInstallerBackend
+	effectiveSplitter := s.InstallerSplitter
+	if plan.Kind == PlanWindowsInstaller {
+		var ok bool
+		windowsBackend, ok = s.Backend.(WindowsInstallerBackend)
+		if !ok || s.InstallerSplitter == nil && plan.Windows.InstallStrategy() == installer.SplitWIM {
+			return out, ErrInstallerBuilderUnavailable
+		}
+		if plan.Windows.InstallStrategy() == installer.SplitWIM {
+			r, _, _, retainedErr := info.RetainedReaderAt()
+			if retainedErr != nil {
+				return out, retainedErr
+			}
+			if err = s.State.Transition(StagingWIM); err != nil {
+				return out, err
+			}
+			sendStage(ctx, updates, progress.StageStagingWIM)
+			prepared, cleanup, prepareErr := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
+				if transitionErr := s.State.Transition(SplittingWIM); transitionErr != nil {
+					return transitionErr
+				}
+				sendStage(ctx, updates, progress.StageSplittingWIM)
+				return nil
+			})
+			if prepareErr != nil {
+				return out, errors.Join(installer.ErrWIMSplitFailure, prepareErr)
+			}
+			defer func() { err = errors.Join(err, cleanup.Close()) }()
+			effectiveSplitter = prepared
+		}
 	}
 	if err = s.unmountDevice(ctx, target); err != nil {
 		return out, err
 	}
 	releaseDevice := newDeviceRelease(s.Backend, target)
 	defer func() { err = errors.Join(err, releaseDevice()) }()
-	if err = s.writeImage(ctx, info, target, updates, &out); err != nil {
-		return out, err
-	}
-	if err = s.verifyImage(ctx, target, opts.Verify, updates, &out); err != nil {
-		return out, err
+	if plan.Kind == PlanRawWrite {
+		if err = (RawWriteExecutor{service: s}).Execute(ctx, info, target, opts, updates, &out); err != nil {
+			return out, err
+		}
+	} else {
+		executor := WindowsInstallerExecutor{backend: windowsBackend, splitter: effectiveSplitter, state: s.State}
+		if err = executor.Execute(ctx, plan.Windows, info, target, updates, &out); err != nil {
+			return out, err
+		}
+		if err = s.State.Transition(Flushing); err != nil {
+			return out, err
+		}
+		sendStage(ctx, updates, progress.StageFlushing)
+		if err = s.Backend.Flush(ctx, target); err != nil {
+			return out, fmt.Errorf("flush: %w", err)
+		}
+		if err = s.State.Transition(VerifyingFilesystem); err != nil {
+			return out, err
+		}
+		sendStage(ctx, updates, progress.StageVerifyingFilesystem)
+		reader, openErr := windowsBackend.OpenInstallerReader(ctx, target)
+		if openErr != nil {
+			return out, openErr
+		}
+		verification, verifyErr := verify.VerifyInstaller(ctx, reader, target.Size, out.installerManifest, verify.InstallerOptions{
+			SplitWIMPolicySize: plan.Windows.SplitWIMPolicySize(), RequireSplitWIM: plan.Windows.InstallStrategy() == installer.SplitWIM,
+		})
+		closeErr := reader.Close()
+		if verifyErr != nil || closeErr != nil {
+			return out, errors.Join(verifyErr, closeErr)
+		}
+		out.FilesWritten = verification.FilesVerified
+		out.WIMParts = verification.WIMParts
+		out.ManifestSHA256 = verification.ManifestSHA256
+		out.SemanticVerified = true
+		out.SemanticVerification = "raw target GPT, FAT32, paths, sizes, and file hashes verified"
 	}
 	if err = s.ejectDevice(ctx, target, opts.Eject, updates, &out); err != nil {
 		return out, err
