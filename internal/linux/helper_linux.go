@@ -451,11 +451,21 @@ func (s *remoteInstallerSession) command(c privilege.SessionCommand, write, read
 	if _, err := s.input.Write(data); err != nil {
 		return err
 	}
-	if len(write) > 0 {
-		if _, err := s.input.Write(write); err != nil {
-			return err
-		}
+	if err := writeSessionPayload(s.input, write); err != nil {
+		return err
 	}
+	return s.readCommandResponse(read)
+}
+
+func writeSessionPayload(output io.Writer, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	_, err := output.Write(payload)
+	return err
+}
+
+func (s *remoteInstallerSession) readCommandResponse(read []byte) error {
 	line, err := s.output.ReadBytes('\n')
 	if err != nil {
 		return err
@@ -470,14 +480,14 @@ func (s *remoteInstallerSession) command(c privilege.SessionCommand, write, read
 	if !response.OK {
 		return &privilege.SessionError{Code: response.Code, Message: response.Message}
 	}
-	if len(read) > 0 {
-		if response.Length != uint32(len(read)) {
-			return io.ErrUnexpectedEOF
-		}
-		_, err = io.ReadFull(s.output, read)
-		return err
+	if len(read) == 0 {
+		return nil
 	}
-	return nil
+	if response.Length != uint32(len(read)) {
+		return io.ErrUnexpectedEOF
+	}
+	_, err = io.ReadFull(s.output, read)
+	return err
 }
 func (s *remoteInstallerSession) Close() error {
 	s.mu.Lock()
@@ -525,21 +535,35 @@ func runPrivilegedHelper(in io.Reader, out io.Writer, errOut io.Writer, env help
 	if _, err = io.WriteString(out, "OK\n"); err != nil {
 		return err
 	}
-	switch req.Mode {
+	operation := privilegedOperation{request: req, target: f, payload: payload, output: out, errorOutput: errOut, env: env}
+	return operation.execute()
+}
+
+type privilegedOperation struct {
+	request     privilegedRequest
+	target      *os.File
+	payload     io.Reader
+	output      io.Writer
+	errorOutput io.Writer
+	env         helperEnvironment
+}
+
+func (o privilegedOperation) execute() error {
+	switch o.request.Mode {
 	case modeWrite:
-		err = writeAndSync(f, payload)
+		return writeAndSync(o.target, o.payload)
 	case modeRead:
-		_, err = io.CopyN(out, f, int64(req.Capacity))
+		_, err := io.CopyN(o.output, o.target, int64(o.request.Capacity))
+		return err
 	case modeFlush:
-		err = flushAndInvalidate(f, func() error { return invalidateBlockCache(f) })
+		return flushAndInvalidate(o.target, func() error { return invalidateBlockCache(o.target) })
 	case modeFormatFAT32:
-		err = makeFAT32(f, req.Capacity, req.Label, errOut)
+		return makeFAT32(o.target, o.request.Capacity, o.request.Label, o.errorOutput)
 	case modeInstallerSession:
-		err = runInstallerSession(req, f, payload, out, env)
+		return runInstallerSession(installerSession{request: o.request, target: o.target, input: bufio.NewReader(o.payload), output: o.output, env: o.env})
 	default:
-		err = errors.New("unsupported operation mode")
+		return errors.New("unsupported operation mode")
 	}
-	return err
 }
 
 const maxPrivilegedRequestBytes = 4096
@@ -608,17 +632,7 @@ func validateAndOpen(req privilegedRequest, env helperEnvironment) (*os.File, er
 }
 
 func (req privilegedRequest) valid() bool {
-	if req.Mode == modeInstallerSession {
-		if req.Version != privilege.ProtocolVersion || req.LogicalSectorSize < 512 || req.LogicalSectorSize&(req.LogicalSectorSize-1) != 0 {
-			return false
-		}
-	} else if req.Version != 0 && req.Version != privilege.ProtocolVersion {
-		return false
-	}
-	if req.Identity == "" {
-		return false
-	}
-	if req.Capacity == 0 {
+	if !req.validProtocol() || req.Identity == "" || req.Capacity == 0 {
 		return false
 	}
 	switch req.Mode {
@@ -631,82 +645,143 @@ func (req privilegedRequest) valid() bool {
 	}
 }
 
+func (req privilegedRequest) validProtocol() bool {
+	if req.Mode != modeInstallerSession {
+		return req.Version == 0 || req.Version == privilege.ProtocolVersion
+	}
+	return req.Version == privilege.ProtocolVersion && validLogicalSectorSize(req.LogicalSectorSize)
+}
+
+func validLogicalSectorSize(size uint32) bool {
+	return size >= 512 && size&(size-1) == 0
+}
+
 const maxSessionTransfer = uint32(4 << 20)
 
-func runInstallerSession(req privilegedRequest, target *os.File, input io.Reader, output io.Writer, env helperEnvironment) error {
-	reader := bufio.NewReader(input)
+type installerSession struct {
+	request privilegedRequest
+	target  *os.File
+	input   *bufio.Reader
+	output  io.Writer
+	env     helperEnvironment
+}
+
+func runInstallerSession(session installerSession) error {
+	return session.run()
+}
+
+func (s *installerSession) run() error {
 	for {
-		line, err := reader.ReadSlice('\n')
-		if err != nil {
-			if errors.Is(err, bufio.ErrBufferFull) {
-				return sessionReply(output, false, "invalid-command", "command frame too large", 0)
-			}
+		command, ok, err := s.readCommand()
+		if !ok {
 			return err
-		}
-		if len(line) > maxPrivilegedRequestBytes {
-			return sessionReply(output, false, "invalid-command", "command frame too large", 0)
-		}
-		var command privilege.SessionCommand
-		if err = json.Unmarshal(line, &command); err != nil {
-			return sessionReply(output, false, "invalid-command", err.Error(), 0)
-		}
-		if err = command.Validate(req.Capacity); err != nil {
-			return sessionReply(output, false, "invalid-command", err.Error(), 0)
-		}
-		if command.Length > maxSessionTransfer {
-			return sessionReply(output, false, "transfer-too-large", "session transfer exceeds bound", 0)
 		}
 		if command.Kind == privilege.SessionCancel || command.Kind == privilege.SessionClose {
-			return sessionReply(output, true, "", "", 0)
+			return s.reply(privilege.SessionResponse{OK: true})
 		}
-		var writePayload []byte
-		if command.Kind == privilege.SessionWriteAt {
-			writePayload = make([]byte, command.Length)
-			if _, err = io.ReadFull(reader, writePayload); err != nil {
-				return err
-			}
-		}
-		name, _, err := resolveDevice(req, env)
-		if err == nil {
-			err = validateOpenedDevice(req, env, name, target)
-		}
-		if err != nil {
-			_ = sessionReply(output, false, "device-changed", err.Error(), 0)
-			return err
-		}
-		switch command.Kind {
-		case privilege.SessionWriteAt:
-			_, err = target.WriteAt(writePayload, int64(command.Offset))
-		case privilege.SessionReadAt:
-			buf := make([]byte, command.Length)
-			if _, err = target.ReadAt(buf, int64(command.Offset)); err == nil {
-				if err = sessionReply(output, true, "", "", command.Length); err == nil {
-					_, err = output.Write(buf)
-				}
-			}
-			if err == nil {
-				continue
-			}
-		case privilege.SessionFlush:
-			err = target.Sync()
-		}
-		if err != nil {
-			_ = sessionReply(output, false, "operation-failed", err.Error(), 0)
-			return err
-		}
-		if err = sessionReply(output, true, "", "", 0); err != nil {
+		if err := s.execute(command); err != nil {
 			return err
 		}
 	}
 }
-func sessionReply(w io.Writer, ok bool, code, message string, length uint32) error {
-	response := privilege.SessionResponse{Version: privilege.ProtocolVersion, OK: ok, Code: code, Message: message, Length: length}
+
+func (s *installerSession) readCommand() (privilege.SessionCommand, bool, error) {
+	line, err := s.input.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) || len(line) > maxPrivilegedRequestBytes {
+		return privilege.SessionCommand{}, false, s.failure("invalid-command", "command frame too large")
+	}
+	if err != nil {
+		return privilege.SessionCommand{}, false, err
+	}
+	var command privilege.SessionCommand
+	if err := json.Unmarshal(line, &command); err != nil {
+		return command, false, s.failure("invalid-command", err.Error())
+	}
+	if err := command.Validate(s.request.Capacity); err != nil {
+		return command, false, s.failure("invalid-command", err.Error())
+	}
+	if command.Length > maxSessionTransfer {
+		return command, false, s.failure("transfer-too-large", "session transfer exceeds bound")
+	}
+	return command, true, nil
+}
+
+func (s *installerSession) execute(command privilege.SessionCommand) error {
+	payload, err := s.readWritePayload(command)
+	if err != nil {
+		return err
+	}
+	if err := s.revalidateTarget(); err != nil {
+		_ = s.failure("device-changed", err.Error())
+		return err
+	}
+	if err := s.perform(command, payload); err != nil {
+		_ = s.failure("operation-failed", err.Error())
+		return err
+	}
+	return nil
+}
+
+func (s *installerSession) readWritePayload(command privilege.SessionCommand) ([]byte, error) {
+	if command.Kind != privilege.SessionWriteAt {
+		return nil, nil
+	}
+	payload := make([]byte, command.Length)
+	_, err := io.ReadFull(s.input, payload)
+	return payload, err
+}
+
+func (s *installerSession) revalidateTarget() error {
+	name, _, err := resolveDevice(s.request, s.env)
+	if err != nil {
+		return err
+	}
+	return validateOpenedDevice(s.request, s.env, name, s.target)
+}
+
+func (s *installerSession) perform(command privilege.SessionCommand, payload []byte) error {
+	switch command.Kind {
+	case privilege.SessionWriteAt:
+		if _, err := s.target.WriteAt(payload, int64(command.Offset)); err != nil {
+			return err
+		}
+		return s.reply(privilege.SessionResponse{OK: true})
+	case privilege.SessionReadAt:
+		return s.performRead(command)
+	case privilege.SessionFlush:
+		if err := s.target.Sync(); err != nil {
+			return err
+		}
+		return s.reply(privilege.SessionResponse{OK: true})
+	default:
+		return s.failure("invalid-command", "unsupported session command")
+	}
+}
+
+func (s *installerSession) performRead(command privilege.SessionCommand) error {
+	payload := make([]byte, command.Length)
+	if _, err := s.target.ReadAt(payload, int64(command.Offset)); err != nil {
+		return err
+	}
+	if err := s.reply(privilege.SessionResponse{OK: true, Length: command.Length}); err != nil {
+		return err
+	}
+	_, err := s.output.Write(payload)
+	return err
+}
+
+func (s *installerSession) failure(code, message string) error {
+	return s.reply(privilege.SessionResponse{Code: code, Message: message})
+}
+
+func (s *installerSession) reply(response privilege.SessionResponse) error {
+	response.Version = privilege.ProtocolVersion
 	data, err := json.Marshal(response)
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	_, err = w.Write(data)
+	_, err = s.output.Write(data)
 	return err
 }
 
