@@ -58,7 +58,7 @@ func TestInstallerSessionUsesBoundedRandomAccessAndStructuredReplies(t *testing.
 	payload := []byte("planned-block-data")
 	input := encodeSessionCommands(t, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionWriteAt, Offset: 4096, Length: uint32(len(payload))}, payload, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionFlush}, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionClose})
 	var output bytes.Buffer
-	if err := runInstallerSession(req, target, input, &output, env); err != nil {
+	if err := runInstallerSession(installerSession{request: req, target: target, input: bufio.NewReader(input), output: &output, env: env}); err != nil {
 		t.Fatal(err)
 	}
 	got := make([]byte, len(payload))
@@ -94,7 +94,7 @@ func TestInstallerSessionRejectsOutOfBoundsBeforeWrite(t *testing.T) {
 	}
 	input := encodeSessionCommands(t, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionWriteAt, Offset: req.Capacity, Length: 1}, []byte{1})
 	var output bytes.Buffer
-	if err := runInstallerSession(req, target, input, &output, env); err != nil {
+	if err := runInstallerSession(installerSession{request: req, target: target, input: bufio.NewReader(input), output: &output, env: env}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := target.Stat()
@@ -123,7 +123,7 @@ func TestInstallerSessionRevalidatesIdentityForEveryCommand(t *testing.T) {
 	write(t, filepath.Join(real, "device/serial"), "REPLACED")
 	input := encodeSessionCommands(t, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionFlush})
 	var output bytes.Buffer
-	if err := runInstallerSession(req, target, input, &output, env); err == nil {
+	if err := runInstallerSession(installerSession{request: req, target: target, input: bufio.NewReader(input), output: &output, env: env}); err == nil {
 		t.Fatal("identity replacement accepted")
 	}
 	var response privilege.SessionResponse
