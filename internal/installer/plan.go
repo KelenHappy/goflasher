@@ -23,10 +23,11 @@ import (
 )
 
 const (
-	logicalSectorSize = uint64(512)
-	partitionStart    = uint64(1 << 20)
-	maxFATFileSize    = uint64(math.MaxUint32)
-	defaultSplitSize  = uint64(3800 << 20)
+	logicalSectorSize     = uint64(512)
+	partitionStart        = uint64(1 << 20)
+	maxFATFileSize        = uint64(math.MaxUint32)
+	defaultSplitSize      = uint64(3800 << 20)
+	splitTempBaseOverhead = uint64(64 << 20)
 )
 
 var (
@@ -189,7 +190,10 @@ func NewBuildPlan(ctx context.Context, source io.ReaderAt, sourceSize uint64, ma
 	}
 	temporary := uint64(0)
 	if strategy == SplitWIM {
-		temporary = installSize
+		temporary, err = estimateSplitTemporarySpace(installSize, splitParts)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if temporary > options.TemporarySpace {
 		return nil, fmt.Errorf("%w: %w: split WIM needs %d temporary bytes", ErrNoSpace, ErrTemporarySpace, temporary)
@@ -203,6 +207,37 @@ func NewBuildPlan(ctx context.Context, source io.ReaderAt, sourceSize uint64, ma
 		return nil, err
 	}
 	return p, nil
+}
+
+// estimateSplitTemporarySpace reserves the simultaneously retained staged WIM,
+// the maximum accepted SWM output set, and conservative filesystem metadata.
+func estimateSplitTemporarySpace(sourceSize uint64, parts int) (uint64, error) {
+	if sourceSize == 0 || parts <= 0 {
+		return 0, fmt.Errorf("%w: invalid split temporary-space input", ErrUnsupported)
+	}
+	quarter := sourceSize / 4
+	if sourceSize > math.MaxUint64-quarter {
+		return 0, fmt.Errorf("%w: split temporary-space overflow", ErrUnsupported)
+	}
+	output := sourceSize + quarter
+	partsU := uint64(parts)
+	if partsU > math.MaxUint64/(1<<20) {
+		return 0, fmt.Errorf("%w: split temporary-space overflow", ErrUnsupported)
+	}
+	partOverhead := partsU * (1 << 20)
+	if output > math.MaxUint64-partOverhead {
+		return 0, fmt.Errorf("%w: split temporary-space overflow", ErrUnsupported)
+	}
+	output += partOverhead
+	if sourceSize > math.MaxUint64-output {
+		return 0, fmt.Errorf("%w: split temporary-space overflow", ErrUnsupported)
+	}
+	total := sourceSize + output
+	filesystemOverhead := total/100 + splitTempBaseOverhead
+	if total > math.MaxUint64-filesystemOverhead {
+		return 0, fmt.Errorf("%w: split temporary-space overflow", ErrUnsupported)
+	}
+	return total + filesystemOverhead, nil
 }
 
 func approveDestinations(entries []installeriso.Entry) ([]plannedEntry, error) {

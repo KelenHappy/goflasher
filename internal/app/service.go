@@ -142,11 +142,34 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 	}
 	out.PlanKind = plan.Kind
 	var windowsBackend WindowsInstallerBackend
+	effectiveSplitter := s.InstallerSplitter
 	if plan.Kind == PlanWindowsInstaller {
 		var ok bool
 		windowsBackend, ok = s.Backend.(WindowsInstallerBackend)
 		if !ok || s.InstallerSplitter == nil && plan.Windows.InstallStrategy() == installer.SplitWIM {
 			return out, ErrInstallerBuilderUnavailable
+		}
+		if plan.Windows.InstallStrategy() == installer.SplitWIM {
+			r, _, _, retainedErr := info.RetainedReaderAt()
+			if retainedErr != nil {
+				return out, retainedErr
+			}
+			if err = s.State.Transition(StagingWIM); err != nil {
+				return out, err
+			}
+			sendStage(ctx, updates, progress.StageStagingWIM)
+			prepared, cleanup, prepareErr := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
+				if transitionErr := s.State.Transition(SplittingWIM); transitionErr != nil {
+					return transitionErr
+				}
+				sendStage(ctx, updates, progress.StageSplittingWIM)
+				return nil
+			})
+			if prepareErr != nil {
+				return out, errors.Join(installer.ErrWIMSplitFailure, prepareErr)
+			}
+			defer func() { err = errors.Join(err, cleanup.Close()) }()
+			effectiveSplitter = prepared
 		}
 	}
 	if err = s.unmountDevice(ctx, target); err != nil {
@@ -159,7 +182,7 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 			return out, err
 		}
 	} else {
-		executor := WindowsInstallerExecutor{backend: windowsBackend, splitter: s.InstallerSplitter, state: s.State}
+		executor := WindowsInstallerExecutor{backend: windowsBackend, splitter: effectiveSplitter, state: s.State}
 		if err = executor.Execute(ctx, plan.Windows, info, target, updates, &out); err != nil {
 			return out, err
 		}

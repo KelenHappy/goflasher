@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -65,6 +66,28 @@ func TestSplitWIMAccountsForAllocationAndTemporarySpace(t *testing.T) {
 	allocated := ceilDiv(defaultSplitSize, cluster) + ceilDiv(size-defaultSplitSize, cluster)
 	if allocated*cluster < size {
 		t.Fatal("split allocation did not round each output to an allocation unit")
+	}
+	temporary, err := estimateSplitTemporarySpace(size, parts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if temporary <= size*2 {
+		t.Fatalf("temporary requirement=%d, must retain staged WIM and complete split set plus overhead", temporary)
+	}
+}
+
+func TestSplitTemporarySpaceIncludesMaximumOutputAndFilesystemOverhead(t *testing.T) {
+	const source = uint64(5 << 30)
+	got, err := estimateSplitTemporarySpace(source, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maximumOutput := source + source/4 + 2*(1<<20)
+	if got <= source+maximumOutput {
+		t.Fatalf("temporary bytes=%d, staged+outputs=%d", got, source+maximumOutput)
+	}
+	if _, err := estimateSplitTemporarySpace(math.MaxUint64, 2); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("overflow error=%v", err)
 	}
 }
 

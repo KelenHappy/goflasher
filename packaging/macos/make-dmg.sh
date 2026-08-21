@@ -16,9 +16,6 @@ esac
 if [[ -n "$LIBWIM_DYLIB" && ! -f "$LIBWIM_DYLIB" ]]; then
   echo "libwim dylib not found: $LIBWIM_DYLIB" >&2; exit 66
 fi
-if [[ -n "$SIGN_ID" && -z "$LIBWIM_DYLIB" ]]; then
-  echo "signed packages require the pinned LIBWIM_DYLIB input" >&2; exit 66
-fi
 
 # Apple bundle versions must be numeric even when the artifact version has a
 # prerelease suffix (for example, v0.1.0-alpha).
@@ -63,7 +60,7 @@ if [[ -n "$LIBWIM_DYLIB" ]]; then
     install_name_tool -add_rpath '@executable_path/../Frameworks' "$CONTENTS/MacOS/GoFlasher"
   fi
 else
-  echo "LIBWIM_DYLIB is empty; macOS Windows-installer building remains unavailable in this unsigned development package" >&2
+  echo "LIBWIM_DYLIB is empty; macOS Windows-installer building remains unavailable in this package" >&2
 fi
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -86,8 +83,10 @@ if [[ -n "$SIGN_ID" ]]; then
   test -n "${APPLE_ID:-}" && test -n "${APPLE_TEAM_ID:-}" && test -n "${APPLE_APP_PASSWORD:-}"
   # Nested code must be sealed from the inside out. Do not use --deep to sign:
   # each code object receives its own Hardened Runtime signature.
-  codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$DYLIB"
-  codesign --verify --strict --verbose=2 "$DYLIB"
+  if [[ -n "$LIBWIM_DYLIB" ]]; then
+    codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$DYLIB"
+    codesign --verify --strict --verbose=2 "$DYLIB"
+  fi
   codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$CONTENTS/Library/HelperTools/org.goflasher.helper"
   codesign --verify --strict --verbose=2 "$CONTENTS/Library/HelperTools/org.goflasher.helper"
   codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$APP"

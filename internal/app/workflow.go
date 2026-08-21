@@ -114,16 +114,6 @@ func (x WindowsInstallerExecutor) Execute(ctx context.Context, plan *installer.B
 	if err != nil {
 		return err
 	}
-	if plan.InstallStrategy() == installer.SplitWIM {
-		if err := x.state.Transition(StagingWIM); err != nil {
-			return err
-		}
-		sendStage(ctx, updates, progress.StageStagingWIM)
-		if err := x.state.Transition(SplittingWIM); err != nil {
-			return err
-		}
-		sendStage(ctx, updates, progress.StageSplittingWIM)
-	}
 	if err := x.state.Transition(Partitioning); err != nil {
 		return err
 	}

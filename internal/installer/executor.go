@@ -118,7 +118,7 @@ func (x Executor) Execute(ctx context.Context, plan *BuildPlan, source io.Reader
 		if !ok {
 			return result, fmt.Errorf("%w: planned WIM is missing", ErrIncomplete)
 		}
-		reader := &measuredReader{reader: newExtentReader(source, wim.source.Extents, wim.source.Size), hash: sha256.New()}
+		reader := newExtentReader(source, wim.source.Extents, wim.source.Size)
 		expectedWIMHash := verificationHash(plan, wim.destination, wim.source.Size)
 		if expectedWIMHash == "" {
 			return result, fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
@@ -150,9 +150,6 @@ func (x Executor) Execute(ctx context.Context, plan *BuildPlan, source io.Reader
 		}
 		if nextPart != plan.splitParts+1 {
 			return result, fmt.Errorf("%w: split pipeline produced %d of %d planned parts", ErrIncomplete, nextPart-1, plan.splitParts)
-		}
-		if reader.count != wim.source.Size || expectedWIMHash == "" || hex.EncodeToString(reader.hash.Sum(nil)) != expectedWIMHash {
-			return result, fmt.Errorf("%w: split pipeline did not consume the planned install.wim", ErrVerification)
 		}
 	}
 	if err := builder.Sync(); err != nil {

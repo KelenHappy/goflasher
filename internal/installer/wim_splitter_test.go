@@ -69,6 +69,68 @@ func TestNativeWIMSplitterStagesRetainedStreamAndCleansEverything(t *testing.T) 
 	}
 }
 
+func TestNativeWIMPrepareCompletesBeforePartsAreConsumed(t *testing.T) {
+	payload := bytes.Repeat([]byte("preflight-wim"), 100)
+	sum := sha256.Sum256(payload)
+	var temporary string
+	splittingReported := false
+	splitter := &NativeWIMSplitter{split: func(_ context.Context, sourcePath, output string, _ uint64, _ wim.ProgressFunc) ([]wim.Part, error) {
+		if !splittingReported {
+			t.Fatal("native split started before splitting progress")
+		}
+		temporary = filepath.Dir(sourcePath)
+		part := filepath.Join(output, "install.swm")
+		if err := os.WriteFile(part, payload, 0600); err != nil {
+			return nil, err
+		}
+		return []wim.Part{{Path: part, Size: uint64(len(payload))}}, nil
+	}}
+	prepared, cleanup, err := splitter.PrepareWithProgress(context.Background(), bytes.NewReader(payload), uint64(len(payload)), hex.EncodeToString(sum[:]), 4096, func() error {
+		splittingReported = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(temporary); err != nil {
+		t.Fatalf("prepared files not retained: %v", err)
+	}
+	emitted := 0
+	if err := prepared.Split(context.Background(), nil, uint64(len(payload)), hex.EncodeToString(sum[:]), 4096, func(part SplitPart) error {
+		emitted++
+		return nil
+	}); err != nil || emitted != 1 {
+		t.Fatalf("emit count=%d error=%v", emitted, err)
+	}
+	if err := cleanup.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanup.Close(); err != nil {
+		t.Fatalf("repeated cleanup: %v", err)
+	}
+	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+		t.Fatalf("prepared directory remains: %v", err)
+	}
+}
+
+func TestNativeWIMPrepareFailureRemovesStagedData(t *testing.T) {
+	payload := []byte("corrupt-wim")
+	sum := sha256.Sum256(payload)
+	var temporary string
+	want := errors.New("native parse failed")
+	splitter := &NativeWIMSplitter{split: func(_ context.Context, sourcePath, _ string, _ uint64, _ wim.ProgressFunc) ([]wim.Part, error) {
+		temporary = filepath.Dir(sourcePath)
+		return nil, want
+	}}
+	_, _, err := splitter.Prepare(context.Background(), bytes.NewReader(payload), uint64(len(payload)), hex.EncodeToString(sum[:]), 4096)
+	if !errors.Is(err, want) {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+		t.Fatalf("failed preparation directory remains: %v", err)
+	}
+}
+
 func TestNativeWIMSplitterRejectsStagedHashMismatchBeforeNativeCall(t *testing.T) {
 	payload := []byte("changed")
 	splitCalls := 0

@@ -81,8 +81,12 @@ Installer-capable app bundles must provide the pinned architecture-matching (or
 universal) `libwim.15.dylib` through `LIBWIM_DYLIB`. Packaging copies it only to
 `Contents/Frameworks`, gives it the `@rpath/libwim.15.dylib` install name, rejects
 unsafe external dependencies, signs nested code before the app, notarizes the
-DMG, and validates its staple. Without that explicit library input, unsigned
-development DMGs remain raw-writer-only and WIM preflight fails closed.
+DMG, and validates its staple. Without that explicit library input, the package
+remains raw-writer-only and WIM preflight fails closed.
+Code signing alone never enables the builder: public macOS workflows pass the
+library only when the independent `MACOS_WINDOWS_BUILDER_READY` approval gate is
+true. Until authenticated helper/XPC access and physical-media acceptance are
+approved, signed releases remain raw-writer-only.
 
 The native build recipe is locked in `packaging/wimlib/BUILD.lock`: wimlib
 1.14.5, Ubuntu 24.04/Clang 18 or Xcode 16.4 Apple Clang, and the recorded

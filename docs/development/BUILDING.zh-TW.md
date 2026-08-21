@@ -56,8 +56,11 @@ identity-bound的raw descriptor，並只透過in-process、partition-bounded FAT
 可建立installer的app bundle必須以`LIBWIM_DYLIB`提供固定版本且architecture相符
 （或universal）的`libwim.15.dylib`。Packaging只把它放入`Contents/Frameworks`、
 設定`@rpath/libwim.15.dylib` install name、拒絕不安全的外部dependency，並依序簽署
-nested code與主app、notarize DMG及驗證staple。未提供library時，unsigned development
-DMG只保留raw writer，WIM preflight會fail closed。
+nested code與主app、notarize DMG及驗證staple。未提供library時，package只保留raw
+writer，WIM preflight會fail closed。
+Code signing本身不會啟用builder；公開macOS workflow只在獨立的
+`MACOS_WINDOWS_BUILDER_READY`核准gate為true時傳入library。在authenticated helper/XPC
+與實體媒體驗收核准以前，signed release仍只提供raw writer。
 
 ## 從原始碼建置
 
