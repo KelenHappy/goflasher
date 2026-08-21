@@ -2,7 +2,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck disable=SC1091
-source "$root/packaging/wimlib/BUILD.lock"
+source "$root/packaging/wimlib/lock.sh"
+load_wimlib_lock "$root/packaging/wimlib/BUILD.lock"
 if [[ $# -ne 2 ]]; then echo "usage: $0 SOURCE_TARBALL OUTPUT_DIR" >&2; exit 64; fi
 source_tar=$(realpath "$1"); output=$(realpath -m "$2")
 [[ "$WIMLIB_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "unreviewed WIMLIB_SOURCE_SHA256" >&2; exit 65; }
@@ -16,7 +17,7 @@ esac
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 tar --no-same-owner -xf "$source_tar" -C "$work"
 src="$work/wimlib-$WIMLIB_VERSION"; test -d "$src"
-(cd "$src" && CC=clang ./configure --prefix=/usr $CONFIGURE_FLAGS && make -j2)
+(cd "$src" && CC=clang ./configure --prefix=/usr "${WIMLIB_CONFIGURE_FLAGS[@]}" && make -j2)
 mkdir -p "$output"
 case "$(uname -s)" in
   Linux) install -m755 "$src/.libs/libwim.so.15" "$output/libwim.so.15" ;;

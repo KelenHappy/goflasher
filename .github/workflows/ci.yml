@@ -43,19 +43,9 @@ jobs:
         run: |
           set -euo pipefail
           lock=packaging/wimlib/BUILD.lock
-          test -f "$lock"
-          # shellcheck disable=SC1090
-          source "$lock"
-          for value in WIMLIB_VERSION WIMLIB_SOURCE WIMLIB_SOURCE_URL WIMLIB_SOURCE_SHA256; do
-            test -n "${!value:-}"
-          done
-          test "$WIMLIB_SOURCE" = "wimlib-$WIMLIB_VERSION.tar.gz"
-          test "${WIMLIB_SOURCE_URL##*/}" = "$WIMLIB_SOURCE"
-          case "$WIMLIB_SOURCE_URL" in
-            https://*) ;;
-            *) echo 'WIMLIB_SOURCE_URL must use HTTPS' >&2; exit 65 ;;
-          esac
-          [[ "$WIMLIB_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          # Source parser code, never the data-only lock file.
+          source packaging/wimlib/lock.sh
+          load_wimlib_lock "$lock"
           source_path="$RUNNER_TEMP/$WIMLIB_SOURCE"
           curl --fail --location --proto '=https' --tlsv1.2 "$WIMLIB_SOURCE_URL" -o "$source_path"
           if command -v sha256sum >/dev/null; then
@@ -63,7 +53,10 @@ jobs:
           else
             actual=$(shasum -a 256 "$source_path" | awk '{print $1}')
           fi
-          test "$actual" = "$WIMLIB_SOURCE_SHA256"
+          if [[ "$actual" != "$WIMLIB_SOURCE_SHA256" ]]; then
+            echo 'wimlib source hash mismatch' >&2
+            exit 65
+          fi
           printf 'WIMLIB_SOURCE_PATH=%s\n' "$source_path" >> "$GITHUB_ENV"
       - name: Build and verify native artifact
         run: |
