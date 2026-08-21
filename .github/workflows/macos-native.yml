@@ -1,0 +1,56 @@
+name: macOS Native
+
+on:
+  pull_request:
+    paths:
+      - 'internal/disk/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/macos-native.yml'
+
+  workflow_dispatch:
+
+concurrency:
+  group: macos-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: macOS native (${{ matrix.arch }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: amd64
+
+          - runner: macos-15
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify architecture
+        run: |
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+
+      - name: Test native framework ABI
+        run: |
+          go test -v \
+            ./internal/disk/darwin/native \
+            -run '^TestPhase1'
+
+      - name: Test Darwin disk adapter
+        run: |
+          go test -v ./internal/disk/darwin
