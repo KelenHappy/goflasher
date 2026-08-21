@@ -1,6 +1,7 @@
 package image
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -52,6 +53,67 @@ func TestClassifyLinuxHybridISOByFilesystemAndPartitionTable(t *testing.T) {
 	defer info.CloseSource()
 	if got, err := Classify(info); err != nil || got != LinuxHybridISO {
 		t.Fatalf("Classify() = %q, %v", got, err)
+	}
+}
+
+func TestClassifyLinuxHybridISOWithWholeImageAndEmbeddedPartitions(t *testing.T) {
+	b := installerISO(false, true)
+	totalSectors := uint32(len(b) / 512)
+	// A type-zero entry covers the complete image, while an EFI partition is
+	// embedded inside that range.
+	b[446+4] = 0
+	binary.LittleEndian.PutUint32(b[446+8:], 0)
+	binary.LittleEndian.PutUint32(b[446+12:], totalSectors)
+	b[462+4] = 0xef
+	binary.LittleEndian.PutUint32(b[462+8:], 4)
+	binary.LittleEndian.PutUint32(b[462+12:], 8)
+
+	path := filepath.Join(t.TempDir(), "distribution.iso")
+	if err := os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.CloseSource()
+	if got, err := Classify(info); err != nil || got != LinuxHybridISO {
+		t.Fatalf("Classify() = %q, %v", got, err)
+	}
+}
+
+func TestClassifyDecodedRemovesTemporaryFile(t *testing.T) {
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	path := filepath.Join(t.TempDir(), "distribution.iso.gz")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	if _, err := zw.Write(installerISO(false, true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionGzip})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer info.CloseSource()
+	if got, err := Classify(info); err != nil || got != LinuxHybridISO {
+		t.Fatalf("Classify() = %q, %v", got, err)
+	}
+	entries, err := os.ReadDir(temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("decoded temporary files remain: %v", entries)
 	}
 }
 

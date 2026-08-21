@@ -6,8 +6,14 @@ import "time"
 type Stage string
 
 const (
+	StageInspecting   Stage = "inspecting"
+	StagePlanning     Stage = "planning"
+	StageStagingWIM   Stage = "staging_wim"
+	StageSplittingWIM Stage = "splitting_wim"
+	StagePartitioning Stage = "partitioning"
 	// StageFormatting reports creation of a new filesystem.
 	StageFormatting Stage = "formatting"
+	StageExtracting Stage = "extracting"
 	// StageWriting reports an uncompressed image write.
 	StageWriting Stage = "writing"
 	// StageDecompressWriting reports decompression directly into the target.
@@ -15,7 +21,8 @@ const (
 	// StageFlushing reports that buffered writes are becoming durable.
 	StageFlushing Stage = "flushing"
 	// StageVerifying reports a target read-back pass.
-	StageVerifying Stage = "verifying"
+	StageVerifying           Stage = "verifying"
+	StageVerifyingFilesystem Stage = "verifying_filesystem"
 	// StageEjecting reports release of the target for safe removal.
 	StageEjecting Stage = "ejecting"
 )

@@ -44,6 +44,21 @@ process 執行。Windows 不設 privileged helper、service 或跨程序 IPC，b
 
 三平台CI只能證明source可編譯及隔離測試通過，不能證明真實硬體上的destructive access；release仍必須通過 `TESTING.zh-TW.md` 的實體媒體驗收。
 
+### macOS Windows installer builder邊界
+
+macOS installer builder目前只是**開發中的migration path**，不是production-ready
+功能。它沿用Disk Arbitration/IOKit identity refresh、unmount/eject、exclusive且
+identity-bound的raw descriptor，並只透過in-process、partition-bounded FAT32 view
+寫入；建立媒體時不執行`diskutil`、`hdiutil`、`mount`、`mkfs.fat`或WIM CLI。
+在authenticated helper/XPC接管destructive raw access並通過實體媒體gate以前，
+公開release不得宣稱或啟用此builder。
+
+可建立installer的app bundle必須以`LIBWIM_DYLIB`提供固定版本且architecture相符
+（或universal）的`libwim.15.dylib`。Packaging只把它放入`Contents/Frameworks`、
+設定`@rpath/libwim.15.dylib` install name、拒絕不安全的外部dependency，並依序簽署
+nested code與主app、notarize DMG及驗證staple。未提供library時，unsigned development
+DMG只保留raw writer，WIM preflight會fail closed。
+
 ## 從原始碼建置
 
 先執行：

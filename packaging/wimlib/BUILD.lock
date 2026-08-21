@@ -1,0 +1,10 @@
+# Reviewed native dependency inputs. Changes require a security review.
+WIMLIB_VERSION=1.14.4
+WIMLIB_SOURCE=wimlib-1.14.4.tar.gz
+WIMLIB_SOURCE_URL=https://wimlib.net/downloads/wimlib-1.14.4.tar.gz
+# Populate from the upstream release checksum before enabling the native CI job.
+# The build script refuses an empty or non-SHA256 value.
+WIMLIB_SOURCE_SHA256=
+LINUX_TOOLCHAIN=ubuntu-24.04-clang-18
+MACOS_TOOLCHAIN=xcode-16.4-apple-clang
+CONFIGURE_FLAGS=--disable-static --enable-shared --without-ntfs-3g --without-fuse

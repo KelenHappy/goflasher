@@ -2,7 +2,9 @@
 
 [English](THIRD_PARTY_NOTICES.md)
 
-本聲明記載 GoFlasher 明確處理的第三方元件；不一定完整列出所有間接 Go 相依套件。GoFlasher 的 GPL-3.0 授權不會取代這些元件各自適用的聲明與授權條款。元件僅適用於包含該元件的平台版本。
+本聲明記載目前已明確檢視的第三方元件；final artifact完整compiled Go module inventory
+仍必須另行產生及核准，本文件本身不代表已完成clearance。GoFlasher的GPL-3.0不會取代
+各元件條款；元件僅適用於包含它的平台artifact。
 
 ## github.com/ulikunitz/xz
 
@@ -23,12 +25,14 @@ Windows portable ZIP會在頂層放置本聲明，並將所有編譯進executabl
 
 ## github.com/ebitengine/purego
 
-- 用途：不使用 CGo，為有文件說明的 macOS 系統框架提供 Go 綁定
+- 用途：Linux及macOS bundled libwim dynamic-library bridge，以及不使用CGo的
+  macOS system framework binding
 - 版本：v0.10.2（來自 `go.mod`）
 - 授權：Apache License 2.0
 - 上游：<https://github.com/ebitengine/purego>
 
-GoFlasher 目前僅在 Darwin/macOS 原生介面卡中使用 PureGo。PureGo 包含衍生自 Go runtime 的程式碼；這些部分受 Go 專案的 BSD 3-Clause 授權條款規範。
+GoFlasher在Linux與macOS libwim bridge及macOS native adapter使用PureGo。PureGo
+包含衍生自Go runtime的程式碼；該部分適用Go專案BSD 3-Clause條款。
 
 包含 PureGo 的 macOS 套件必須包含：
 
@@ -36,3 +40,29 @@ GoFlasher 目前僅在 Darwin/macOS 原生介面卡中使用 PureGo。PureGo 包
 - `THIRD_PARTY_NOTICES.zh-TW.md`
 - PureGo 未修改的上游 `LICENSE`
 - 涵蓋衍生自 Go runtime 部分的 Go 專案 `LICENSE`
+
+Linux package亦有相同義務，並將文字安裝於
+`/usr/share/doc/goflasher/third-party/`。
+
+## wimlib / libwim — 尚未核准發布
+
+- 預定版本：1.14.4
+- 預定用途：透過PureGo bridge開啟及分割WIM
+- 實際artifact整體授權分類：**未確認**
+- 與GoFlasher GPL-3.0散布方式相容性：**未確認**
+
+不得從專案名稱、upstream首頁或單一頂層COPYING推定結論。發布前必須以實際source
+snapshot、全部適用source header與license/notice、build configuration、啟用的optional
+feature，以及每個實際link或bundle的native transitive dependency逐項分類及分析GPL-3.0
+相容性。Release record亦須保存source/binary SHA-256、toolchain/linker版本、flags、patch、
+dependency report、license text、legal approval，以及已驗證可取得且包含build/install與
+適用relink材料的Corresponding Source。在完成前禁止散布libwim，Windows builder必須顯示
+ unavailable。
+
+## UEFI component — 禁止進入release
+
+UEFI維持non-MVP；GoFlasher不bundle UEFI implementation、firmware、shim、bootloader或
+development package。未針對實際source snapshot/binary確認`GPL-2.0-only`、
+`GPL-2.0-or-later`、linking/syscall/firmware/runtime exception、內含component、GPL-3.0
+相容性及全部散布義務以前，不得進入release。Gate會拒絕含已知UEFI component名稱的
+payload。使用者提供ISO內的檔案是輸入資料，不屬於GoFlasher application package。
