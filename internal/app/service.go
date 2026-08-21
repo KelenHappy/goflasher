@@ -146,32 +146,43 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 
 func (s *Service) inspectAndPlan(ctx context.Context, info image.Info, target device.Device, updates chan<- progress.Update) (image.Info, WorkflowPlan, error) {
 	trackState := s.State.State() != Idle
-	if trackState {
-		if err := s.State.Transition(Inspecting); err != nil {
-			return info, WorkflowPlan{}, err
-		}
+	if err := transitionWorkflowState(s.State, trackState, Inspecting); err != nil {
+		return info, WorkflowPlan{}, err
 	}
 	sendStage(ctx, updates, progress.StageInspecting)
 	inspected, err := inspectImage(ctx, info)
 	if err != nil {
 		return info, WorkflowPlan{}, err
 	}
-	if trackState {
-		if err := s.State.Transition(Planning); err != nil {
-			return inspected, WorkflowPlan{}, errors.Join(err, inspected.CloseSource())
-		}
+	if err := transitionWorkflowState(s.State, trackState, Planning); err != nil {
+		return inspected, WorkflowPlan{}, errors.Join(err, inspected.CloseSource())
 	}
 	sendStage(ctx, updates, progress.StagePlanning)
+	plan, err := s.workflowPlanner().Plan(ctx, inspected, target)
+	if err != nil {
+		return inspected, WorkflowPlan{}, errors.Join(err, inspected.CloseSource())
+	}
+	return inspected, plan, nil
+}
+
+func transitionWorkflowState(state *StateMachine, enabled bool, next State) error {
+	if !enabled {
+		return nil
+	}
+	return state.Transition(next)
+}
+
+func (s *Service) workflowPlanner() WorkflowPlanner {
 	var splitPreflight func(context.Context) error
 	if preflight, ok := s.InstallerSplitter.(interface{ Preflight(context.Context) error }); ok {
 		splitPreflight = preflight.Preflight
 	}
 	_, windowsSupported := s.Backend.(WindowsInstallerBackend)
-	plan, err := (WorkflowPlanner{TemporarySpace: s.TemporarySpace, SplitPreflight: splitPreflight, WindowsSupported: windowsSupported}).Plan(ctx, inspected, target)
-	if err != nil {
-		return inspected, WorkflowPlan{}, errors.Join(err, inspected.CloseSource())
+	return WorkflowPlanner{
+		TemporarySpace:   s.TemporarySpace,
+		SplitPreflight:   splitPreflight,
+		WindowsSupported: windowsSupported,
 	}
-	return inspected, plan, nil
 }
 
 func (s *Service) prepareWindowsInstaller(ctx context.Context, info image.Info, plan *WorkflowPlan, updates chan<- progress.Update) (WindowsInstallerBackend, installer.WIMSplitter, func() error, error) {
@@ -180,32 +191,47 @@ func (s *Service) prepareWindowsInstaller(ctx context.Context, info image.Info, 
 		return nil, s.InstallerSplitter, noCleanup, nil
 	}
 	backend, ok := s.Backend.(WindowsInstallerBackend)
-	if !ok || s.InstallerSplitter == nil && plan.Windows.InstallStrategy() == installer.SplitWIM {
+	if !ok {
 		return nil, nil, noCleanup, ErrInstallerBuilderUnavailable
 	}
 	if plan.Windows.InstallStrategy() != installer.SplitWIM {
 		return backend, s.InstallerSplitter, noCleanup, nil
 	}
-	r, _, _, err := info.RetainedReaderAt()
+	if s.InstallerSplitter == nil {
+		return nil, nil, noCleanup, ErrInstallerBuilderUnavailable
+	}
+	prepared, cleanup, err := s.prepareSplitWIM(ctx, info, plan, updates)
 	if err != nil {
 		return nil, nil, noCleanup, err
 	}
+	return backend, prepared, cleanup, nil
+}
+
+func (s *Service) prepareSplitWIM(ctx context.Context, info image.Info, plan *WorkflowPlan, updates chan<- progress.Update) (installer.WIMSplitter, func() error, error) {
+	r, _, _, err := info.RetainedReaderAt()
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := s.State.Transition(StagingWIM); err != nil {
-		return nil, nil, noCleanup, err
+		return nil, nil, err
 	}
 	sendStage(ctx, updates, progress.StageStagingWIM)
 	finalized, prepared, cleanup, err := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
-		if err := s.State.Transition(SplittingWIM); err != nil {
-			return err
-		}
-		sendStage(ctx, updates, progress.StageSplittingWIM)
-		return nil
+		return s.startWIMSplit(ctx, updates)
 	})
 	if err != nil {
-		return nil, nil, noCleanup, errors.Join(installer.ErrWIMSplitFailure, err)
+		return nil, nil, errors.Join(installer.ErrWIMSplitFailure, err)
 	}
 	plan.Windows = finalized
-	return backend, prepared, cleanup.Close, nil
+	return prepared, cleanup.Close, nil
+}
+
+func (s *Service) startWIMSplit(ctx context.Context, updates chan<- progress.Update) error {
+	if err := s.State.Transition(SplittingWIM); err != nil {
+		return err
+	}
+	sendStage(ctx, updates, progress.StageSplittingWIM)
+	return nil
 }
 
 func (s *Service) executePlan(ctx context.Context, plan WorkflowPlan, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update, windowsBackend WindowsInstallerBackend, splitter installer.WIMSplitter, out *RunResult) error {

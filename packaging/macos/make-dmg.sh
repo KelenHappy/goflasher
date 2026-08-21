@@ -40,7 +40,7 @@ esac
   exit 66
 }
 
-# libwim is part of the released Windows-installer builder.
+# libwim is the bundled macOS WIM-splitting backend.
 [[ -n "$LIBWIM_DYLIB" ]] || {
   echo "LIBWIM_DYLIB is required for release packaging" >&2
   exit 65
