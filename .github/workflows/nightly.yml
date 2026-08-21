@@ -1,0 +1,75 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Parser fuzz smoke
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz manifest path normalizer
+        run: |
+          go test \
+            ./internal/installer \
+            -run '^$' \
+            -fuzz FuzzManifestPathNormalizer \
+            -fuzztime 10s
+
+      - name: Fuzz ISO manifest parser
+        run: |
+          go test \
+            ./internal/installer/iso \
+            -run '^$' \
+            -fuzz FuzzISOManifestParser \
+            -fuzztime 10s
+
+      - name: Fuzz GPT and FAT32 verifier
+        run: |
+          go test \
+            ./internal/verify \
+            -run '^$' \
+            -fuzz FuzzGPTAndFAT32Verifier \
+            -fuzztime 10s
+
+      - name: Fuzz helper protocol decoder
+        run: |
+          go test \
+            ./internal/privilege \
+            -run '^$' \
+            -fuzz FuzzSessionProtocolDecoder \
+            -fuzztime 10s
+
+  vulnerabilities:
+    name: Vulnerability scan
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan dependencies
+        run: |
+          govulncheck ./...
