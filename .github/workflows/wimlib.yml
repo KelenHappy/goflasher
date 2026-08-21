@@ -1,0 +1,146 @@
+name: Bundled wimlib
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/wimlib/**'
+      - 'internal/wim/**'
+      - 'cmd/wim-smoke/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/wimlib.yml'
+
+  workflow_dispatch:
+
+concurrency:
+  group: wimlib-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bundled-wimlib:
+    name: Bundled wimlib (${{ matrix.os }}-${{ matrix.arch }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: amd64
+
+          - runner: macos-15-intel
+            os: macos
+            arch: amd64
+
+          - runner: macos-15
+            os: macos
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned Linux toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 make pkg-config
+
+      - name: Select Xcode 16.4
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select \
+            -s /Applications/Xcode_16.4.app/Contents/Developer
+
+          xcodebuild -version
+          clang --version
+
+      - name: Fetch pinned wimlib source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lock=packaging/wimlib/BUILD.lock
+
+          # Parse BUILD.lock as data. Never source the lock file itself.
+          source packaging/wimlib/lock.sh
+          load_wimlib_lock "$lock"
+
+          source_path="$RUNNER_TEMP/$WIMLIB_SOURCE"
+
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --tlsv1.2 \
+            "$WIMLIB_SOURCE_URL" \
+            -o "$source_path"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$source_path" | awk '{print $1}')
+          else
+            actual=$(shasum -a 256 "$source_path" | awk '{print $1}')
+          fi
+
+          if [[ "$actual" != "$WIMLIB_SOURCE_SHA256" ]]; then
+            echo "wimlib source hash mismatch" >&2
+            echo "expected: $WIMLIB_SOURCE_SHA256" >&2
+            echo "actual:   $actual" >&2
+            exit 65
+          fi
+
+          printf 'WIMLIB_SOURCE_PATH=%s\n' \
+            "$source_path" >> "$GITHUB_ENV"
+
+      - name: Build native artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          packaging/wimlib/build.sh \
+            "$WIMLIB_SOURCE_PATH" \
+            "$RUNNER_TEMP/wimlib-out"
+
+      - name: Verify native artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          library=$(
+            find "$RUNNER_TEMP/wimlib-out" \
+              -maxdepth 1 \
+              -type f \
+              \( \
+                -name 'libwim.so.15' \
+                -o \
+                -name 'libwim.15.dylib' \
+              \) \
+              -print \
+              -quit
+          )
+
+          if [[ -z "$library" ]]; then
+            echo "libwim artifact not found" >&2
+            exit 65
+          fi
+
+          hash=$(
+            awk '{print $1}' \
+              "$RUNNER_TEMP/wimlib-out/SHA256SUMS"
+          )
+
+          packaging/wimlib/verify.sh \
+            "$library" \
+            '${{ matrix.os }}' \
+            '${{ matrix.arch }}' \
+            "$hash" \
+            "$RUNNER_TEMP/wimlib-out/smoke.wim"
