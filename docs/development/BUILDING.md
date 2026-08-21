@@ -67,6 +67,36 @@ The three-platform CI matrix proves that each native source set compiles and its
 isolated tests pass. It does not prove destructive access on real hardware; the
 physical-media acceptance gate in `TESTING.md` remains mandatory for releases.
 
+### macOS Windows-installer builder boundary
+
+The macOS installer builder is a **development-only migration path**, not a
+production-ready feature. It reuses Disk Arbitration/IOKit identity refresh,
+unmount/eject, an exclusive identity-bound raw descriptor, and an in-process
+partition-bounded FAT32 view; it never invokes `diskutil`, `hdiutil`, `mount`,
+`mkfs.fat`, or a WIM command-line program while building media. Public releases
+must not advertise or enable this builder until destructive raw access is owned
+by an authenticated helper/XPC protocol and the physical-media gate passes.
+
+Installer-capable app bundles must provide the pinned architecture-matching (or
+universal) `libwim.15.dylib` through `LIBWIM_DYLIB`. Packaging copies it only to
+`Contents/Frameworks`, gives it the `@rpath/libwim.15.dylib` install name, rejects
+unsafe external dependencies, signs nested code before the app, notarizes the
+DMG, and validates its staple. Without that explicit library input, the package
+remains raw-writer-only and WIM preflight fails closed.
+Code signing alone never enables the builder: public macOS workflows pass the
+library only when the independent `MACOS_WINDOWS_BUILDER_READY` approval gate is
+true. Until authenticated helper/XPC access and physical-media acceptance are
+approved, signed releases remain raw-writer-only.
+
+The native build recipe is locked in `packaging/wimlib/BUILD.lock`: wimlib
+1.14.5, Ubuntu 24.04/Clang 18 or Xcode 16.4 Apple Clang, and the recorded
+configure flags. CI builds Linux amd64 and both macOS architectures (Linux
+arm64 is not currently a release target), then checks architecture, dynamic
+dependencies, exported symbols, artifact SHA-256, the library-reported ABI and
+version, and a real PureGo open/split smoke fixture. The reviewed upstream
+source SHA-256 must be populated before that native job or any installer-capable
+release can be enabled; the scripts deliberately reject an unset digest.
+
 Build on (or cross-compile specifically for) every target OS and architecture;
 one binary cannot run unchanged on Linux, Windows, and macOS. Fyne's desktop
 build uses CGo, so a native build environment is the simplest supported route.

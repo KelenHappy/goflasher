@@ -14,6 +14,44 @@ permissions:
   contents: read
 
 jobs:
+  bundled-wimlib:
+    name: Bundled wimlib (${{ matrix.os }}-${{ matrix.arch }})
+    if: vars.WIMLIB_SOURCE_URL != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: amd64
+          - runner: macos-15-intel
+            os: macos
+            arch: amd64
+          - runner: macos-15
+            os: macos
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install pinned Linux build toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang-18 make pkg-config libssl-dev libxml2-dev
+      - name: Fetch pinned source release
+        run: |
+          source packaging/wimlib/BUILD.lock
+          test "$WIMLIB_SOURCE_URL" = 'https://wimlib.net/downloads/wimlib-1.14.5.tar.gz'
+          curl --fail --location --proto '=https' --tlsv1.2 "$WIMLIB_SOURCE_URL" -o "$RUNNER_TEMP/wimlib-1.14.5.tar.gz"
+      - name: Build and verify native artifact
+        run: |
+          packaging/wimlib/build.sh "$RUNNER_TEMP/wimlib-1.14.5.tar.gz" "$RUNNER_TEMP/wimlib-out"
+          library=$(find "$RUNNER_TEMP/wimlib-out" -maxdepth 1 -type f \( -name 'libwim.so.15' -o -name 'libwim.15.dylib' \) -print -quit)
+          hash=$(awk '{print $1}' "$RUNNER_TEMP/wimlib-out/SHA256SUMS")
+          packaging/wimlib/verify.sh "$library" '${{ matrix.os }}' '${{ matrix.arch }}' "$hash" "$RUNNER_TEMP/wimlib-out/smoke.wim"
+
   macos-native-phase1:
     name: macOS native framework Phase 1
     strategy:
@@ -67,6 +105,34 @@ jobs:
         if: runner.os == 'Windows' || runner.os == 'macOS'
         run: go test -tags "fyne ci" ./cmd/usbwriter
 
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Bounded parser fuzz smoke tests
+        run: |
+          go test ./internal/installer -run '^$' -fuzz FuzzManifestPathNormalizer -fuzztime 2s
+          go test ./internal/installer/iso -run '^$' -fuzz FuzzISOManifestParser -fuzztime 2s
+          go test ./internal/verify -run '^$' -fuzz FuzzGPTAndFAT32Verifier -fuzztime 2s
+          go test ./internal/privilege -run '^$' -fuzz FuzzSessionProtocolDecoder -fuzztime 2s
+
+  windows-evaluation-iso:
+    if: vars.WINDOWS_EVALUATION_TEST_READY == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run authorized non-destructive evaluation ISO test
+        env:
+          GOFLASHER_WINDOWS_EVAL_ISO: ${{ vars.WINDOWS_EVALUATION_ISO_PATH }}
+        run: go test -v ./internal/installer -run '^TestAuthorizedWindowsEvaluationISO$'
   quality:
     runs-on: ubuntu-latest
     steps:
@@ -118,12 +184,18 @@ jobs:
           test -n "$rpm_path"
           dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F THIRD_PARTY_NOTICES.md
           dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F github.com_ulikunitz_xz_LICENSE
+          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F github.com_ebitengine_purego_LICENSE
+          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F THIRD_PARTY_NOTICES.zh-TW.md
           rpm -qlp "$rpm_path" | grep -F THIRD_PARTY_NOTICES.md
           rpm -qlp "$rpm_path" | grep -F github.com_ulikunitz_xz_LICENSE
+          rpm -qlp "$rpm_path" | grep -F github.com_ebitengine_purego_LICENSE
+          rpm -qlp "$rpm_path" | grep -F THIRD_PARTY_NOTICES.zh-TW.md
           arch_path=dist/goflasher-0.0.0_ci-1-x86_64.pkg.tar.zst
           test -f "$arch_path"
           tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md
           tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE
+          tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/third-party/github.com_ebitengine_purego_LICENSE
+          tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.zh-TW.md
           tar --zstd -xOf "$arch_path" ./.PKGINFO | grep -F 'depend = polkit'
 
   package-windows:

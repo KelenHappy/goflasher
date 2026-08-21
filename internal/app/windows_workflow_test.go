@@ -15,6 +15,7 @@ import (
 
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/image"
+	"github.com/goflasher/goflasher/internal/installer"
 )
 
 type noRawWriteBackend struct{ openWriter, writes, unmounts int }
@@ -157,6 +158,31 @@ func TestWindowsInstallerNeverFallsBackToRawWriter(t *testing.T) {
 	if backend.unmounts != 0 {
 		t.Fatalf("device unmounted before fail-closed decision: %d", backend.unmounts)
 	}
+}
+
+func TestWindowsInstallerRejectsMissingBundledLibraryBeforeUnmount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "windows.iso")
+	data := windowsISOFixture()
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	backend := &installerWorkflowBackend{target: device.Device{ID: "target", Size: 80 << 20, IsAllowed: true}}
+	missing := errors.New("bundled libwim missing")
+	splitter := &availabilityFailingSplitter{err: missing}
+	_, err := (&Service{Backend: backend, InstallerSplitter: splitter}).Run(context.Background(), image.Info{Path: path, Format: image.FormatISO, Compression: image.CompressionNone}, backend.target, RunOptions{}, nil)
+	if !errors.Is(err, ErrInstallerBuilderUnavailable) || !errors.Is(err, missing) {
+		t.Fatalf("error=%v", err)
+	}
+	if backend.unmounted != 0 || backend.opened != 0 {
+		t.Fatalf("destructive calls before availability decision: %+v", backend)
+	}
+}
+
+type availabilityFailingSplitter struct{ err error }
+
+func (s *availabilityFailingSplitter) Preflight(context.Context) error { return s.err }
+func (*availabilityFailingSplitter) Split(context.Context, io.Reader, uint64, string, uint64, func(installer.SplitPart) error) error {
+	return errors.New("unexpected split")
 }
 
 func windowsISOFixture() []byte {

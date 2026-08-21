@@ -476,8 +476,47 @@ func (c *guiController) startWrite() {
 		return
 	}
 	_ = c.machine.Transition(core.Confirming)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
 	c.lock(true)
-	body := widget.NewLabel(c.tr.T("confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial, filepath.Base(c.info.Path), float64(c.info.CompressedSize)/(1<<20)))
+	c.view.start.SetText(c.tr.T("action.cancel"))
+	c.view.status.SetText(c.tr.T("stage.inspecting"))
+	c.view.bar.Show()
+	c.view.bar.SetValue(0)
+	go func() {
+		preview, err := (&core.Service{Backend: c.backend}).Preview(ctx, c.info, c.selected)
+		fyne.Do(func() { c.finishPreview(preview, err) })
+	}()
+}
+
+func (c *guiController) finishPreview(preview core.PlanSummary, err error) {
+	c.cancel = nil
+	if c.closing {
+		c.closeNow()
+		return
+	}
+	if err != nil {
+		_ = c.machine.Transition(core.Ready)
+		c.lock(false)
+		c.view.start.SetText(c.tr.T("action.start"))
+		if errors.Is(err, context.Canceled) {
+			c.view.status.SetText(c.tr.T("status.cancelled"))
+			return
+		}
+		dialog.ShowError(fmt.Errorf("%s: %w", c.tr.T(core.ErrorMessageID(err)), err), c.view.window)
+		return
+	}
+	bodyText := c.tr.T("confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial, filepath.Base(c.info.Path), float64(c.info.CompressedSize)/(1<<20))
+	if preview.Class == string(core.ImageWindowsISO) {
+		split := c.tr.T("bool.false")
+		reason := c.tr.T("plan.split.reason.none")
+		if preview.SplitRequired {
+			split = c.tr.T("bool.true")
+			reason = c.tr.T("plan.split.reason.fat32")
+		}
+		bodyText += "\n\n" + c.tr.T("plan.windows.summary", preview.PartitionTable, preview.Filesystem, preview.BootMode, split, reason, float64(preview.RequiredCapacity)/(1<<30), float64(preview.RequiredTemporarySpace)/(1<<30), float64(preview.AvailableTemporarySpace)/(1<<30))
+	}
+	body := widget.NewLabel(bodyText)
 	body.Wrapping = fyne.TextWrapWord
 	confirm := dialog.NewCustomConfirm(c.tr.T("confirm.title"), c.tr.T("confirm.accept"), c.tr.T("action.cancel"), body, c.confirmWrite, c.view.window)
 	confirm.SetDismissText(c.tr.T("action.cancel"))
@@ -486,7 +525,10 @@ func (c *guiController) startWrite() {
 
 func writingState(state core.State) bool {
 	switch state {
-	case core.Writing, core.Flushing, core.Verifying, core.Ejecting, core.Unmounting:
+	case core.Confirming, core.Inspecting, core.Planning, core.StagingWIM,
+		core.SplittingWIM, core.Partitioning, core.Formatting, core.Extracting,
+		core.Writing, core.Flushing, core.Verifying, core.VerifyingFilesystem,
+		core.Ejecting, core.Unmounting:
 		return true
 	default:
 		return false
@@ -518,6 +560,7 @@ func (c *guiController) confirmWrite(ok bool) {
 	if !ok {
 		_ = c.machine.Transition(core.Ready)
 		c.lock(false)
+		c.view.start.SetText(c.tr.T("action.start"))
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -573,7 +616,11 @@ func (c *guiController) finishWrite(result core.RunResult, runErr error) {
 	} else {
 		c.view.status.SetText(c.tr.T("status.complete"))
 		c.view.bar.SetValue(1)
-		c.appendLog(c.tr.T("log.complete", result.BytesWritten, localBool(c.tr, result.Verified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
+		if result.PlanKind == core.PlanWindowsInstaller {
+			c.appendLog(c.tr.T("log.installer.complete", result.FilesWritten, result.WIMParts, localBool(c.tr, result.SemanticVerified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
+		} else {
+			c.appendLog(c.tr.T("log.complete", result.BytesWritten, localBool(c.tr, result.Verified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
+		}
 		c.view.metrics.SetText(c.tr.T("metrics.complete", result.AverageBytesPerSecond/(1<<20), result.Elapsed.Round(time.Second)))
 		c.view.start.SetText(c.tr.T("action.restart"))
 	}
@@ -612,12 +659,24 @@ func verifyProgress(stage progress.Stage, ratio float64) float64 {
 
 func writeProgress(stage progress.Stage, ratio float64) float64 {
 	switch stage {
+	case progress.StageInspecting:
+		return 0.02
+	case progress.StagePlanning:
+		return 0.05
+	case progress.StageStagingWIM, progress.StageSplittingWIM:
+		return 0.10
+	case progress.StagePartitioning:
+		return 0.15
 	case progress.StageFormatting:
 		return ratio
+	case progress.StageExtracting:
+		return 0.30 + ratio*0.60
 	case progress.StageWriting, progress.StageDecompressWriting:
 		return ratio * 0.90
 	case progress.StageFlushing:
 		return 0.90
+	case progress.StageVerifyingFilesystem:
+		return 0.94
 	case progress.StageEjecting:
 		return 0.95
 	default:

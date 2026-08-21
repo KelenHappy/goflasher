@@ -7,7 +7,18 @@ import (
 	"fmt"
 )
 
-const ProtocolVersion uint32 = 1
+const ProtocolVersion uint32 = 2
+
+const (
+	OperationWrite            = "write"
+	OperationFormat           = "format"
+	OperationInstallerSession = "installer-session"
+	SessionWriteAt            = "write-at"
+	SessionReadAt             = "read-at"
+	SessionFlush              = "flush"
+	SessionCancel             = "cancel"
+	SessionClose              = "close"
+)
 
 var (
 	ErrIncompatible    = errors.New("privileged helper protocol is incompatible")
@@ -28,10 +39,32 @@ type Target struct {
 }
 
 type Request struct {
-	Version       uint32
-	Operation     string
-	Target        Target
-	Verify, Eject bool
+	Version           uint32
+	Operation         string
+	Target            Target
+	Verify, Eject     bool
+	LogicalSectorSize uint32
+}
+
+type SessionCommand struct {
+	Version uint32 `json:"version"`
+	Kind    string `json:"kind"`
+	Offset  uint64 `json:"offset,omitempty"`
+	Length  uint32 `json:"length,omitempty"`
+}
+
+type SessionResponse struct {
+	Version uint32 `json:"version"`
+	OK      bool   `json:"ok"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+	Length  uint32 `json:"length,omitempty"`
+}
+
+type SessionError struct{ Code, Message string }
+
+func (e *SessionError) Error() string {
+	return fmt.Sprintf("privileged session %s: %s", e.Code, e.Message)
 }
 
 // Validate is a well-formedness check on the request, NOT a security boundary.
@@ -45,11 +78,33 @@ func (r Request) Validate() error {
 	if r.Version != ProtocolVersion {
 		return fmt.Errorf("%w: got %d, want %d", ErrIncompatible, r.Version, ProtocolVersion)
 	}
-	if r.Operation != "write" && r.Operation != "format" {
+	if r.Operation != OperationWrite && r.Operation != OperationFormat && r.Operation != OperationInstallerSession {
 		return fmt.Errorf("unsupported privileged operation %q", r.Operation)
+	}
+	if r.Operation == OperationInstallerSession && (r.LogicalSectorSize < 512 || r.LogicalSectorSize&(r.LogicalSectorSize-1) != 0) {
+		return ErrInvalidTarget
 	}
 	t := r.Target
 	if t.ID == "" || t.RegistryID == "" || t.Capacity == 0 || !t.Whole || !t.Removable || !t.External || !t.NonSystem || !t.USB {
+		return ErrInvalidTarget
+	}
+	return nil
+}
+
+func (c SessionCommand) Validate(capacity uint64) error {
+	if c.Version != ProtocolVersion {
+		return ErrIncompatible
+	}
+	switch c.Kind {
+	case SessionWriteAt, SessionReadAt:
+		if c.Length == 0 || c.Offset > capacity || uint64(c.Length) > capacity-c.Offset {
+			return ErrInvalidTarget
+		}
+	case SessionFlush, SessionCancel, SessionClose:
+		if c.Offset != 0 || c.Length != 0 {
+			return ErrInvalidTarget
+		}
+	default:
 		return ErrInvalidTarget
 	}
 	return nil

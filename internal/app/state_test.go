@@ -14,3 +14,13 @@ func TestStateMachine(t *testing.T) {
 		t.Fatal("invalid transition accepted")
 	}
 }
+
+func TestWindowsInstallerStateSequence(t *testing.T) {
+	s := NewStateMachine()
+	valid := []State{ImageSelected, Ready, Confirming, Inspecting, Planning, StagingWIM, SplittingWIM, Unmounting, Partitioning, Formatting, Extracting, Flushing, VerifyingFilesystem, Ejecting, Completed}
+	for _, next := range valid {
+		if err := s.Transition(next); err != nil {
+			t.Fatalf("transition to %s: %v", next, err)
+		}
+	}
+}

@@ -130,3 +130,38 @@ func TestOpenNeverUsesSelectedPath(t *testing.T) {
 		t.Fatalf("selected path reached raw opener: %q", called)
 	}
 }
+
+func TestInstallerSessionsReuseIdentityBoundRawOpen(t *testing.T) {
+	m := &fakeManager{current: safeDisk()}
+	m.current.Mounted, m.current.MountPoints = false, nil
+	b := NewBackendWithManager(m)
+	selected := deviceFromDisk(m.current)
+	path := filepath.Join(t.TempDir(), "raw")
+	if err := os.WriteFile(path, make([]byte, 4096), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var flags []int
+	b.openRaw = func(openedPath string, flag int) (*os.File, error) {
+		if openedPath != m.current.Device {
+			t.Fatalf("opened %q, want refreshed %q", openedPath, m.current.Device)
+		}
+		flags = append(flags, flag)
+		return os.OpenFile(path, flag&syscall.O_ACCMODE, 0)
+	}
+	b.fstat = func(_ int, st *syscall.Stat_t) error { st.Mode, st.Rdev = syscall.S_IFCHR, 7; return nil }
+	b.stat = func(_ string, st *syscall.Stat_t) error { st.Mode, st.Rdev = syscall.S_IFCHR, 7; return nil }
+
+	target, err := b.OpenInstallerTarget(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = target.Close()
+	reader, err := b.OpenInstallerReader(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	if len(flags) != 2 || flags[0]&syscall.O_ACCMODE != os.O_RDWR || flags[1]&syscall.O_ACCMODE != os.O_RDONLY {
+		t.Fatalf("open flags=%#v", flags)
+	}
+}

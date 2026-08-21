@@ -253,7 +253,12 @@ func TestAdvanceSelection(t *testing.T) {
 }
 
 func TestWritingState(t *testing.T) {
-	for _, state := range []core.State{core.Writing, core.Flushing, core.Verifying, core.Ejecting, core.Unmounting} {
+	for _, state := range []core.State{
+		core.Confirming, core.Inspecting, core.Planning, core.StagingWIM,
+		core.SplittingWIM, core.Partitioning, core.Formatting, core.Extracting,
+		core.Writing, core.Flushing, core.Verifying, core.VerifyingFilesystem,
+		core.Ejecting, core.Unmounting,
+	} {
 		if !writingState(state) {
 			t.Errorf("writingState(%s) = false", state)
 		}

@@ -43,6 +43,7 @@ type Backend struct {
 }
 
 var _ device.Backend = (*Backend)(nil)
+var _ device.WindowsInstallerBackend = (*Backend)(nil)
 
 func NewBackend() *Backend {
 	return &Backend{SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev", UdevDataRoot: "/run/udev/data", helper: newCommandHelper(), udisks: udisks.New()}
@@ -319,6 +320,36 @@ func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadClose
 		return nil, ErrUnmountFailed
 	}
 	return b.privileged().OpenReader(ctx, helperRequest(fresh, modeRead))
+}
+func (b *Backend) OpenInstallerTarget(ctx context.Context, d device.Device) (device.InstallerTarget, error) {
+	session, err := b.openInstallerSession(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+func (b *Backend) OpenInstallerReader(ctx context.Context, d device.Device) (device.InstallerReader, error) {
+	session, err := b.openInstallerSession(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+func (b *Backend) openInstallerSession(ctx context.Context, d device.Device) (*remoteInstallerSession, error) {
+	fresh, err := b.Revalidate(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	if fresh.Mounted {
+		return nil, ErrUnmountFailed
+	}
+	helper, ok := b.privileged().(installerSessionHelper)
+	if !ok {
+		return nil, ErrUnsupportedDevice
+	}
+	request := helperRequest(fresh, modeInstallerSession)
+	request.LogicalSectorSize = 512
+	return helper.OpenInstallerSession(ctx, request)
 }
 func (b *Backend) Flush(ctx context.Context, d device.Device) error {
 	fresh, err := b.Revalidate(ctx, d)

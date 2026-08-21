@@ -43,7 +43,10 @@ type Backend struct {
 	stat       func(string, *syscall.Stat_t) error
 }
 
-var _ device.Backend = (*Backend)(nil)
+var (
+	_ device.Backend                 = (*Backend)(nil)
+	_ device.WindowsInstallerBackend = (*Backend)(nil)
+)
 
 func NewBackend() *Backend { return NewBackendWithManager(disk.NewManager()) }
 func NewBackendWithManager(manager disk.Manager) *Backend {
@@ -235,6 +238,20 @@ func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteClos
 	return b.open(ctx, d, os.O_WRONLY)
 }
 func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadCloser, error) {
+	return b.open(ctx, d, os.O_RDONLY)
+}
+
+// OpenInstallerTarget returns the same identity-bound, exclusively opened raw
+// descriptor used by the ordinary writer. The installer executor subsequently
+// narrows this whole-device session with gpt.NewPartitionWriterAt; no mounted
+// filesystem or command-line formatting tool participates in the build.
+func (b *Backend) OpenInstallerTarget(ctx context.Context, d device.Device) (device.InstallerTarget, error) {
+	return b.open(ctx, d, os.O_RDWR)
+}
+
+// OpenInstallerReader re-runs Disk Arbitration/IOKit identity validation and
+// opens an independent descriptor for semantic read-back verification.
+func (b *Backend) OpenInstallerReader(ctx context.Context, d device.Device) (device.InstallerReader, error) {
 	return b.open(ctx, d, os.O_RDONLY)
 }
 func (b *Backend) Flush(ctx context.Context, d device.Device) error {
