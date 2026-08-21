@@ -47,9 +47,12 @@ func (f *fakeImage) Close() error { f.closeCalls++; return nil }
 
 func withFakeNative(t *testing.T, fn func(string, string) (nativeLibrary, error)) {
 	t.Helper()
-	old := openNative
+	old, oldLocator := openNative, locateBundledLibrary
 	openNative = fn
-	t.Cleanup(func() { openNative = old })
+	locateBundledLibrary = func() (string, string, error) {
+		return filepath.Join(t.TempDir(), "libwim-test"), t.TempDir(), nil
+	}
+	t.Cleanup(func() { openNative, locateBundledLibrary = old, oldLocator })
 }
 func splitPaths(t *testing.T) (string, string) {
 	t.Helper()

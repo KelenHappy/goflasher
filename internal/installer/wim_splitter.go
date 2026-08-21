@@ -111,6 +111,10 @@ func validateSplitParts(parts []wim.Part, output string, sourceSize, policy uint
 	if len(parts) == 0 {
 		return fmt.Errorf("%w: split produced no parts", ErrVerification)
 	}
+	canonicalOutput, err := filepath.EvalSymlinks(output)
+	if err != nil {
+		return fmt.Errorf("%w: invalid split output directory", ErrVerification)
+	}
 	var total uint64
 	for index, part := range parts {
 		want := "install.swm"
@@ -118,8 +122,12 @@ func validateSplitParts(parts []wim.Part, output string, sourceSize, policy uint
 			want = fmt.Sprintf("install%d.swm", index+1)
 		}
 		canonical, err := filepath.EvalSymlinks(part.Path)
-		if err != nil || filepath.Dir(canonical) != output || filepath.Base(canonical) != want || part.Size == 0 || part.Size > policy || part.Size >= maxFATFileSize {
+		if err != nil || filepath.Dir(canonical) != canonicalOutput || filepath.Base(canonical) != want || part.Size == 0 || part.Size > policy || part.Size >= maxFATFileSize {
 			return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Path)
+		}
+		info, err := os.Stat(canonical)
+		if err != nil || info.IsDir() || uint64(info.Size()) != part.Size {
+			return fmt.Errorf("%w: split part size differs for %q", ErrVerification, part.Path)
 		}
 		if total > math.MaxUint64-part.Size {
 			return fmt.Errorf("%w: split size overflow", ErrVerification)

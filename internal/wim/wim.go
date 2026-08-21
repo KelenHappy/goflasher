@@ -45,10 +45,15 @@ var openNative = func(path, root string) (nativeLibrary, error) {
 	return libraryAdapter{library}, nil
 }
 
+// locateBundledLibrary is replaceable only by package tests. Production keeps
+// the platform-specific, application-controlled path policy in
+// bundledLibraryPath.
+var locateBundledLibrary = bundledLibraryPath
+
 // Probe loads, validates, initializes, and closes the bundled library without
 // opening a WIM. Callers use it during preflight, before opening a target.
 func Probe() (err error) {
-	libraryPath, libraryRoot, err := bundledLibraryPath()
+	libraryPath, libraryRoot, err := locateBundledLibrary()
 	if err != nil {
 		return err
 	}
@@ -80,7 +85,7 @@ func Split(ctx context.Context, sourcePath, outputDir string, partSize uint64, p
 	if err := rejectExistingParts(outputDir); err != nil {
 		return nil, err
 	}
-	libraryPath, libraryRoot, err := bundledLibraryPath()
+	libraryPath, libraryRoot, err := locateBundledLibrary()
 	if err != nil {
 		return nil, err
 	}

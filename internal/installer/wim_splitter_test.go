@@ -116,3 +116,22 @@ func TestValidateSplitPartsRejectsInvalidSets(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestValidateSplitPartsAcceptsCanonicalizedTemporaryPath(t *testing.T) {
+	realRoot := t.TempDir()
+	aliasRoot := filepath.Join(t.TempDir(), "temporary-alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	output := filepath.Join(aliasRoot, "split")
+	if err := os.Mkdir(output, 0700); err != nil {
+		t.Fatal(err)
+	}
+	part := filepath.Join(output, "install.swm")
+	if err := os.WriteFile(part, []byte("valid split payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSplitParts([]wim.Part{{Path: part, Size: 19}}, output, 19, 1024); err != nil {
+		t.Fatal(err)
+	}
+}
