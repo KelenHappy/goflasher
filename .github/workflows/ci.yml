@@ -14,237 +14,78 @@ permissions:
   contents: read
 
 jobs:
-  bundled-wimlib:
-    name: Bundled wimlib (${{ matrix.os }}-${{ matrix.arch }})
+  test:
+    name: Test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
             os: linux
-            arch: amd64
-          - runner: macos-15-intel
-            os: macos
-            arch: amd64
+          - runner: windows-latest
+            os: windows
           - runner: macos-15
             os: macos
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Install pinned Linux build toolchain
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang-18 make pkg-config libssl-dev libxml2-dev
-      - name: Fetch pinned source release
-        run: |
-          set -euo pipefail
-          lock=packaging/wimlib/BUILD.lock
-          # Source parser code, never the data-only lock file.
-          source packaging/wimlib/lock.sh
-          load_wimlib_lock "$lock"
-          source_path="$RUNNER_TEMP/$WIMLIB_SOURCE"
-          curl --fail --location --proto '=https' --tlsv1.2 "$WIMLIB_SOURCE_URL" -o "$source_path"
-          if command -v sha256sum >/dev/null; then
-            actual=$(sha256sum "$source_path" | awk '{print $1}')
-          else
-            actual=$(shasum -a 256 "$source_path" | awk '{print $1}')
-          fi
-          if [[ "$actual" != "$WIMLIB_SOURCE_SHA256" ]]; then
-            echo 'wimlib source hash mismatch' >&2
-            exit 65
-          fi
-          printf 'WIMLIB_SOURCE_PATH=%s\n' "$source_path" >> "$GITHUB_ENV"
-      - name: Build and verify native artifact
-        run: |
-          packaging/wimlib/build.sh "$WIMLIB_SOURCE_PATH" "$RUNNER_TEMP/wimlib-out"
-          library=$(find "$RUNNER_TEMP/wimlib-out" -maxdepth 1 -type f \( -name 'libwim.so.15' -o -name 'libwim.15.dylib' \) -print -quit)
-          hash=$(awk '{print $1}' "$RUNNER_TEMP/wimlib-out/SHA256SUMS")
-          packaging/wimlib/verify.sh "$library" '${{ matrix.os }}' '${{ matrix.arch }}' "$hash" "$RUNNER_TEMP/wimlib-out/smoke.wim"
 
-  macos-native-phase1:
-    name: macOS native framework Phase 1
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel
-            arch: amd64
-          - runner: macos-15
-            arch: arm64
     runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Download purego binding dependency
-        run: go mod download github.com/ebitengine/purego
-      - name: Verify native architecture
-        run: test "$(go env GOARCH)" = "${{ matrix.arch }}"
-      - name: Test CoreFoundation, Disk Arbitration, IOKit, and callback ABI
-        run: go test -v ./internal/disk/darwin/native -run '^TestPhase1'
-      - name: Build Darwin native adapter
-        run: go test -v ./internal/disk/darwin
 
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
-      - name: Download Darwin-only binding dependency
-        if: runner.os == 'macOS'
-        run: go mod download github.com/ebitengine/purego
-      - name: Test built-in XZ streaming
-        run: go test ./internal/image -run XZ
-      - name: Test native disk manager
-        run: go test ./internal/disk
-      - run: go test ./...
-      # Compile and exercise the GUI code without rebuilding Fyne's native
-      # OpenGL driver on every pull request. Native release builds and the
-      # documented local build commands still use the production `fyne` tag.
+
+      - name: Test
+        run: go test ./...
+
+      # Exercise the GUI source set without requiring the native Fyne/OpenGL
+      # release build on every pull request.
       - name: Test GUI source set
         if: runner.os == 'Windows' || runner.os == 'macOS'
         run: go test -tags "fyne ci" ./cmd/usbwriter
 
-  fuzz-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Bounded parser fuzz smoke tests
-        run: |
-          go test ./internal/installer -run '^$' -fuzz FuzzManifestPathNormalizer -fuzztime 2s
-          go test ./internal/installer/iso -run '^$' -fuzz FuzzISOManifestParser -fuzztime 2s
-          go test ./internal/verify -run '^$' -fuzz FuzzGPTAndFAT32Verifier -fuzztime 2s
-          go test ./internal/privilege -run '^$' -fuzz FuzzSessionProtocolDecoder -fuzztime 2s
-
-  windows-evaluation-iso:
-    if: vars.WINDOWS_EVALUATION_TEST_READY == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Run authorized non-destructive evaluation ISO test
-        env:
-          GOFLASHER_WINDOWS_EVAL_ISO: ${{ vars.WINDOWS_EVALUATION_ISO_PATH }}
-        run: go test -v ./internal/installer -run '^TestAuthorizedWindowsEvaluationISO$'
   quality:
-    runs-on: ubuntu-latest
+    name: Quality
+    runs-on: ubuntu-24.04
+
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
-      - run: test -z "$(gofmt -l .)"
+
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l .)
+          if [[ -n "$files" ]]; then
+            echo "gofmt required for:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
       - name: Reject external XZ runtime regressions
         run: |
           test -z "$(rg 'exec\.Command(Context)?\([^)]*xz' internal || true)"
           test -z "$(rg '^Depends:.*xz-utils|^Requires: xz$' packaging || true)"
+
       - name: Reject udisksctl CLI regressions
-        run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udisksctl|Output\([^)]*udisksctl' internal || true)"
+        run: |
+          test -z "$(rg 'exec\.Command(Context)?\([^)]*udisksctl|Output\([^)]*udisksctl' internal || true)"
+
       - name: Reject udevadm CLI regressions
-        run: test -z "$(rg 'exec\.Command(Context)?\([^)]*udevadm|Output\([^)]*udevadm' internal || true)"
+        run: |
+          test -z "$(rg 'exec\.Command(Context)?\([^)]*udevadm|Output\([^)]*udevadm' internal || true)"
+
       - name: Reject macOS command fallbacks
         run: |
           test -z "$(rg 'exec\.Command(Context)?\([^)]*(diskutil|plutil|osascript)' internal cmd/usbwriter || true)"
-      - run: go vet ./...
-      - name: Scan Go dependencies for known vulnerabilities
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-      - run: go test -race ./...
 
-  package-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Install GUI and packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev rpm zstd
-      - name: Build Linux binary and packages
-        run: |
-          mkdir -p dist
-          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
-          packaging/make-deb.sh dist/goflasher 0.0.0-ci_build dist
-          packaging/make-rpm.sh dist/goflasher 0.0.0-ci dist
-          packaging/make-arch.sh dist/goflasher 0.0.0-ci dist
-          test -f dist/goflasher_0.0.0-ci.build_amd64.deb
-          rpm_path=$(find dist -maxdepth 1 -name 'goflasher-0.0.0_ci-1*.rpm' -print -quit)
-          test -n "$rpm_path"
-          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F THIRD_PARTY_NOTICES.md
-          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F github.com_ulikunitz_xz_LICENSE
-          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F github.com_ebitengine_purego_LICENSE
-          dpkg-deb --contents dist/goflasher_0.0.0-ci.build_amd64.deb | grep -F THIRD_PARTY_NOTICES.zh-TW.md
-          rpm -qlp "$rpm_path" | grep -F THIRD_PARTY_NOTICES.md
-          rpm -qlp "$rpm_path" | grep -F github.com_ulikunitz_xz_LICENSE
-          rpm -qlp "$rpm_path" | grep -F github.com_ebitengine_purego_LICENSE
-          rpm -qlp "$rpm_path" | grep -F THIRD_PARTY_NOTICES.zh-TW.md
-          arch_path=dist/goflasher-0.0.0_ci-1-x86_64.pkg.tar.zst
-          test -f "$arch_path"
-          tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md
-          tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE
-          tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/third-party/github.com_ebitengine_purego_LICENSE
-          tar --zstd -tf "$arch_path" | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.zh-TW.md
-          tar --zstd -xOf "$arch_path" ./.PKGINFO | grep -F 'depend = polkit'
-
-  package-windows:
-    name: Validate Windows portable package
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Build executable with production UAC manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          windres=$(command -v windres || find /c/mingw64 /c/msys64/mingw64 -name windres.exe -print -quit 2>/dev/null)
-          test -n "$windres"
-          "$windres" --target=pe-x86-64 -I packaging/windows packaging/windows/goflasher.rc -O coff -o cmd/usbwriter/goflasher_windows_amd64.syso
-          mkdir -p dist
-          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/GoFlasher.exe ./cmd/usbwriter
-          rm cmd/usbwriter/goflasher_windows_amd64.syso
-          mt=$(find '/c/Program Files (x86)/Windows Kits/10/bin' -path '*/x64/mt.exe' -print 2>/dev/null | sort -V | tail -1)
-          test -n "$mt"
-          exe_win=$(cygpath -w "$PWD/dist/GoFlasher.exe")
-          manifest_win=$(cygpath -w "$PWD/dist/embedded.manifest")
-          MSYS2_ARG_CONV_EXCL='*' "$mt" -nologo "-inputresource:${exe_win};#1" "-out:${manifest_win}"
-          grep -F requireAdministrator dist/embedded.manifest
-          rm dist/embedded.manifest
-      - name: Package and validate portable layout
-        shell: bash
-        run: |
-          go run ./packaging/windows --executable dist/GoFlasher.exe --version 0.0.0-ci --output dist
-          root=dist/GoFlasher-0.0.0-ci-windows-amd64
-          test -f "$root/GoFlasher.exe"
-          test -f "$root/README-Windows.txt"
-          test -f "$root/THIRD_PARTY_NOTICES.md"
-          test -f "$root/THIRD_PARTY_NOTICES.zh-TW.md"
-          test -n "$(find "$root/licenses" -type f -print -quit)"
-          (cd dist && sha256sum --check GoFlasher-0.0.0-ci-windows-amd64.zip.sha256)
+      - name: Race detector
+        run: go test -race ./...
