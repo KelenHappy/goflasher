@@ -66,8 +66,19 @@ func TestTrustedDISMPathDoesNotSearchPATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := trustedDISMPath()
-	if err != nil || got != trusted {
+	if err != nil {
 		t.Fatalf("path=%q error=%v", got, err)
+	}
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedInfo, err := os.Stat(trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, trustedInfo) {
+		t.Fatalf("resolved DISM %q is not trusted file %q", got, trusted)
 	}
 }
 
@@ -84,7 +95,15 @@ func TestDISMArgumentsAreSeparateExactAndSizeRoundsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/English", "/Split-Image", "/ImageFile:" + source, "/SWMFile:" + filepath.Join(output, "install.swm"), "/FileSize:5"}
+	canonicalSource, err := canonicalAbsolute(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalOutput, err := canonicalAbsolute(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/English", "/Split-Image", "/ImageFile:" + canonicalSource, "/SWMFile:" + filepath.Join(canonicalOutput, "install.swm"), "/FileSize:5"}
 	if gotExecutable != `C:\Windows\System32\dism.exe` || !reflect.DeepEqual(gotArgs, want) {
 		t.Fatalf("executable=%q args=%q", gotExecutable, gotArgs)
 	}
