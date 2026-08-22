@@ -114,6 +114,12 @@ jobs:
       - name: Build Arch Linux package
         run: packaging/make-arch.sh dist/goflasher "$VERSION" dist
       - name: Verify Debian and Arch Linux contents
+        # The release-compliance record gate is a stable-release requirement
+        # (docs/legal/RELEASE-COMPLIANCE.md). Enforce it only once the reviewed
+        # record path is configured so alpha/dev builds still package and upload.
+        env:
+          GOFLASHER_RELEASE_GATE: ${{ vars.RELEASE_COMPLIANCE_RECORD_PATH != '' && '1' || '0' }}
+          RELEASE_COMPLIANCE_RECORD: ${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}
         run: |
           set -euo pipefail
           work=$(mktemp -d)
@@ -124,7 +130,7 @@ jobs:
           test -x "$work/deb/usr/bin/goflasher"
           test -x "$work/deb/usr/libexec/goflasher-helper"
           test -f "$work/deb/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
-          GOFLASHER_RELEASE_GATE=1 RELEASE_COMPLIANCE_RECORD="${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}" packaging/legal/verify-release.sh "$work/deb"
+          packaging/legal/verify-release.sh "$work/deb"
 
           arch=$(realpath "$(find dist -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)")
           mkdir "$work/arch"
@@ -132,7 +138,7 @@ jobs:
           test -x "$work/arch/usr/bin/goflasher"
           test -x "$work/arch/usr/libexec/goflasher-helper"
           test -f "$work/arch/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
-          GOFLASHER_RELEASE_GATE=1 RELEASE_COMPLIANCE_RECORD="${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}" packaging/legal/verify-release.sh "$work/arch"
+          packaging/legal/verify-release.sh "$work/arch"
 
       - name: Generate checksums
         run: |
@@ -209,6 +215,10 @@ jobs:
           fi
           packaging/macos/make-dmg.sh dist/GoFlasher dist/goflasher-helper "$VERSION" "${{ matrix.arch }}" "$SIGN_IDENTITY" dist
       - name: Verify DMG contents
+        # Same stable-release compliance gate as the Linux verification step.
+        env:
+          GOFLASHER_RELEASE_GATE: ${{ vars.RELEASE_COMPLIANCE_RECORD_PATH != '' && '1' || '0' }}
+          RELEASE_COMPLIANCE_RECORD: ${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}
         run: |
           set -euo pipefail
           dmg="dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg"
@@ -216,7 +226,7 @@ jobs:
           trap 'hdiutil detach "$mount"' EXIT
           test -x "$mount/GoFlasher.app/Contents/MacOS/GoFlasher"
           test -x "$mount/GoFlasher.app/Contents/Library/HelperTools/org.goflasher.helper"
-          GOFLASHER_RELEASE_GATE=1 RELEASE_COMPLIANCE_RECORD="${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}" packaging/legal/verify-release.sh "$mount/GoFlasher.app"
+          packaging/legal/verify-release.sh "$mount/GoFlasher.app"
           if [[ "${{ vars.MACOS_WINDOWS_BUILDER_READY }}" == "true" ]]; then
             test -x "$mount/GoFlasher.app/Contents/Frameworks/libwim.15.dylib"
           fi
