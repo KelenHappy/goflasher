@@ -83,7 +83,7 @@ func directory(name string) string {
 
 func TestVerifyInstallerReadsRawGPTFATAndManifest(t *testing.T) {
 	d, manifest := buildInstallerDisk(t, true)
-	result, err := VerifyInstaller(context.Background(), bytes.NewReader(d), uint64(len(d)), manifest, InstallerOptions{SplitWIMPolicySize: 3800 << 20, RequireSplitWIM: true})
+	result, err := VerifyInstaller(context.Background(), RawTarget{Reader: bytes.NewReader(d), Size: uint64(len(d))}, manifest, InstallerOptions{SplitWIMPolicySize: 3800 << 20, RequireSplitWIM: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestVerifyInstallerRejectsRawMetadataAndContentCorruption(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d[tt.offset] ^= 0xff
-			_, err := VerifyInstaller(context.Background(), bytes.NewReader(d), uint64(len(d)), manifest, InstallerOptions{SplitWIMPolicySize: 3800 << 20})
+			_, err := VerifyInstaller(context.Background(), RawTarget{Reader: bytes.NewReader(d), Size: uint64(len(d))}, manifest, InstallerOptions{SplitWIMPolicySize: 3800 << 20})
 			d[tt.offset] ^= 0xff
 			if err == nil {
 				t.Fatal("corruption accepted")

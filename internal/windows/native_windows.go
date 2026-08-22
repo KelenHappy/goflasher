@@ -348,27 +348,43 @@ func storageWWN(h windows.Handle) (string, error) {
 	return wwn, nil
 }
 
+// diskEvidence is everything inspectHandle learns from a disk handle, kept
+// free of the handle itself so record construction is a pure function.
+type diskEvidence struct {
+	number     uint32
+	length     uint64
+	descriptor []byte
+	wwn        string
+	hotplug    hotplugFlags
+}
+
 func inspectHandle(h windows.Handle, number uint32) (diskRecord, error) {
 	if err := verifyDeviceNumber(h, number); err != nil {
 		return diskRecord{}, err
 	}
-	length, err := diskLength(h)
+	ev, err := gatherDiskEvidence(h, number)
 	if err != nil {
 		return diskRecord{}, err
 	}
-	descriptor, err := storageDescriptor(h)
-	if err != nil {
-		return diskRecord{}, err
+	return diskRecordFromEvidence(ev)
+}
+
+func gatherDiskEvidence(h windows.Handle, number uint32) (diskEvidence, error) {
+	ev := diskEvidence{number: number}
+	var err error
+	if ev.length, err = diskLength(h); err != nil {
+		return diskEvidence{}, err
 	}
-	hot, err := hotplugInfo(h)
-	if err != nil {
-		return diskRecord{}, err
+	if ev.descriptor, err = storageDescriptor(h); err != nil {
+		return diskEvidence{}, err
 	}
-	wwn, err := storageWWN(h)
-	if err != nil {
-		return diskRecord{}, err
+	if ev.hotplug, err = hotplugInfo(h); err != nil {
+		return diskEvidence{}, err
 	}
-	return diskRecordFromDescriptor(number, length, descriptor, wwn, hot)
+	if ev.wwn, err = storageWWN(h); err != nil {
+		return diskEvidence{}, err
+	}
+	return ev, nil
 }
 
 func verifyDeviceNumber(h windows.Handle, expected uint32) error {
@@ -426,12 +442,13 @@ func parseHotplugInfo(b []byte) (hotplugFlags, error) {
 	return hotplugFlags{media: b[5] != 0, device: b[6] != 0}, nil
 }
 
-func diskRecordFromDescriptor(number uint32, length uint64, q []byte, wwn string, hot hotplugFlags) (diskRecord, error) {
+func diskRecordFromEvidence(ev diskEvidence) (diskRecord, error) {
+	q := ev.descriptor
 	if len(q) < storageDeviceDescriptorSize {
 		return diskRecord{}, fmt.Errorf("short STORAGE_DEVICE_DESCRIPTOR: got %d bytes", len(q))
 	}
 	serial := descriptorString(q, binary.LittleEndian.Uint32(q[24:28]))
-	identity, err := newWindowsIdentity(serial, wwn)
+	identity, err := newWindowsIdentity(serial, ev.wwn)
 	if err != nil {
 		return diskRecord{}, err
 	}
@@ -441,9 +458,9 @@ func diskRecordFromDescriptor(number uint32, length uint64, q []byte, wwn string
 	// Serial plus the immutable descriptor identity is preferred. Devices that
 	// do not expose one fail policy rather than falling back to disk number.
 	id := identity.canonicalID()
-	path := physicalDrivePath(number)
-	r := diskRecord{Device: device.Device{ID: id, Path: path, Vendor: vendor, Model: model, Serial: identity.Serial, WWN: identity.WWN, Transport: busName(bus), Major: number, Size: length}, identity: identity, deviceNumber: number, usbAncestor: bus == busTypeUSB}
-	r.mediaHotplug, r.deviceHotplug = hot.media, hot.device
+	path := physicalDrivePath(ev.number)
+	r := diskRecord{Device: device.Device{ID: id, Path: path, Vendor: vendor, Model: model, Serial: identity.Serial, WWN: identity.WWN, Transport: busName(bus), Major: ev.number, Size: ev.length}, identity: identity, deviceNumber: ev.number, usbAncestor: bus == busTypeUSB}
+	r.mediaHotplug, r.deviceHotplug = ev.hotplug.media, ev.hotplug.device
 	return r, nil
 }
 
@@ -656,7 +673,10 @@ func lockWithRetry(ctx context.Context, h windows.Handle) error {
 	delay := lockRetryDelay
 	for attempt := 1; ; attempt++ {
 		err := lockAndDismount(h)
-		if err == nil || attempt >= lockVolumeAttempts || !retryableLockError(err) {
+		if err == nil {
+			return nil
+		}
+		if !shouldRetryLock(err, attempt) {
 			return err
 		}
 		if err := sleepContext(ctx, delay); err != nil {
@@ -664,6 +684,10 @@ func lockWithRetry(ctx context.Context, h windows.Handle) error {
 		}
 		delay *= 2
 	}
+}
+
+func shouldRetryLock(err error, attempt int) bool {
+	return attempt < lockVolumeAttempts && retryableLockError(err)
 }
 
 func retryableLockError(err error) bool {

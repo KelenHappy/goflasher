@@ -21,8 +21,9 @@ func TestSystemDiskNumbersRejectsInvalidSystemRoot(t *testing.T) {
 		t.Run(root, func(t *testing.T) {
 			t.Setenv("SystemRoot", root)
 			disks, err := systemDiskNumbers()
-			if err == nil || disks != nil || !strings.Contains(err.Error(), "invalid SystemRoot") {
-				t.Fatalf("disks=%v error=%v", disks, err)
+			requireErrorContains(t, err, "invalid SystemRoot")
+			if disks != nil {
+				t.Fatalf("disks=%v returned alongside error", disks)
 			}
 		})
 	}
@@ -68,9 +69,12 @@ func TestWindowsIdentityEvidence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e, err := newWindowsIdentity(tt.serial, tt.wwn)
-			if (err == nil) != tt.valid || (err == nil && e.canonicalID() != tt.id) {
-				t.Fatalf("evidence=%+v id=%q error=%v", e, e.canonicalID(), err)
+			if !tt.valid {
+				requireError(t, err)
+				return
 			}
+			requireNoError(t, err)
+			requireEqual(t, "canonical ID", e.canonicalID(), tt.id)
 		})
 	}
 }
@@ -260,9 +264,9 @@ func TestQueryVolumeExtentsGrowsBuffer(t *testing.T) {
 		copy(out, extentBuffer(1, 8))
 		return 32, nil
 	})
-	if err != nil || calls != 3 || len(b) != 32 {
-		t.Fatalf("len=%d calls=%d error=%v", len(b), calls, err)
-	}
+	requireNoError(t, err)
+	requireEqual(t, "calls", calls, 3)
+	requireEqual(t, "len", len(b), 32)
 }
 
 func TestQueryVolumeExtentsGrowthIsBounded(t *testing.T) {
@@ -320,8 +324,10 @@ func TestVolumeAccessDeniedPreservesSentinelAndHidesPath(t *testing.T) {
 		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
 	}
 	_, err := volumeDisks(`C:\Users\private`)
-	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || strings.Contains(err.Error(), "Users") || !strings.Contains(err.Error(), "volume <unknown-volume> open") {
-		t.Fatalf("error=%v", err)
+	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
+	requireErrorContains(t, err, "volume <unknown-volume> open")
+	if strings.Contains(err.Error(), "Users") {
+		t.Fatalf("error exposes path: %v", err)
 	}
 }
 
@@ -332,9 +338,9 @@ func TestVolumeExtentQueryErrorNamesGUIDAndOperation(t *testing.T) {
 	callVolumeExtentIOCTL = func(windows.Handle, []byte) (uint32, error) { return 0, windows.ERROR_ACCESS_DENIED }
 	guid := `\\?\Volume{12345678-1234-1234-1234-123456789abc}\`
 	_, err := volumeDisks(guid)
-	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || !strings.Contains(err.Error(), strings.TrimSuffix(guid, `\`)) || !strings.Contains(err.Error(), "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS") {
-		t.Fatalf("error=%v", err)
-	}
+	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
+	requireErrorContains(t, err, strings.TrimSuffix(guid, `\`))
+	requireErrorContains(t, err, "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS")
 }
 
 func TestNativeOperationsHonorPreCanceledContext(t *testing.T) {
@@ -360,9 +366,9 @@ func TestSystemDiskExtentQueryFailureIsWrapped(t *testing.T) {
 		return nil, fmt.Errorf("system volume IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: %w", sentinel)
 	}
 	_, err := (&winAPI{}).list(context.Background())
-	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "identify Windows system disk") || !strings.Contains(err.Error(), "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS") {
-		t.Fatalf("error=%v", err)
-	}
+	requireErrorIs(t, err, sentinel)
+	requireErrorContains(t, err, "identify Windows system disk")
+	requireErrorContains(t, err, "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS")
 }
 
 func equalDiskNumbers(a, b []uint32) bool {
@@ -396,9 +402,9 @@ func TestQueryStorageDescriptorTwoPhase(t *testing.T) {
 		}
 		return 40, nil
 	})
-	if err != nil || len(b) != 40 || len(sizes) != 2 || sizes[0] != storageDescriptorHeaderSize || sizes[1] != 40 {
-		t.Fatalf("len=%d sizes=%v error=%v", len(b), sizes, err)
-	}
+	requireNoError(t, err)
+	requireEqual(t, "len", len(b), 40)
+	requireEqual(t, "buffer sizes", fmt.Sprint(sizes), fmt.Sprint([]int{storageDescriptorHeaderSize, 40}))
 }
 
 func TestQueryStorageDescriptorGrowsOnBufferError(t *testing.T) {
@@ -410,8 +416,10 @@ func TestQueryStorageDescriptorGrowsOnBufferError(t *testing.T) {
 		}
 		return 100, nil
 	})
-	if err != nil || len(b) != 100 || calls < 3 {
-		t.Fatalf("len=%d calls=%d error=%v", len(b), calls, err)
+	requireNoError(t, err)
+	requireEqual(t, "len", len(b), 100)
+	if calls < 3 {
+		t.Fatalf("calls=%d, want growth through at least 3 buffers", calls)
 	}
 }
 
@@ -429,26 +437,33 @@ func TestQueryStorageDescriptorRejectsBadHeader(t *testing.T) {
 
 func TestStoragePropertyQueryLayout(t *testing.T) {
 	q := storagePropertyQuery(storageDeviceIDProperty)
-	if len(q) != storagePropertyQuerySize || binary.LittleEndian.Uint32(q[0:4]) != storageDeviceIDProperty || binary.LittleEndian.Uint32(q[4:8]) != propertyStandardQuery {
-		t.Fatalf("query=%v", q)
-	}
+	requireEqual(t, "len", len(q), storagePropertyQuerySize)
+	requireEqual(t, "PropertyId", binary.LittleEndian.Uint32(q[0:4]), uint32(storageDeviceIDProperty))
+	requireEqual(t, "QueryType", binary.LittleEndian.Uint32(q[4:8]), uint32(propertyStandardQuery))
 }
 
 func TestParseHotplugInfo(t *testing.T) {
-	hot, err := parseHotplugInfo([]byte{8, 0, 0, 0, 1, 0, 1, 0})
-	if err != nil || hot.media || !hot.device {
-		t.Fatalf("flags=%+v error=%v", hot, err)
+	tests := []struct {
+		name string
+		data []byte
+		want hotplugFlags
+	}{
+		{"device hotplug", []byte{8, 0, 0, 0, 1, 0, 1, 0}, hotplugFlags{device: true}},
+		{"media hotplug", []byte{8, 0, 0, 0, 0, 1, 0, 0}, hotplugFlags{media: true}},
 	}
-	hot, err = parseHotplugInfo([]byte{8, 0, 0, 0, 0, 1, 0, 0})
-	if err != nil || !hot.media || hot.device {
-		t.Fatalf("flags=%+v error=%v", hot, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hot, err := parseHotplugInfo(tt.data)
+			requireNoError(t, err)
+			requireEqual(t, "flags", hot, tt.want)
+		})
 	}
 	if _, err := parseHotplugInfo(make([]byte, 7)); err == nil {
 		t.Fatal("short STORAGE_HOTPLUG_INFO accepted")
 	}
 }
 
-func TestDiskRecordFromDescriptor(t *testing.T) {
+func TestDiskRecordFromEvidence(t *testing.T) {
 	const vendor, model, serial = "Vendor", "Model X", " SN 42 "
 	q := make([]byte, storageDeviceDescriptorSize)
 	off := func(s string) uint32 {
@@ -462,7 +477,7 @@ func TestDiskRecordFromDescriptor(t *testing.T) {
 	binary.LittleEndian.PutUint32(q[16:20], modelOff)
 	binary.LittleEndian.PutUint32(q[24:28], serialOff)
 	binary.LittleEndian.PutUint32(q[28:32], busTypeUSB)
-	r, err := diskRecordFromDescriptor(3, 1<<30, q, "5000c50012345678", hotplugFlags{device: true})
+	r, err := diskRecordFromEvidence(diskEvidence{number: 3, length: 1 << 30, descriptor: q, wwn: "5000c50012345678", hotplug: hotplugFlags{device: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +491,7 @@ func TestDiskRecordFromDescriptor(t *testing.T) {
 	if !reflect.DeepEqual(r, want) {
 		t.Fatalf("record=%+v\nwant  =%+v", r, want)
 	}
-	if _, err := diskRecordFromDescriptor(3, 1, q[:35], "", hotplugFlags{}); err == nil {
+	if _, err := diskRecordFromEvidence(diskEvidence{number: 3, length: 1, descriptor: q[:35]}); err == nil {
 		t.Fatal("short STORAGE_DEVICE_DESCRIPTOR accepted")
 	}
 }
@@ -538,9 +553,9 @@ func TestLockVolumeGivesUpAfterBoundedAttempts(t *testing.T) {
 	}
 	stubLock(t, &attempts, denials...)
 	_, err := lockVolume(context.Background(), `\\?\Volume{a}\`)
-	if !errors.Is(err, ErrVolumeLockDenied) || !errors.Is(err, windows.ERROR_ACCESS_DENIED) || attempts != lockVolumeAttempts {
-		t.Fatalf("attempts=%d error=%v", attempts, err)
-	}
+	requireErrorIs(t, err, ErrVolumeLockDenied)
+	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
+	requireEqual(t, "attempts", attempts, lockVolumeAttempts)
 }
 
 func TestLockVolumeDoesNotRetryPermanentFailure(t *testing.T) {
@@ -604,5 +619,34 @@ func TestHandleLocksCloseIsIdempotent(t *testing.T) {
 	}
 	if err := l.Close(); err != nil {
 		t.Fatalf("second Close error=%v", err)
+	}
+}
+
+func requireError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func requireErrorIs(t *testing.T, err, target error) {
+	t.Helper()
+	if !errors.Is(err, target) {
+		t.Fatalf("error=%v, want %v", err, target)
+	}
+}
+
+func requireErrorContains(t *testing.T, err error, substr string) {
+	t.Helper()
+	requireError(t, err)
+	if !strings.Contains(err.Error(), substr) {
+		t.Fatalf("error=%v, want it to mention %q", err, substr)
+	}
+}
+
+func requireEqual[T comparable](t *testing.T, what string, got, want T) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("%s=%v, want %v", what, got, want)
 	}
 }

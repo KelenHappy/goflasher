@@ -59,7 +59,7 @@ func TestAuthorizedWindowsEvaluationISO(t *testing.T) {
 	if err != nil || !result.Complete {
 		t.Fatalf("execution complete=%t error=%v", result.Complete, err)
 	}
-	verified, err := verify.VerifyInstaller(context.Background(), target, targetSize, result.VerificationManifest, verify.InstallerOptions{SplitWIMPolicySize: plan.SplitWIMPolicySize(), RequireSplitWIM: plan.InstallStrategy() == installer.SplitWIM})
+	verified, err := verify.VerifyInstaller(context.Background(), verify.RawTarget{Reader: target, Size: targetSize}, result.VerificationManifest, verify.InstallerOptions{SplitWIMPolicySize: plan.SplitWIMPolicySize(), RequireSplitWIM: plan.InstallStrategy() == installer.SplitWIM})
 	if err != nil || verified.FilesVerified == 0 {
 		t.Fatalf("verification=%+v error=%v", verified, err)
 	}

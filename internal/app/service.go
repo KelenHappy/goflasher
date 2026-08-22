@@ -261,7 +261,7 @@ func (s *Service) flushAndVerifyInstaller(ctx context.Context, plan *installer.B
 	if err != nil {
 		return err
 	}
-	verification, verifyErr := verify.VerifyInstaller(ctx, reader, target.Size, out.installerManifest, verify.InstallerOptions{
+	verification, verifyErr := verify.VerifyInstaller(ctx, verify.RawTarget{Reader: reader, Size: target.Size}, out.installerManifest, verify.InstallerOptions{
 		SplitWIMPolicySize: plan.SplitWIMPolicySize(), RequireSplitWIM: plan.InstallStrategy() == installer.SplitWIM,
 	})
 	if err := errors.Join(verifyErr, reader.Close()); err != nil {

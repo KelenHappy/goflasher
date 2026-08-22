@@ -12,6 +12,6 @@ func FuzzGPTAndFAT32Verifier(f *testing.F) {
 		if len(data) > 1<<20 {
 			t.Skip()
 		}
-		_, _ = VerifyInstaller(context.Background(), bytes.NewReader(data), uint64(len(data)), nil, InstallerOptions{SplitWIMPolicySize: 3800 << 20})
+		_, _ = VerifyInstaller(context.Background(), RawTarget{Reader: bytes.NewReader(data), Size: uint64(len(data))}, nil, InstallerOptions{SplitWIMPolicySize: 3800 << 20})
 	})
 }
