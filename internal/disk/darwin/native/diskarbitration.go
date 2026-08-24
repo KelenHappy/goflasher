@@ -216,43 +216,80 @@ func (s *Session) ListDisks(ctx context.Context) ([]DiskDescription, error) {
 	}
 	state := newCallbackState(s)
 	defer state.close()
-	loop := s.f.cf.api.runLoopGetCurrent()
-	s.f.da.api.registerAppeared(s.ref, 0, appearedCallback, state.token)
-	s.f.da.api.scheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
-	defer func() {
-		s.f.da.api.unregisterCallback(s.ref, appearedCallback, state.token)
-		s.f.da.api.unscheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
-	}()
-	quiet := time.NewTimer(300 * time.Millisecond)
-	defer quiet.Stop()
-	byName := map[string]DiskDescription{}
+	stop := s.scheduleAppearedCallback(state.token)
+	defer stop()
+	collector := newDiskCollector()
+	defer collector.close()
 	for {
+		if disks, err, done := collector.poll(ctx, state.result); done {
+			return disks, err
+		}
+		s.pumpRunLoop()
+	}
+}
+
+const diskListQuietInterval = 300 * time.Millisecond
+
+type diskCollector struct {
+	quiet  *time.Timer
+	byName map[string]DiskDescription
+}
+
+func newDiskCollector() *diskCollector {
+	return &diskCollector{quiet: time.NewTimer(diskListQuietInterval), byName: make(map[string]DiskDescription)}
+}
+
+func (c *diskCollector) close() { c.quiet.Stop() }
+
+func (c *diskCollector) poll(ctx context.Context, results <-chan callbackResult) ([]DiskDescription, error, bool) {
+	select {
+	case result := <-results:
+		if result.err != nil {
+			return nil, result.err, true
+		}
+		c.byName[result.disk.BSDName] = result.disk
+		resetTimer(c.quiet, diskListQuietInterval)
+		return nil, nil, false
+	case <-c.quiet.C:
+		return diskDescriptions(c.byName), nil, true
+	case <-ctx.Done():
+		return nil, ctx.Err(), true
+	default:
+		return nil, nil, false
+	}
+}
+
+func resetTimer(timer *time.Timer, interval time.Duration) {
+	if !timer.Stop() {
 		select {
-		case r := <-state.result:
-			if r.err != nil {
-				return nil, r.err
-			}
-			byName[r.disk.BSDName] = r.disk
-			if !quiet.Stop() {
-				select {
-				case <-quiet.C:
-				default:
-				}
-			}
-			quiet.Reset(300 * time.Millisecond)
-		case <-quiet.C:
-			out := make([]DiskDescription, 0, len(byName))
-			for _, d := range byName {
-				out = append(out, d)
-			}
-			return out, nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-timer.C:
 		default:
-			s.f.cf.api.runLoopRunInMode(s.f.cf.defaultRunLoopMode, 0.05, true)
-			runtime.Gosched()
 		}
 	}
+	timer.Reset(interval)
+}
+
+func diskDescriptions(byName map[string]DiskDescription) []DiskDescription {
+	disks := make([]DiskDescription, 0, len(byName))
+	for _, disk := range byName {
+		disks = append(disks, disk)
+	}
+	return disks
+}
+
+func (s *Session) scheduleAppearedCallback(token uintptr) func() {
+	loop := s.f.cf.api.runLoopGetCurrent()
+	s.f.da.api.registerAppeared(s.ref, 0, appearedCallback, token)
+	s.f.da.api.scheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	return func() {
+		s.f.da.api.unregisterCallback(s.ref, appearedCallback, token)
+		s.f.da.api.unscheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
+	}
+}
+
+func (s *Session) pumpRunLoop() {
+	s.f.cf.api.runLoopRunInMode(s.f.cf.defaultRunLoopMode, 0.05, true)
+	runtime.Gosched()
 }
 
 type DissenterError struct{ Status int32 }
@@ -289,16 +326,12 @@ func (s *Session) operation(ctx context.Context, bsd string, eject bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	z := append([]byte("/dev/"+bsd), 0)
-	d := s.f.da.api.diskCreateBSD(0, s.ref, &z[0])
-	if d == 0 {
+	disk := s.createDisk(bsd)
+	if disk == 0 {
 		return ErrUnavailable
 	}
-	defer s.f.cf.api.release(d)
-	token := uintptr(nextOperationToken.Add(1))
-	if token == 0 {
-		token = uintptr(nextOperationToken.Add(1))
-	}
+	defer s.f.cf.api.release(disk)
+	token := nextNonzeroOperationToken()
 	done := make(chan error, 1)
 	operationStates.Store(token, done)
 	operationFrameworks.Store(token, s.f)
@@ -306,11 +339,32 @@ func (s *Session) operation(ctx context.Context, bsd string, eject bool) error {
 	loop := s.f.cf.api.runLoopGetCurrent()
 	s.f.da.api.scheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
 	defer s.f.da.api.unscheduleRunLoop(s.ref, loop, s.f.cf.defaultRunLoopMode)
-	if eject {
-		s.f.da.api.diskEject(d, 0, operationCallback, token)
-	} else {
-		s.f.da.api.diskUnmount(d, 1, operationCallback, token)
+	s.startOperation(disk, token, eject)
+	return s.waitForOperation(ctx, done)
+}
+
+func (s *Session) createDisk(bsd string) uintptr {
+	name := append([]byte("/dev/"+bsd), 0)
+	return s.f.da.api.diskCreateBSD(0, s.ref, &name[0])
+}
+
+func nextNonzeroOperationToken() uintptr {
+	token := uintptr(nextOperationToken.Add(1))
+	if token == 0 {
+		return uintptr(nextOperationToken.Add(1))
 	}
+	return token
+}
+
+func (s *Session) startOperation(disk, token uintptr, eject bool) {
+	if eject {
+		s.f.da.api.diskEject(disk, 0, operationCallback, token)
+		return
+	}
+	s.f.da.api.diskUnmount(disk, 1, operationCallback, token)
+}
+
+func (s *Session) waitForOperation(ctx context.Context, done <-chan error) error {
 	for {
 		select {
 		case err := <-done:
@@ -318,8 +372,7 @@ func (s *Session) operation(ctx context.Context, bsd string, eject bool) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			s.f.cf.api.runLoopRunInMode(s.f.cf.defaultRunLoopMode, .05, true)
-			runtime.Gosched()
+			s.pumpRunLoop()
 		}
 	}
 }

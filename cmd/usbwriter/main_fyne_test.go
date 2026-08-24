@@ -18,6 +18,19 @@ import (
 	"github.com/goflasher/goflasher/internal/progress"
 )
 
+func TestReadyStateClassification(t *testing.T) {
+	for _, state := range []core.State{core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready} {
+		if !isReadyState(state) {
+			t.Errorf("state %v was not classified as ready", state)
+		}
+	}
+	for _, state := range []core.State{core.Confirming, core.Writing, core.Verifying, core.Completed, core.Failed} {
+		if isReadyState(state) {
+			t.Errorf("active or terminal state %v was classified as ready", state)
+		}
+	}
+}
+
 type blockingFormatter struct {
 	started chan struct{}
 	release chan struct{}
