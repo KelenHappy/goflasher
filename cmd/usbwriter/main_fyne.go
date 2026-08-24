@@ -254,20 +254,33 @@ func (c *guiController) translateSelectionDetails() {
 }
 
 func (c *guiController) translateOperationStatus() {
-	tr := c.tr
 	if c.operation == operationFormatting {
-		c.view.status.SetText(tr.T("status.formatting"))
-		c.view.metrics.SetText(tr.T("metrics.empty"))
-		if c.formatProgress.Stage != "" {
-			c.view.status.SetText(tr.T("stage." + string(c.formatProgress.Stage)))
-			c.view.metrics.SetText(tr.T("metrics.formatting", int(c.formatProgress.BytesProcessed)))
-		}
-	} else {
-		switch c.machine.State() {
-		case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
-			c.view.status.SetText(tr.T("status.ready"))
-			c.view.metrics.SetText(tr.T("metrics.empty"))
-		}
+		c.translateFormatStatus()
+		return
+	}
+	if isReadyState(c.machine.State()) {
+		c.view.status.SetText(c.tr.T("status.ready"))
+		c.view.metrics.SetText(c.tr.T("metrics.empty"))
+	}
+}
+
+func (c *guiController) translateFormatStatus() {
+	status := "status.formatting"
+	metrics := c.tr.T("metrics.empty")
+	if c.formatProgress.Stage != "" {
+		status = "stage." + string(c.formatProgress.Stage)
+		metrics = c.tr.T("metrics.formatting", int(c.formatProgress.BytesProcessed))
+	}
+	c.view.status.SetText(c.tr.T(status))
+	c.view.metrics.SetText(metrics)
+}
+
+func isReadyState(state core.State) bool {
+	switch state {
+	case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
+		return true
+	default:
+		return false
 	}
 }
 

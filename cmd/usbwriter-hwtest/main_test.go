@@ -44,6 +44,26 @@ func TestAllowlistValidationAndExactSelection(t *testing.T) {
 	if _, ok := exactDevice([]device.Device{mismatch}, approved); ok {
 		t.Fatal("device with mismatched capacity was selected")
 	}
+	if !matchesAllowedDevice(matching, approved) {
+		t.Fatal("matching device metadata was rejected")
+	}
+	for name, changed := range map[string]device.Device{
+		"identity": {ID: "other", Serial: matching.Serial, Size: matching.Size, Model: matching.Model},
+		"serial":   {ID: matching.ID, Serial: "other", Size: matching.Size, Model: matching.Model},
+		"capacity": {ID: matching.ID, Serial: matching.Serial, Size: matching.Size + 1, Model: matching.Model},
+		"model":    {ID: matching.ID, Serial: matching.Serial, Size: matching.Size, Model: "other"},
+	} {
+		t.Run("rejects mismatched "+name, func(t *testing.T) {
+			if matchesAllowedDevice(changed, approved) {
+				t.Fatalf("mismatched %s was accepted: %+v", name, changed)
+			}
+		})
+	}
+	withoutSerial := approved
+	withoutSerial.Serial = ""
+	if !matchesAllowedDevice(matching, withoutSerial) {
+		t.Fatal("optional serial constrained an otherwise matching device")
+	}
 	if got := approvedOrEmpty(list, "unknown"); got != (allowedDevice{}) {
 		t.Fatalf("approvedOrEmpty() = %+v, want empty entry", got)
 	}
@@ -115,6 +135,14 @@ func TestSnapshotAndAddressReuseHelpers(t *testing.T) {
 	checkSnapshot(data, original)
 
 	s := snapshot{Version: specificationVersion, Identity: original.ID, Path: original.Path, Major: original.Major, Minor: original.Minor, Capacity: original.Size}
+	if !s.matches(original) {
+		t.Fatal("snapshot did not match its source device")
+	}
+	changedCapacity := original
+	changedCapacity.Size++
+	if s.matches(changedCapacity) {
+		t.Fatal("snapshot matched a device with different capacity")
+	}
 	if addressReusedBy(original, s) {
 		t.Fatal("same identity was considered address reuse")
 	}

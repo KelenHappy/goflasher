@@ -139,29 +139,42 @@ func (b *Backend) basicDevice(candidate sysfsDevice) device.Device {
 }
 
 func (b *Backend) populateSafetyMetadata(d *device.Device, name string, mounts map[devNumber][]string, swaps map[string]bool, topology *blockTopology) error {
+	mountPoints, err := mountPointsBackedBy(name, mounts, topology)
+	if err != nil {
+		return err
+	}
+	hasSwap, err := deviceUsedForSwap(name, b.DevRoot, swaps, topology)
+	if err != nil {
+		return err
+	}
+	d.MountPoints = mountPoints
+	d.Mounted = len(mountPoints) > 0
+	d.IsSystemDisk = containsCriticalMount(mountPoints) || hasSwap
+	return nil
+}
+
+// mountPointsBackedBy resolves every mounted block device through the kernel
+// topology. This includes mounts layered on partitions, device-mapper, LVM, or
+// software RAID rather than only mounts whose source directly names the disk.
+func mountPointsBackedBy(name string, mounts map[devNumber][]string, topology *blockTopology) ([]string, error) {
+	var mountPoints []string
 	for number, points := range mounts {
 		mounted, err := topology.nameForNumber(number)
 		if err != nil {
 			if number.major == 0 {
 				continue
 			}
-			return err
+			return nil, err
 		}
 		backed, err := topology.dependsOn(mounted, name)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if backed {
-			d.MountPoints = appendUnique(d.MountPoints, points...)
+			mountPoints = appendUnique(mountPoints, points...)
 		}
 	}
-	d.Mounted = len(d.MountPoints) > 0
-	hasSwap, err := deviceUsedForSwap(name, b.DevRoot, swaps, topology)
-	if err != nil {
-		return err
-	}
-	d.IsSystemDisk = containsCriticalMount(d.MountPoints) || hasSwap
-	return nil
+	return mountPoints, nil
 }
 
 func containsCriticalMount(mountPoints []string) bool {

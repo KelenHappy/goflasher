@@ -143,7 +143,7 @@ func runDestructiveCase(ctx context.Context, backend device.Backend, options com
 
 	switch options.testCase {
 	case "write-verify-eject":
-		result, err := run(ctx, backend, info, selected, app.RunOptions{Verify: true, Eject: true})
+		result, err := run(ctx, writeRequest{backend: backend, image: info, selected: selected, options: app.RunOptions{Verify: true, Eject: true}})
 		fatal(err)
 		if !result.Verified || !result.Ejected {
 			fatal(errors.New("verification or eject result missing"))
@@ -152,20 +152,20 @@ func runDestructiveCase(ctx context.Context, backend device.Backend, options com
 	case "write-cancel":
 		cancelCtx, cancel := context.WithTimeout(ctx, options.cancelAfter)
 		defer cancel()
-		_, err := run(cancelCtx, backend, info, selected, app.RunOptions{})
+		_, err := run(cancelCtx, writeRequest{backend: backend, image: info, selected: selected})
 		if !isCancellation(err) {
 			fatal(fmt.Errorf("expected cancellation, got %v", err))
 		}
 		fmt.Printf("PASS: cancellation rejected completion: %v\n", err)
 	case "write-remove":
 		fmt.Fprintln(os.Stderr, "REMOVE THE DISPOSABLE DEVICE WHILE WRITING; success is a test failure")
-		_, err := run(ctx, backend, info, selected, app.RunOptions{})
+		_, err := run(ctx, writeRequest{backend: backend, image: info, selected: selected})
 		if err == nil {
 			fatal(errors.New("write completed; removal was not observed"))
 		}
 		fmt.Printf("PASS: removal failed closed: %v\n", err)
 	case "corruption-detect":
-		_, err := run(ctx, backend, info, selected, app.RunOptions{Verify: true})
+		_, err := run(ctx, writeRequest{backend: backend, image: info, selected: selected, options: app.RunOptions{Verify: true}})
 		fatal(err)
 		w, err := backend.OpenWriter(ctx, selected)
 		fatal(err)
@@ -235,11 +235,20 @@ func approvedDevice(a allowlist, id string) allowedDevice {
 }
 func exactDevice(devices []device.Device, a allowedDevice) (device.Device, bool) {
 	for _, d := range devices {
-		if d.ID == a.Identity && d.Size == a.Capacity && (a.Serial == "" || d.Serial == a.Serial) && d.Model == a.Model {
+		if matchesAllowedDevice(d, a) {
 			return d, true
 		}
 	}
 	return device.Device{}, false
+}
+func matchesAllowedDevice(d device.Device, allowed allowedDevice) bool {
+	return d.ID == allowed.Identity &&
+		d.Size == allowed.Capacity &&
+		d.Model == allowed.Model &&
+		matchesOptionalSerial(d.Serial, allowed.Serial)
+}
+func matchesOptionalSerial(actual, allowed string) bool {
+	return allowed == "" || actual == allowed
 }
 func printInventory(devices []device.Device, a allowlist) {
 	for _, d := range devices {
@@ -304,9 +313,12 @@ func checkOrWriteSnapshot(path string, d device.Device) {
 func checkSnapshot(data []byte, d device.Device) {
 	var s snapshot
 	fatal(json.Unmarshal(data, &s))
-	if s.Version != specificationVersion || s.Identity != d.ID || s.Capacity != d.Size {
+	if !s.matches(d) {
 		fatal(errors.New("existing snapshot is for a different device or specification"))
 	}
+}
+func (s snapshot) matches(d device.Device) bool {
+	return s.Version == specificationVersion && s.Identity == d.ID && s.Capacity == d.Size
 }
 func checkPathReuse(path string, devices []device.Device, approved allowlist, selectedID string) {
 	b, err := os.ReadFile(path)
@@ -343,7 +355,15 @@ func checkReplacement(d device.Device, approved allowlist) {
 		fatal(errors.New("replacement does not match its reviewed allowlist metadata"))
 	}
 }
-func run(ctx context.Context, backend device.Backend, info image.Info, selected device.Device, options app.RunOptions) (app.RunResult, error) {
+
+type writeRequest struct {
+	backend  device.Backend
+	image    image.Info
+	selected device.Device
+	options  app.RunOptions
+}
+
+func run(ctx context.Context, request writeRequest) (app.RunResult, error) {
 	states := app.NewStateMachine()
 	for _, s := range []app.State{app.ImageSelected, app.Ready, app.Confirming} {
 		fatal(states.Transition(s))
@@ -356,7 +376,7 @@ func run(ctx context.Context, backend device.Backend, info image.Info, selected 
 			fmt.Printf("stage=%s bytes=%d total=%d\n", u.Stage, u.BytesProcessed, u.TotalBytes)
 		}
 	}()
-	result, err := (&app.Service{Backend: backend, State: states}).Run(ctx, info, selected, options, updates)
+	result, err := (&app.Service{Backend: request.backend, State: states}).Run(ctx, request.image, request.selected, request.options, updates)
 	close(updates)
 	<-done
 	return result, err
