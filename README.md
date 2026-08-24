@@ -81,13 +81,6 @@ Do not launch GoFlasher itself with `sudo`.
 
 ## Testing
 
-The automated suite uses temporary regular files and fake sysfs/procfs trees;
-it does not write to real block devices.
-
-```sh
-go test ./...
-```
-
 See **[TESTING.md](docs/development/TESTING.md)** for race tests, GUI checks, package smoke tests,
 and the deliberately guarded real-device test command. Release testers can use
 the step-by-step hardware manuals in
