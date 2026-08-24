@@ -103,7 +103,7 @@ func (r *execution) execute() error {
 }
 
 func (r *execution) preflight() error {
-	if r.plan == nil || r.source == nil || r.target == nil || len(r.plan.planned) == 0 {
+	if !r.hasValidInput() {
 		return errors.New("invalid execution input")
 	}
 	if err := r.ctx.Err(); err != nil {
@@ -119,6 +119,10 @@ func (r *execution) preflight() error {
 		return preflight.Preflight(r.ctx)
 	}
 	return nil
+}
+
+func (r *execution) hasValidInput() bool {
+	return r.plan != nil && r.source != nil && r.target != nil && len(r.plan.planned) > 0
 }
 
 func (r *execution) createFilesystem() error {
@@ -195,17 +199,11 @@ func (r *execution) copySplitWIM() error {
 	}
 	nextPart := 1
 	err := r.splitter.Split(r.ctx, reader, wim.source.Size, expectedWIMHash, plan.splitSize, func(part SplitPart) error {
-		if nextPart > plan.splitParts {
-			return fmt.Errorf("%w: split pipeline produced too many parts", ErrVerification)
+		name, err := validateSplitPart(part, nextPart, plan.splitParts, plan.splitSize)
+		if err != nil {
+			return err
 		}
-		want := "install.swm"
-		if nextPart > 1 {
-			want = "install" + strconv.Itoa(nextPart) + ".swm"
-		}
-		if part.Name != want || part.Data == nil || part.Size == 0 || part.Size > plan.splitSize {
-			return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Name)
-		}
-		destination := path.Join(path.Dir(wim.destination), want)
+		destination := path.Join(path.Dir(wim.destination), name)
 		verified, n, copyErr := copyReaderFile(r.ctx, r.builder, fileCopy{destination: destination, source: part.Data, expectedSize: part.Size})
 		r.recordCopy(verified, n, copyErr)
 		if copyErr != nil {
@@ -221,6 +219,20 @@ func (r *execution) copySplitWIM() error {
 		return fmt.Errorf("split pipeline produced %d of %d planned parts", nextPart-1, plan.splitParts)
 	}
 	return nil
+}
+
+func validateSplitPart(part SplitPart, index, plannedParts int, maxSize uint64) (string, error) {
+	if index > plannedParts {
+		return "", fmt.Errorf("%w: split pipeline produced too many parts", ErrVerification)
+	}
+	name := "install.swm"
+	if index > 1 {
+		name = "install" + strconv.Itoa(index) + ".swm"
+	}
+	if part.Name != name || part.Data == nil || part.Size == 0 || part.Size > maxSize {
+		return "", fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Name)
+	}
+	return name, nil
 }
 
 func plannedBySource(plan *BuildPlan, name string) (plannedEntry, bool) {
