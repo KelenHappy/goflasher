@@ -105,6 +105,39 @@ func TestExecutorRequiresSplitPipelineBeforeFirstTargetWrite(t *testing.T) {
 	}
 }
 
+func TestValidateSplitPartRejectsInvalidParts(t *testing.T) {
+	valid := SplitPart{Name: "install.swm", Size: 1, Data: bytes.NewReader([]byte{1})}
+	tests := []struct {
+		name  string
+		part  SplitPart
+		index int
+	}{
+		{name: "too many", part: valid, index: 2},
+		{name: "wrong name", part: SplitPart{Name: "wrong.swm", Size: 1, Data: valid.Data}, index: 1},
+		{name: "nil data", part: SplitPart{Name: "install.swm", Size: 1}, index: 1},
+		{name: "zero size", part: SplitPart{Name: "install.swm", Data: valid.Data}, index: 1},
+		{name: "oversized", part: SplitPart{Name: "install.swm", Size: 2, Data: valid.Data}, index: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := validateSplitPart(test.part, test.index, 1, 1); !errors.Is(err, ErrVerification) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestExecutorRejectsFewerSplitPartsThanPlanned(t *testing.T) {
+	plan, source := executorFixture(t)
+	plan.strategy = SplitWIM
+	plan.splitSize = 4096
+	plan.splitParts = 2
+	result, err := (Executor{Splitter: fixtureSplitter{}}).Execute(context.Background(), plan, bytes.NewReader(source), &sparseTarget{size: 80 << 20})
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("split pipeline produced 1 of 2 planned parts")) || result.Complete {
+		t.Fatalf("result=%+v error=%v", result, err)
+	}
+}
+
 func TestExecutorCancellationNeverCompletes(t *testing.T) {
 	plan, source := executorFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())

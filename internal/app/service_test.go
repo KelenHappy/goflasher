@@ -219,37 +219,21 @@ func TestServiceCancellationBeforeDestructiveWork(t *testing.T) {
 }
 
 func TestServiceRejectsMismatchedInspectedChecksumBeforeWrite(t *testing.T) {
-	dir := t.TempDir()
-	source := filepath.Join(dir, "source.img")
-	target := filepath.Join(dir, "target")
-	payload := []byte("changed image")
-	os.WriteFile(source, payload, 0600)
-	os.WriteFile(target, make([]byte, len(payload)), 0600)
-	info, err := image.Detect(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err = image.Inspect(info)
+	fixture := newFileServiceFixture(t, []byte("changed image"), 1)
+	info, err := image.Inspect(fixture.info)
 	if err != nil {
 		t.Fatal(err)
 	}
 	info.SHA256 = strings.Repeat("0", 64)
-	d := device.Device{ID: "test", Path: target, Size: uint64(len(payload)), IsAllowed: true}
-	backend := &fileBackend{path: target, d: d}
-	states := NewStateMachine()
-	for _, state := range []State{ImageSelected, Ready, Confirming} {
-		if err := states.Transition(state); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result, err := (&Service{Backend: backend, State: states}).Run(context.Background(), info, d, RunOptions{}, nil)
+
+	result, err := fixture.service.Run(context.Background(), info, fixture.device, RunOptions{}, nil)
 	if err == nil {
 		t.Fatal("mismatched inspected checksum was accepted")
 	}
 	if result.BytesWritten != 0 {
 		t.Errorf("bytes written = %d, want 0", result.BytesWritten)
 	}
-	if backend.unmounted || backend.flushed {
+	if fixture.backend.unmounted || fixture.backend.flushed {
 		t.Error("target was prepared for a changed source")
 	}
 }
