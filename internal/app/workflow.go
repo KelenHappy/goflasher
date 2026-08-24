@@ -42,52 +42,64 @@ func (p WorkflowPlanner) Plan(ctx context.Context, info image.Info, target devic
 	}
 	switch kind {
 	case image.RawDiskImage, image.LinuxHybridISO:
-		if info.UncompressedSize > target.Size {
-			return WorkflowPlan{}, writer.ErrTargetTooSmall
-		}
-		if err := info.VerifySourceContext(ctx); err != nil {
-			return WorkflowPlan{}, err
-		}
-		return WorkflowPlan{Kind: PlanRawWrite}, nil
+		return planRawWrite(ctx, info, target)
 	case image.WindowsInstallerISO:
-		if info.Compression != image.CompressionNone {
-			return WorkflowPlan{}, ErrCompressedWindowsInstallerUnsupported
-		}
-		if !p.WindowsSupported {
-			return WorkflowPlan{}, ErrInstallerBuilderUnavailable
-		}
-		// Availability is a property of the complete installer builder, not only
-		// of plans that happen to need splitting. A package missing its pinned
-		// native library must never advertise or execute even a copy-WIM plan.
-		if p.SplitPreflight == nil {
-			return WorkflowPlan{}, ErrInstallerBuilderUnavailable
-		}
-		if err := p.SplitPreflight(ctx); err != nil {
-			return WorkflowPlan{}, errors.Join(ErrInstallerBuilderUnavailable, err)
-		}
-		r, size, lease, err := info.RetainedReaderAt()
-		if err != nil {
-			return WorkflowPlan{}, err
-		}
-		fs, err := installeriso.New(r, size, lease)
-		if err != nil {
-			return WorkflowPlan{}, err
-		}
-		defer fs.Close()
-		plan, err := installer.NewBuildPlan(ctx, installer.BuildPlanInput{
-			Source: r, SourceSize: uint64(size), Manifest: fs.Manifest(),
-			Options: installer.PlanOptions{
-				SourceIdentity: "retained:" + info.SHA256, TargetSize: target.Size,
-				TemporarySpace: p.TemporarySpace, SplitPreflight: p.SplitPreflight,
-			},
-		})
-		if err != nil {
-			return WorkflowPlan{}, err
-		}
-		return WorkflowPlan{Kind: PlanWindowsInstaller, Windows: plan}, nil
+		return p.planWindowsInstaller(ctx, info, target)
 	default:
 		return WorkflowPlan{}, image.ErrUnsafeClassification
 	}
+}
+
+func planRawWrite(ctx context.Context, info image.Info, target device.Device) (WorkflowPlan, error) {
+	if info.UncompressedSize > target.Size {
+		return WorkflowPlan{}, writer.ErrTargetTooSmall
+	}
+	if err := info.VerifySourceContext(ctx); err != nil {
+		return WorkflowPlan{}, err
+	}
+	return WorkflowPlan{Kind: PlanRawWrite}, nil
+}
+
+func (p WorkflowPlanner) planWindowsInstaller(ctx context.Context, info image.Info, target device.Device) (WorkflowPlan, error) {
+	if err := p.validateWindowsInstaller(ctx, info); err != nil {
+		return WorkflowPlan{}, err
+	}
+	r, size, lease, err := info.RetainedReaderAt()
+	if err != nil {
+		return WorkflowPlan{}, err
+	}
+	fs, err := installeriso.New(r, size, lease)
+	if err != nil {
+		return WorkflowPlan{}, err
+	}
+	defer fs.Close()
+	plan, err := installer.NewBuildPlan(ctx, installer.BuildPlanInput{
+		Source: r, SourceSize: uint64(size), Manifest: fs.Manifest(),
+		Options: installer.PlanOptions{
+			SourceIdentity: "retained:" + info.SHA256, TargetSize: target.Size,
+			TemporarySpace: p.TemporarySpace, SplitPreflight: p.SplitPreflight,
+		},
+	})
+	if err != nil {
+		return WorkflowPlan{}, err
+	}
+	return WorkflowPlan{Kind: PlanWindowsInstaller, Windows: plan}, nil
+}
+
+func (p WorkflowPlanner) validateWindowsInstaller(ctx context.Context, info image.Info) error {
+	if info.Compression != image.CompressionNone {
+		return ErrCompressedWindowsInstallerUnsupported
+	}
+	// Availability is a property of the complete installer builder, not only
+	// of plans that happen to need splitting. A package missing its pinned
+	// native library must never advertise or execute even a copy-WIM plan.
+	if !p.WindowsSupported || p.SplitPreflight == nil {
+		return ErrInstallerBuilderUnavailable
+	}
+	if err := p.SplitPreflight(ctx); err != nil {
+		return errors.Join(ErrInstallerBuilderUnavailable, err)
+	}
+	return nil
 }
 
 type InstallerTarget = device.InstallerTarget

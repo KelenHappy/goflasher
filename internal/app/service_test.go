@@ -61,7 +61,7 @@ func TestServiceReportsDeviceReleaseFailure(t *testing.T) {
 	backend := &releaseErrorBackend{fileBackend: fixture.backend, err: releaseErr}
 	fixture.service.Backend = backend
 
-	_, err := fixture.service.Run(context.Background(), fixture.info, fixture.device, RunOptions{}, nil)
+	_, err := fixture.service.Run(context.Background(), RunRequest{Image: fixture.info, Target: fixture.device})
 	if !errors.Is(err, releaseErr) {
 		t.Fatalf("Run() error = %v, want release error", err)
 	}
@@ -91,7 +91,7 @@ func (w *observedWriteCloser) Close() error {
 func TestServiceRawWriteVerifyEject(t *testing.T) {
 	payload := bytes.Repeat([]byte("image"), 4096)
 	fixture := newFileServiceFixture(t, payload, 2)
-	result, err := fixture.service.Run(context.Background(), fixture.info, fixture.device, RunOptions{Verify: true, Eject: true}, nil)
+	result, err := fixture.service.Run(context.Background(), RunRequest{Image: fixture.info, Target: fixture.device, Options: RunOptions{Verify: true, Eject: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestServiceEntersFlushingBeforeWriterClose(t *testing.T) {
 		}
 	}
 	backend := &closeStateBackend{fileBackend: &fileBackend{path: target, d: d}, state: state}
-	if _, err := (&Service{Backend: backend, State: state}).Run(context.Background(), info, d, RunOptions{}, nil); err != nil {
+	if _, err := (&Service{Backend: backend, State: state}).Run(context.Background(), RunRequest{Image: info, Target: d}); err != nil {
 		t.Fatal(err)
 	}
 	if backend.stateAtClose != Flushing {
@@ -187,7 +187,7 @@ func TestServiceRejectsTooSmallBeforeUnmount(t *testing.T) {
 	states.Transition(ImageSelected)
 	states.Transition(Ready)
 	states.Transition(Confirming)
-	_, err := (&Service{Backend: backend, State: states}).Run(context.Background(), info, d, RunOptions{}, nil)
+	_, err := (&Service{Backend: backend, State: states}).Run(context.Background(), RunRequest{Image: info, Target: d})
 	if err == nil || backend.unmounted {
 		t.Fatalf("error=%v unmounted=%v", err, backend.unmounted)
 	}
@@ -206,7 +206,7 @@ func TestServiceCancellationBeforeDestructiveWork(t *testing.T) {
 	states.Transition(Confirming)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := (&Service{Backend: backend, State: states}).Run(ctx, info, d, RunOptions{}, nil)
+	_, err := (&Service{Backend: backend, State: states}).Run(ctx, RunRequest{Image: info, Target: d})
 	if err == nil {
 		t.Fatal("Run() succeeded after cancellation")
 	}
@@ -226,7 +226,7 @@ func TestServiceRejectsMismatchedInspectedChecksumBeforeWrite(t *testing.T) {
 	}
 	info.SHA256 = strings.Repeat("0", 64)
 
-	result, err := fixture.service.Run(context.Background(), info, fixture.device, RunOptions{}, nil)
+	result, err := fixture.service.Run(context.Background(), RunRequest{Image: info, Target: fixture.device})
 	if err == nil {
 		t.Fatal("mismatched inspected checksum was accepted")
 	}
@@ -247,7 +247,7 @@ func TestServiceRejectsRetainedSourceChangeBeforeUnmount(t *testing.T) {
 	if err := os.Truncate(fixture.info.Path, 1); err != nil {
 		t.Fatal(err)
 	}
-	_, err = fixture.service.Run(context.Background(), inspected, fixture.device, RunOptions{}, nil)
+	_, err = fixture.service.Run(context.Background(), RunRequest{Image: inspected, Target: fixture.device})
 	if err == nil {
 		t.Fatal("changed retained source was accepted")
 	}
@@ -397,7 +397,7 @@ func runServiceStageFailure(t *testing.T, testCase stageFailureCase, payload []b
 	fixture := newFileServiceFixture(t, payload, 1)
 	backend := &failureBackend{payload: payload}
 	testCase.configure(backend)
-	got, err := (&Service{Backend: backend, State: fixture.state}).Run(context.Background(), fixture.info, fixture.device, testCase.opts, nil)
+	got, err := (&Service{Backend: backend, State: fixture.state}).Run(context.Background(), RunRequest{Image: fixture.info, Target: fixture.device, Options: testCase.opts})
 	assertStageError(t, err, testCase)
 	assertStageExecution(t, fixture.state, backend, testCase)
 	assertStageResult(t, got, testCase.want)

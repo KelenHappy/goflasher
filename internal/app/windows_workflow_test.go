@@ -30,7 +30,7 @@ func TestWindowsParserFailureNeverUsesRawWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &noRawWriteBackend{}
-	_, err := (&Service{Backend: b}).Run(context.Background(), image.Info{Path: path, Format: image.FormatISO, Compression: image.CompressionNone}, device.Device{Size: 1 << 30}, RunOptions{}, nil)
+	_, err := (&Service{Backend: b}).Run(context.Background(), RunRequest{Image: image.Info{Path: path, Format: image.FormatISO, Compression: image.CompressionNone}, Target: device.Device{Size: 1 << 30}})
 	if err == nil {
 		t.Fatal("Run() succeeded")
 	}
@@ -104,7 +104,7 @@ func runCompressedWorkflowTest(t *testing.T, data []byte, suffix string, wantRaw
 	}
 	b := &noRawWriteBackend{}
 	s := &Service{Backend: b, State: readyToRunState(t)}
-	_, err = s.Run(context.Background(), info, device.Device{Size: 1 << 30}, RunOptions{}, nil)
+	_, err = s.Run(context.Background(), RunRequest{Image: info, Target: device.Device{Size: 1 << 30}})
 	if wantRaw {
 		if err != nil {
 			t.Fatal(err)
@@ -148,7 +148,7 @@ func TestWindowsInstallerNeverFallsBackToRawWriter(t *testing.T) {
 	}
 	backend := &noRawWriteBackend{}
 	service := Service{Backend: backend}
-	_, err := service.Run(context.Background(), image.Info{Path: path, Format: image.FormatISO, Compression: image.CompressionNone}, device.Device{Size: uint64(len(data) * 2)}, RunOptions{}, nil)
+	_, err := service.Run(context.Background(), RunRequest{Image: image.Info{Path: path, Format: image.FormatISO, Compression: image.CompressionNone}, Target: device.Device{Size: uint64(len(data) * 2)}})
 	if !errors.Is(err, ErrInstallerBuilderUnavailable) {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -169,7 +169,7 @@ func TestWindowsInstallerRejectsMissingBundledLibraryBeforeUnmount(t *testing.T)
 	backend := &installerWorkflowBackend{target: device.Device{ID: "target", Size: 80 << 20, IsAllowed: true}}
 	missing := errors.New("bundled libwim missing")
 	splitter := &availabilityFailingSplitter{err: missing}
-	_, err := (&Service{Backend: backend, InstallerSplitter: splitter}).Run(context.Background(), image.Info{Path: path, Format: image.FormatISO, Compression: image.CompressionNone}, backend.target, RunOptions{}, nil)
+	_, err := (&Service{Backend: backend, InstallerSplitter: splitter}).Run(context.Background(), RunRequest{Image: image.Info{Path: path, Format: image.FormatISO, Compression: image.CompressionNone}, Target: backend.target})
 	if !errors.Is(err, ErrInstallerBuilderUnavailable) || !errors.Is(err, missing) {
 		t.Fatalf("error=%v", err)
 	}

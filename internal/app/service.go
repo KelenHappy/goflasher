@@ -17,6 +17,14 @@ import (
 // RunOptions controls optional post-write safety steps.
 type RunOptions struct{ Verify, Eject bool }
 
+// RunRequest groups the inputs for a destructive device workflow.
+type RunRequest struct {
+	Image   image.Info
+	Target  device.Device
+	Options RunOptions
+	Updates chan<- progress.Update
+}
+
 // RunResult summarizes work completed by Service.Run. A failed run may return
 // partial values, allowing callers to report how far destructive work got.
 type RunResult struct {
@@ -47,7 +55,7 @@ var ErrCompressedWindowsInstallerUnsupported = errors.New("compressed Windows in
 
 // Run owns the destructive workflow. Safety checks are deliberately repeated
 // by the backend immediately before opening the block device.
-func (s *Service) Run(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (RunResult, error) {
+func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error) {
 	start := time.Now()
 	if s.State == nil {
 		s.State = NewStateMachine()
@@ -58,7 +66,7 @@ func (s *Service) Run(ctx context.Context, info image.Info, target device.Device
 	if s.TemporarySpace == 0 {
 		s.TemporarySpace, _ = availableTemporarySpace()
 	}
-	out, err := s.runWorkflow(ctx, info, target, opts, updates)
+	out, err := s.runWorkflow(ctx, request)
 	s.finishRun(&out, err, time.Since(start))
 	return out, err
 }
@@ -112,28 +120,28 @@ func (s *Service) Preview(ctx context.Context, info image.Info, target device.De
 		RequiredCapacity: plan.Windows.RequiredTargetCapacity(), RequiredTemporarySpace: plan.Windows.TemporarySpaceRequired(), AvailableTemporarySpace: s.TemporarySpace}, nil
 }
 
-func (s *Service) runWorkflow(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update) (out RunResult, err error) {
-	info, plan, err := s.inspectAndPlan(ctx, info, target, updates)
+func (s *Service) runWorkflow(ctx context.Context, request RunRequest) (out RunResult, err error) {
+	info, plan, err := s.inspectAndPlan(ctx, request.Image, request.Target, request.Updates)
 	if err != nil {
 		return out, err
 	}
 	defer func() { err = errors.Join(err, info.CloseSource()) }()
 	out.PlanKind = plan.Kind
-	windowsBackend, effectiveSplitter, cleanup, err := s.prepareWindowsInstaller(ctx, info, &plan, updates)
+	windowsBackend, effectiveSplitter, cleanup, err := s.prepareWindowsInstaller(ctx, info, &plan, request.Updates)
 	if err != nil {
 		return out, err
 	}
 	defer func() { err = errors.Join(err, cleanup()) }()
-	if err = s.unmountDevice(ctx, target); err != nil {
+	if err = s.unmountDevice(ctx, request.Target); err != nil {
 		return out, err
 	}
-	releaseDevice := newDeviceRelease(s.Backend, target)
+	releaseDevice := newDeviceRelease(s.Backend, request.Target)
 	defer func() { err = errors.Join(err, releaseDevice()) }()
-	if err = s.executePlan(ctx, plan, info, target, opts, updates, windowsBackend, effectiveSplitter, &out); err != nil {
+	if err = s.executePlan(ctx, plan, info, request.Target, request.Options, request.Updates, windowsBackend, effectiveSplitter, &out); err != nil {
 		return out, err
 	}
-	operation := workflowOperation{service: s, ctx: ctx, target: target, updates: updates, out: &out}
-	if err = operation.ejectDevice(opts.Eject); err != nil {
+	operation := workflowOperation{service: s, ctx: ctx, target: request.Target, updates: request.Updates, out: &out}
+	if err = operation.ejectDevice(request.Options.Eject); err != nil {
 		return out, err
 	}
 	if err = releaseDevice(); err != nil {

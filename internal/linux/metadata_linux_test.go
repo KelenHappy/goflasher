@@ -22,6 +22,19 @@ func TestReadUSBAncestorSerial(t *testing.T) {
 	}
 }
 
+func TestUSBDeviceAncestorUsesPhysicalDeviceNode(t *testing.T) {
+	path := filepath.Join("sys", "devices", "pci0000:00", "0000:00:14.0", "usb1", "1-2", "1-2.4", "1-2.4:1.0", "host8", "block", "sdc")
+	want := filepath.Join("sys", "devices", "pci0000:00", "0000:00:14.0", "usb1", "1-2", "1-2.4")
+	if got := usbDeviceAncestor(path); got != want {
+		t.Fatalf("USB ancestor = %q, want %q", got, want)
+	}
+	for _, name := range []string{"usb1", "1-2.4:1.0", "host8", "target8:0:0", "", "1-"} {
+		if isUSBDeviceNode(name) {
+			t.Errorf("%q unexpectedly identified as a physical USB device", name)
+		}
+	}
+}
+
 func TestMetadataAcceptsMatchingUSBSerialWhenSCSISerialDiffers(t *testing.T) {
 	root := t.TempDir()
 	usb := filepath.Join(root, "usb1", "1-13")

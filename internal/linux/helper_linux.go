@@ -160,6 +160,9 @@ func (h *commandHelper) start(ctx context.Context, r privilegedRequest, updates 
 	} else {
 		cmd.Stderr = stderr
 	}
+	// Starting pkexec is intentionally synchronous: authorization must finish
+	// before any privileged request bytes are sent, and each helper is a
+	// security-scoped, one-operation process rather than a reusable worker.
 	if err = cmd.Start(); err != nil {
 		return nil, nil, nil, stderr, authorizationError(err, stderr.String())
 	}
@@ -902,12 +905,50 @@ func containsIdentity(values []string, wanted string) bool {
 // physical USB ancestor so privileged revalidation uses the same hardware
 // identity without trusting data supplied by the GUI.
 func readUSBAncestorAttribute(real, attribute string) string {
+	path := usbDeviceAncestor(real)
+	if path == "" || !exists(filepath.Join(path, "idVendor")) || !exists(filepath.Join(path, "idProduct")) {
+		return ""
+	}
+	return readTrim(filepath.Join(path, attribute))
+}
+
+// usbDeviceAncestor uses the kernel's documented USB sysfs node names to find
+// the nearest physical device. Interface nodes contain a colon (for example,
+// 1-13:1.0); device nodes contain a bus-port chain such as 1-13 or 1-2.4.
+// Keeping this ancestry walk lexical avoids probing the filesystem at every
+// level of the SCSI/block-device path.
+func usbDeviceAncestor(real string) string {
 	for path := filepath.Clean(real); path != filepath.Dir(path); path = filepath.Dir(path) {
-		if exists(filepath.Join(path, "idVendor")) && exists(filepath.Join(path, "idProduct")) {
-			return readTrim(filepath.Join(path, attribute))
+		if isUSBDeviceNode(filepath.Base(path)) {
+			return path
 		}
 	}
 	return ""
+}
+
+func isUSBDeviceNode(name string) bool {
+	bus, ports, found := strings.Cut(name, "-")
+	if !found || !decimalDigits(bus) || ports == "" {
+		return false
+	}
+	for _, port := range strings.Split(ports, ".") {
+		if !decimalDigits(port) {
+			return false
+		}
+	}
+	return true
+}
+
+func decimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateDeviceSafety(env helperEnvironment, name string, major, minor uint32) error {
