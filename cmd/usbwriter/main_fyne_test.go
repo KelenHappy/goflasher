@@ -199,7 +199,7 @@ func TestRefreshAndLanguageChangeShareGUIThread(t *testing.T) {
 
 func newTestController(t *testing.T) *guiController {
 	t.Helper()
-	a := fyneapp.NewWithID("org.goflasher.test")
+	a := fyneapp.NewWithID(fmt.Sprintf("org.goflasher.test.%d", time.Now().UnixNano()))
 	t.Cleanup(a.Quit)
 	w := a.NewWindow("test")
 	tr := i18n.New("en")
