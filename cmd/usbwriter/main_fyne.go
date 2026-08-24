@@ -614,7 +614,7 @@ func (c *guiController) confirmWrite(ok bool) {
 		close(progressDone)
 	}()
 	go func() {
-		result, err := (&core.Service{Backend: c.backend, State: c.machine}).Run(ctx, c.info, c.selected, core.RunOptions{Verify: c.view.verifyCheck.Checked, Eject: c.view.ejectCheck.Checked}, updates)
+		result, err := (&core.Service{Backend: c.backend, State: c.machine}).Run(ctx, core.RunRequest{Image: c.info, Target: c.selected, Options: core.RunOptions{Verify: c.view.verifyCheck.Checked, Eject: c.view.ejectCheck.Checked}, Updates: updates})
 		close(updates)
 		<-progressDone
 		fyne.Do(func() { c.finishWrite(result, err) })

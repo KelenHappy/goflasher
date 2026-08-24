@@ -62,7 +62,7 @@ func (b *installerWorkflowBackend) OpenInstallerReader(context.Context, device.D
 
 func TestServiceUsesWindowsExecutorAndSemanticResultFields(t *testing.T) {
 	fixture := newWindowsExecutorFixture(t)
-	result, err := fixture.service().Run(context.Background(), fixture.info, fixture.target, RunOptions{Eject: true}, nil)
+	result, err := fixture.service().Run(context.Background(), RunRequest{Image: fixture.info, Target: fixture.target, Options: RunOptions{Eject: true}})
 	assertNoError(t, err)
 	assertEqual(t, "plan kind", result.PlanKind, PlanWindowsInstaller)
 	assertPositive(t, "files written", result.FilesWritten)
@@ -78,7 +78,7 @@ func TestWindowsExecutorFailureUsesSharedReleaseAndFailedState(t *testing.T) {
 	fixture := newWindowsExecutorFixture(t)
 	openErr := errors.New("exclusive open failed")
 	fixture.backend.openErr = openErr
-	_, err := fixture.service().Run(context.Background(), fixture.info, fixture.target, RunOptions{}, nil)
+	_, err := fixture.service().Run(context.Background(), RunRequest{Image: fixture.info, Target: fixture.target})
 	assertErrorIs(t, err, openErr)
 	assertEqual(t, "backend lifecycle", fixture.backend.lifecycle(), [5]int{1, 1, 0, 1, 0})
 	assertEqual(t, "state", fixture.state.State(), Failed)

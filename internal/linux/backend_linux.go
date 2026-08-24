@@ -64,37 +64,54 @@ func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, erro
 }
 
 func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
-	entries, err := os.ReadDir(b.SysClassBlock)
+	snapshot, err := b.enumerationSnapshot()
 	if err != nil {
 		return nil, err
 	}
-	mounts, err := parseMountInfo(b.MountInfo)
-	if err != nil {
-		return nil, err
-	}
-	swaps, err := parseSwaps(b.Swaps)
-	if err != nil {
-		return nil, err
-	}
-	topology, err := readBlockTopology(b.SysClassBlock)
-	if err != nil {
-		return nil, err
-	}
-	var result []device.Device
-	for _, entry := range entries {
+	result := make([]device.Device, 0, len(snapshot.entries))
+	for _, entry := range snapshot.entries {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if d, ok, err := b.deviceFromEntry(entry, entries, mounts, swaps, topology); err != nil {
+		d, ok, err := b.deviceFromEntry(entry, snapshot)
+		if err != nil {
 			return nil, err
-		} else if ok {
+		}
+		if ok {
 			result = append(result, d)
 		}
 	}
 	return result, nil
 }
 
-func (b *Backend) deviceFromEntry(entry os.DirEntry, entries []os.DirEntry, mounts map[devNumber][]string, swaps map[string]bool, topology *blockTopology) (device.Device, bool, error) {
+type enumerationSnapshot struct {
+	entries  []os.DirEntry
+	mounts   map[devNumber][]string
+	swaps    map[string]bool
+	topology *blockTopology
+}
+
+func (b *Backend) enumerationSnapshot() (enumerationSnapshot, error) {
+	entries, err := os.ReadDir(b.SysClassBlock)
+	if err != nil {
+		return enumerationSnapshot{}, err
+	}
+	mounts, err := parseMountInfo(b.MountInfo)
+	if err != nil {
+		return enumerationSnapshot{}, err
+	}
+	swaps, err := parseSwaps(b.Swaps)
+	if err != nil {
+		return enumerationSnapshot{}, err
+	}
+	topology, err := readBlockTopology(b.SysClassBlock)
+	if err != nil {
+		return enumerationSnapshot{}, err
+	}
+	return enumerationSnapshot{entries: entries, mounts: mounts, swaps: swaps, topology: topology}, nil
+}
+
+func (b *Backend) deviceFromEntry(entry os.DirEntry, snapshot enumerationSnapshot) (device.Device, bool, error) {
 	name := entry.Name()
 	link := filepath.Join(b.SysClassBlock, name)
 	if exists(filepath.Join(link, "partition")) {
@@ -111,8 +128,8 @@ func (b *Backend) deviceFromEntry(entry os.DirEntry, entries []os.DirEntry, moun
 	properties := b.udev(major, minor)
 	candidate := sysfsDevice{name: name, link: link, real: real, major: major, minor: minor, properties: properties}
 	d := b.basicDevice(candidate)
-	d.PartitionCount = countPartitions(entries, name, b.SysClassBlock)
-	if err := b.populateSafetyMetadata(&d, name, mounts, swaps, topology); err != nil {
+	d.PartitionCount = countPartitions(snapshot.entries, name, b.SysClassBlock)
+	if err := b.populateSafetyMetadata(&d, candidate, snapshot); err != nil {
 		return device.Device{}, false, err
 	}
 	b.classifyDevice(&d, link, real, properties)
@@ -138,12 +155,12 @@ func (b *Backend) basicDevice(candidate sysfsDevice) device.Device {
 	}
 }
 
-func (b *Backend) populateSafetyMetadata(d *device.Device, name string, mounts map[devNumber][]string, swaps map[string]bool, topology *blockTopology) error {
-	mountPoints, err := mountPointsBackedBy(name, mounts, topology)
+func (b *Backend) populateSafetyMetadata(d *device.Device, candidate sysfsDevice, snapshot enumerationSnapshot) error {
+	mountPoints, err := mountPointsBackedBy(candidate.name, snapshot.mounts, snapshot.topology)
 	if err != nil {
 		return err
 	}
-	hasSwap, err := deviceUsedForSwap(name, b.DevRoot, swaps, topology)
+	hasSwap, err := deviceUsedForSwap(candidate.name, b.DevRoot, snapshot.swaps, snapshot.topology)
 	if err != nil {
 		return err
 	}
@@ -159,14 +176,7 @@ func (b *Backend) populateSafetyMetadata(d *device.Device, name string, mounts m
 func mountPointsBackedBy(name string, mounts map[devNumber][]string, topology *blockTopology) ([]string, error) {
 	var mountPoints []string
 	for number, points := range mounts {
-		mounted, err := topology.nameForNumber(number)
-		if err != nil {
-			if number.major == 0 {
-				continue
-			}
-			return nil, err
-		}
-		backed, err := topology.dependsOn(mounted, name)
+		backed, err := mountBackedBy(number, name, topology)
 		if err != nil {
 			return nil, err
 		}
@@ -175,6 +185,17 @@ func mountPointsBackedBy(name string, mounts map[devNumber][]string, topology *b
 		}
 	}
 	return mountPoints, nil
+}
+
+func mountBackedBy(number devNumber, name string, topology *blockTopology) (bool, error) {
+	mounted, err := topology.nameForNumber(number)
+	if err != nil {
+		if number.major == 0 {
+			return false, nil
+		}
+		return false, err
+	}
+	return topology.dependsOn(mounted, name)
 }
 
 func containsCriticalMount(mountPoints []string) bool {

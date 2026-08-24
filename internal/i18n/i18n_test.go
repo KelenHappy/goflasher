@@ -13,15 +13,20 @@ func TestParseLocale(t *testing.T) {
 
 func TestCatalogsHaveSameMessages(t *testing.T) {
 	for _, locale := range []Locale{TraditionalChinese, SimplifiedChinese, Japanese} {
-		for id := range catalogs[English] {
-			if _, ok := catalogs[locale][id]; !ok {
-				t.Errorf("%s catalog is missing %q", locale, id)
-			}
+		assertCatalogMatchesEnglish(t, locale)
+	}
+}
+
+func assertCatalogMatchesEnglish(t *testing.T, locale Locale) {
+	t.Helper()
+	for id := range catalogs[English] {
+		if _, ok := catalogs[locale][id]; !ok {
+			t.Errorf("%s catalog is missing %q", locale, id)
 		}
-		for id := range catalogs[locale] {
-			if _, ok := catalogs[English][id]; !ok {
-				t.Errorf("English catalog is missing %q (present in %s)", id, locale)
-			}
+	}
+	for id := range catalogs[locale] {
+		if _, ok := catalogs[English][id]; !ok {
+			t.Errorf("English catalog is missing %q (present in %s)", id, locale)
 		}
 	}
 }

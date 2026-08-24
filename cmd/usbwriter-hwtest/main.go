@@ -376,7 +376,7 @@ func run(ctx context.Context, request writeRequest) (app.RunResult, error) {
 			fmt.Printf("stage=%s bytes=%d total=%d\n", u.Stage, u.BytesProcessed, u.TotalBytes)
 		}
 	}()
-	result, err := (&app.Service{Backend: request.backend, State: states}).Run(ctx, request.image, request.selected, request.options, updates)
+	result, err := (&app.Service{Backend: request.backend, State: states}).Run(ctx, app.RunRequest{Image: request.image, Target: request.selected, Options: request.options, Updates: updates})
 	close(updates)
 	<-done
 	return result, err

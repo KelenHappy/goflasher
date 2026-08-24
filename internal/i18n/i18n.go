@@ -39,21 +39,41 @@ func System() Localizer {
 
 // ParseLocale normalizes a locale name to one of the supported locales.
 func ParseLocale(language string) Locale {
+	language = localeBase(language)
+	if locale, ok := localeAliases[language]; ok {
+		return locale
+	}
+	for _, match := range localePrefixes {
+		if strings.HasPrefix(language, match.prefix) {
+			return match.locale
+		}
+	}
+	return English
+}
+
+func localeBase(language string) string {
 	language = strings.ToLower(strings.TrimSpace(language))
 	if i := strings.IndexAny(language, ".@"); i >= 0 {
 		language = language[:i]
 	}
-	language = strings.ReplaceAll(language, "_", "-")
-	if language == "zh-cn" || language == "zh-sg" || strings.HasPrefix(language, "zh-hans") {
-		return SimplifiedChinese
-	}
-	if language == "zh" || strings.HasPrefix(language, "zh-") {
-		return TraditionalChinese
-	}
-	if language == "ja" || language == "jp" || strings.HasPrefix(language, "ja-") {
-		return Japanese
-	}
-	return English
+	return strings.ReplaceAll(language, "_", "-")
+}
+
+var localeAliases = map[string]Locale{
+	"ja":    Japanese,
+	"jp":    Japanese,
+	"zh":    TraditionalChinese,
+	"zh-cn": SimplifiedChinese,
+	"zh-sg": SimplifiedChinese,
+}
+
+var localePrefixes = []struct {
+	prefix string
+	locale Locale
+}{
+	{prefix: "zh-hans", locale: SimplifiedChinese},
+	{prefix: "zh-", locale: TraditionalChinese},
+	{prefix: "ja-", locale: Japanese},
 }
 
 // Locale reports the resolved locale.
