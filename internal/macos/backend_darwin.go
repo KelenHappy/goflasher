@@ -35,7 +35,7 @@ type formatTarget interface {
 	io.Closer
 	Fd() uintptr
 }
-type Backend struct {
+type backend struct {
 	manager    disk.Manager
 	openRaw    func(string, int) (*os.File, error)
 	openFormat func(string) (formatTarget, error)
@@ -44,13 +44,13 @@ type Backend struct {
 }
 
 var (
-	_ device.Backend                 = (*Backend)(nil)
-	_ device.WindowsInstallerBackend = (*Backend)(nil)
+	_ device.Backend                 = (*backend)(nil)
+	_ device.WindowsInstallerBackend = (*backend)(nil)
 )
 
-func NewBackend() *Backend { return NewBackendWithManager(disk.NewManager()) }
-func NewBackendWithManager(manager disk.Manager) *Backend {
-	return &Backend{manager: manager, openRaw: openRawFile, openFormat: openFormatTarget}
+func NewBackend() *backend { return NewBackendWithManager(disk.NewManager()) }
+func NewBackendWithManager(manager disk.Manager) *backend {
+	return &backend{manager: manager}
 }
 
 // exclusiveLockFlags requests a non-blocking advisory exclusive open lock for
@@ -67,21 +67,6 @@ const exclusiveLockFlags = syscall.O_EXLOCK | syscall.O_NONBLOCK
 // because another process holds it.
 var ErrDeviceBusy = errors.New("device is busy")
 
-func openRawFile(path string, flag int) (*os.File, error) {
-	// Only writers need exclusivity; read-back opens must not contend with the
-	// preceding write/format on the same device.
-	if flag&syscall.O_ACCMODE != os.O_RDONLY {
-		flag |= exclusiveLockFlags
-	}
-	return openLocked(path, flag)
-}
-func openFormatTarget(path string) (formatTarget, error) {
-	f, err := openLocked(path, os.O_RDWR|syscall.O_CLOEXEC|exclusiveLockFlags)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
 func openLocked(path string, flag int) (*os.File, error) {
 	f, err := os.OpenFile(path, flag, 0)
 	if err != nil && errors.Is(err, syscall.EAGAIN) {
@@ -94,7 +79,7 @@ func deviceFromDisk(d disk.Disk) device.Device {
 	n, _ := wholeDiskNumber(strings.TrimPrefix(d.Device, "/dev/r"))
 	return device.Device{ID: d.ID, Path: d.Device, Vendor: d.Vendor, Model: d.Model, Serial: d.Serial, Transport: d.Bus, SysfsPath: d.RegistryPath, Major: n, Size: d.Size, IsCardReader: d.Ejectable, Mounted: d.Mounted, IsSystemDisk: d.System, IsAllowed: d.Removable && d.External && !d.System && d.Bus == "usb" && d.Size > 0 && d.RegistryID != "", MountPoints: append([]string(nil), d.MountPoints...), PartitionCount: len(d.MountPoints)}
 }
-func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
+func (b *backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
 	all, err := b.manager.List(ctx)
 	if err != nil {
 		return nil, err
@@ -108,7 +93,7 @@ func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, erro
 	}
 	return out, nil
 }
-func (b *Backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {
+func (b *backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {
 	d, err := b.manager.Refresh(ctx, id)
 	if err != nil {
 		return device.Device{}, err
@@ -119,7 +104,7 @@ func (b *Backend) RefreshDevice(ctx context.Context, id string) (device.Device, 
 	}
 	return v, nil
 }
-func (b *Backend) diskSnapshot(ctx context.Context, selected device.Device) (disk.Disk, error) {
+func (b *backend) diskSnapshot(ctx context.Context, selected device.Device) (disk.Disk, error) {
 	d, err := b.manager.Refresh(ctx, selected.ID)
 	if err != nil {
 		return disk.Disk{}, fmt.Errorf("%w: %w", ErrDeviceChanged, err)
@@ -139,14 +124,14 @@ func (b *Backend) diskSnapshot(ctx context.Context, selected device.Device) (dis
 	}
 	return d, nil
 }
-func (b *Backend) Unmount(ctx context.Context, selected device.Device) error {
+func (b *backend) Unmount(ctx context.Context, selected device.Device) error {
 	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return err
 	}
 	return b.manager.Unmount(ctx, d)
 }
-func (b *Backend) open(ctx context.Context, selected device.Device, flag int) (*os.File, error) {
+func (b *backend) open(ctx context.Context, selected device.Device, flag int) (*os.File, error) {
 	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return nil, err
@@ -156,7 +141,12 @@ func (b *Backend) open(ctx context.Context, selected device.Device, flag int) (*
 	}
 	opener := b.openRaw
 	if opener == nil {
-		opener = openRawFile
+		// Only writers need exclusivity; read-back opens must not contend with
+		// the preceding write or format on the same device.
+		if flag&syscall.O_ACCMODE != os.O_RDONLY {
+			flag |= exclusiveLockFlags
+		}
+		opener = openLocked
 	}
 	f, err := opener(d.Device, flag|syscall.O_CLOEXEC)
 	if err != nil {
@@ -173,7 +163,7 @@ func (b *Backend) open(ctx context.Context, selected device.Device, flag int) (*
 // referenced by fd. Raw Darwin disk nodes are character devices; matching the
 // fd's rdev to the freshly authorized BSD node prevents path replacement with
 // a different device number between refresh and open.
-func (b *Backend) validateOpenedDisk(ctx context.Context, authorized disk.Disk, fd uintptr) error {
+func (b *backend) validateOpenedDisk(ctx context.Context, authorized disk.Disk, fd uintptr) error {
 	opened, err := b.openedDiskStat(fd)
 	if err != nil {
 		return ErrDeviceChanged
@@ -188,7 +178,7 @@ func (b *Backend) validateOpenedDisk(ctx context.Context, authorized disk.Disk, 
 	return nil
 }
 
-func (b *Backend) openedDiskStat(fd uintptr) (syscall.Stat_t, error) {
+func (b *backend) openedDiskStat(fd uintptr) (syscall.Stat_t, error) {
 	fstat := b.fstat
 	if fstat == nil {
 		fstat = syscall.Fstat
@@ -203,7 +193,7 @@ func (b *Backend) openedDiskStat(fd uintptr) (syscall.Stat_t, error) {
 	return opened, nil
 }
 
-func (b *Backend) refreshedAuthorizedDisk(ctx context.Context, authorized disk.Disk) (disk.Disk, error) {
+func (b *backend) refreshedAuthorizedDisk(ctx context.Context, authorized disk.Disk) (disk.Disk, error) {
 	fresh, err := b.manager.Refresh(ctx, authorized.ID)
 	if err != nil {
 		return disk.Disk{}, err
@@ -220,7 +210,7 @@ func (b *Backend) refreshedAuthorizedDisk(ctx context.Context, authorized disk.D
 	return fresh, nil
 }
 
-func (b *Backend) matchesDeviceNode(path string, rdev int32) bool {
+func (b *backend) matchesDeviceNode(path string, rdev int32) bool {
 	stat := b.stat
 	if stat == nil {
 		stat = syscall.Stat
@@ -234,10 +224,10 @@ func (b *Backend) matchesDeviceNode(path string, rdev int32) bool {
 	}
 	return node.Rdev == rdev
 }
-func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
+func (b *backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
 	return b.open(ctx, d, os.O_WRONLY)
 }
-func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadCloser, error) {
+func (b *backend) OpenReader(ctx context.Context, d device.Device) (io.ReadCloser, error) {
 	return b.open(ctx, d, os.O_RDONLY)
 }
 
@@ -245,16 +235,16 @@ func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadClose
 // descriptor used by the ordinary writer. The installer executor subsequently
 // narrows this whole-device session with gpt.NewPartitionWriterAt; no mounted
 // filesystem or command-line formatting tool participates in the build.
-func (b *Backend) OpenInstallerTarget(ctx context.Context, d device.Device) (device.InstallerTarget, error) {
+func (b *backend) OpenInstallerTarget(ctx context.Context, d device.Device) (device.InstallerTarget, error) {
 	return b.open(ctx, d, os.O_RDWR)
 }
 
 // OpenInstallerReader re-runs Disk Arbitration/IOKit identity validation and
 // opens an independent descriptor for semantic read-back verification.
-func (b *Backend) OpenInstallerReader(ctx context.Context, d device.Device) (device.InstallerReader, error) {
+func (b *backend) OpenInstallerReader(ctx context.Context, d device.Device) (device.InstallerReader, error) {
 	return b.open(ctx, d, os.O_RDONLY)
 }
-func (b *Backend) Flush(ctx context.Context, d device.Device) error {
+func (b *backend) Flush(ctx context.Context, d device.Device) error {
 	f, err := b.open(ctx, d, os.O_WRONLY)
 	if err != nil {
 		return err
@@ -262,14 +252,14 @@ func (b *Backend) Flush(ctx context.Context, d device.Device) error {
 	defer f.Close()
 	return f.Sync()
 }
-func (b *Backend) Eject(ctx context.Context, selected device.Device) error {
+func (b *backend) Eject(ctx context.Context, selected device.Device) error {
 	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return err
 	}
 	return b.manager.Eject(ctx, d)
 }
-func (b *Backend) FormatFAT32(ctx context.Context, selected device.Device, label string, updates chan<- progress.Update) error {
+func (b *backend) FormatFAT32(ctx context.Context, selected device.Device, label string, updates chan<- progress.Update) error {
 	ctx, cancel := context.WithTimeout(ctx, formatTimeout)
 	defer cancel()
 
@@ -312,7 +302,7 @@ func formatLabel(label string) (string, error) {
 	return label, nil
 }
 
-func (b *Backend) prepareFormat(ctx context.Context, selected device.Device) (disk.Disk, formatTarget, error) {
+func (b *backend) prepareFormat(ctx context.Context, selected device.Device) (disk.Disk, formatTarget, error) {
 	d, err := b.diskSnapshot(ctx, selected)
 	if err != nil {
 		return disk.Disk{}, nil, err
@@ -329,7 +319,9 @@ func (b *Backend) prepareFormat(ctx context.Context, selected device.Device) (di
 	}
 	opener := b.openFormat
 	if opener == nil {
-		opener = openFormatTarget
+		opener = func(path string) (formatTarget, error) {
+			return openLocked(path, os.O_RDWR|syscall.O_CLOEXEC|exclusiveLockFlags)
+		}
 	}
 	target, err := opener(d.Device)
 	if err != nil {

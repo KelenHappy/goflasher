@@ -132,7 +132,8 @@ func (s *Service) runWorkflow(ctx context.Context, info image.Info, target devic
 	if err = s.executePlan(ctx, plan, info, target, opts, updates, windowsBackend, effectiveSplitter, &out); err != nil {
 		return out, err
 	}
-	if err = s.ejectDevice(ctx, target, opts.Eject, updates, &out); err != nil {
+	operation := workflowOperation{service: s, ctx: ctx, target: target, updates: updates, out: &out}
+	if err = operation.ejectDevice(opts.Eject); err != nil {
 		return out, err
 	}
 	if err = releaseDevice(); err != nil {
@@ -236,7 +237,12 @@ func (s *Service) startWIMSplit(ctx context.Context, updates chan<- progress.Upd
 
 func (s *Service) executePlan(ctx context.Context, plan WorkflowPlan, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update, windowsBackend WindowsInstallerBackend, splitter installer.WIMSplitter, out *RunResult) error {
 	if plan.Kind == PlanRawWrite {
-		return (RawWriteExecutor{service: s}).Execute(ctx, info, target, opts, updates, out)
+		request := rawWriteRequest{
+			operation: workflowOperation{ctx: ctx, target: target, updates: updates, out: out},
+			info:      info,
+			options:   opts,
+		}
+		return (RawWriteExecutor{service: s}).Execute(request)
 	}
 	executor := WindowsInstallerExecutor{backend: windowsBackend, splitter: splitter, state: s.State}
 	if err := executor.Execute(ctx, plan.Windows, info, target, updates, out); err != nil {
@@ -312,22 +318,30 @@ func newDeviceRelease(backend device.Backend, target device.Device) func() error
 	}
 }
 
-func (s *Service) writeImage(ctx context.Context, info image.Info, target device.Device, updates chan<- progress.Update, out *RunResult) error {
+type workflowOperation struct {
+	service *Service
+	ctx     context.Context
+	target  device.Device
+	updates chan<- progress.Update
+	out     *RunResult
+}
+
+func (w workflowOperation) writeImage(info image.Info) error {
 	source, err := image.Open(info)
 	if err != nil {
 		return err
 	}
 	defer source.Close()
-	if err = s.State.Transition(Writing); err != nil {
+	if err = w.service.State.Transition(Writing); err != nil {
 		return err
 	}
-	dst, err := s.Backend.OpenWriter(ctx, target)
+	dst, err := w.service.Backend.OpenWriter(w.ctx, w.target)
 	if err != nil {
 		return err
 	}
 	writeStage := imageWriteStage(info)
-	result, writeErr := writer.Copy(ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: target.Size, Progress: updates, WriteStage: writeStage})
-	return s.finishWrite(ctx, target, info.SHA256, dst, result, writeErr, updates, out)
+	result, writeErr := writer.Copy(w.ctx, dst, source, writer.Options{TotalBytes: info.UncompressedSize, TargetSize: w.target.Size, Progress: w.updates, WriteStage: writeStage})
+	return w.finishWrite(info.SHA256, dst, result, writeErr)
 }
 
 func imageWriteStage(info image.Info) progress.Stage {
@@ -338,47 +352,47 @@ func imageWriteStage(info image.Info) progress.Stage {
 	return writeStage
 }
 
-func (s *Service) finishWrite(ctx context.Context, target device.Device, expectedSHA256 string, dst interface{ Close() error }, result writer.Result, writeErr error, updates chan<- progress.Update, out *RunResult) error {
+func (w workflowOperation) finishWrite(expectedSHA256 string, dst interface{ Close() error }, result writer.Result, writeErr error) error {
 	// Some backends perform the durability sync while closing the writer. Move
 	// the UI to Flushing before Close so that a slow USB device does not appear
 	// frozen at 100% writing while its cached data is committed.
 	if writeErr == nil {
-		if err := s.State.Transition(Flushing); err != nil {
+		if err := w.service.State.Transition(Flushing); err != nil {
 			_ = dst.Close()
 			return err
 		}
-		sendStage(ctx, updates, progress.StageFlushing)
+		sendStage(w.ctx, w.updates, progress.StageFlushing)
 	}
 	closeErr := dst.Close()
 	if writeErr != nil {
 		return writeErr
 	}
-	out.BytesWritten = result.BytesWritten
-	out.SourceSHA256 = result.SHA256
+	w.out.BytesWritten = result.BytesWritten
+	w.out.SourceSHA256 = result.SHA256
 	if closeErr != nil {
 		return closeErr
 	}
 	if result.SHA256 != expectedSHA256 {
 		return fmt.Errorf("%w: checksum no longer matches inspected image", writer.ErrSourceChanged)
 	}
-	if err := s.Backend.Flush(ctx, target); err != nil {
+	if err := w.service.Backend.Flush(w.ctx, w.target); err != nil {
 		return fmt.Errorf("flush: %w", err)
 	}
 	return nil
 }
 
-func (s *Service) verifyImage(ctx context.Context, target device.Device, enabled bool, updates chan<- progress.Update, out *RunResult) error {
+func (w workflowOperation) verifyImage(enabled bool) error {
 	if !enabled {
 		return nil
 	}
-	if err := s.State.Transition(Verifying); err != nil {
+	if err := w.service.State.Transition(Verifying); err != nil {
 		return err
 	}
-	reader, err := s.Backend.OpenReader(ctx, target)
+	reader, err := w.service.Backend.OpenReader(w.ctx, w.target)
 	if err != nil {
 		return err
 	}
-	out.TargetSHA256, err = verify.ReadBack(ctx, reader, out.BytesWritten, out.SourceSHA256, updates)
+	w.out.TargetSHA256, err = verify.ReadBack(w.ctx, reader, w.out.BytesWritten, w.out.SourceSHA256, w.updates)
 	closeErr := reader.Close()
 	if err != nil {
 		return err
@@ -386,22 +400,22 @@ func (s *Service) verifyImage(ctx context.Context, target device.Device, enabled
 	if closeErr != nil {
 		return closeErr
 	}
-	out.Verified = true
+	w.out.Verified = true
 	return nil
 }
 
-func (s *Service) ejectDevice(ctx context.Context, target device.Device, enabled bool, updates chan<- progress.Update, out *RunResult) error {
+func (w workflowOperation) ejectDevice(enabled bool) error {
 	if !enabled {
 		return nil
 	}
-	if err := s.State.Transition(Ejecting); err != nil {
+	if err := w.service.State.Transition(Ejecting); err != nil {
 		return err
 	}
-	sendStage(ctx, updates, progress.StageEjecting)
-	if err := s.Backend.Eject(ctx, target); err != nil {
+	sendStage(w.ctx, w.updates, progress.StageEjecting)
+	if err := w.service.Backend.Eject(w.ctx, w.target); err != nil {
 		return fmt.Errorf("eject: %w", err)
 	}
-	out.Ejected = true
+	w.out.Ejected = true
 	return nil
 }
 

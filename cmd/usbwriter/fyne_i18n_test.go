@@ -3,6 +3,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 
 	"fyne.io/fyne/v2/lang"
@@ -10,39 +11,42 @@ import (
 )
 
 func TestFyneTraditionalChineseTranslations(t *testing.T) {
-	want := map[string]string{
-		"File": "檔案", "Folder": "資料夾", "Favourites": "常用位置",
-		"New Folder": "新增資料夾", "Create Folder": "建立資料夾",
-		"Show Hidden Files": "顯示隱藏檔案", "Open": "開啟", "Cancel": "取消",
-		"Error": "錯誤", "OK": "確定",
-	}
-	for key, value := range want {
-		if got := fyneTraditionalChinese[key]; got != value {
-			t.Errorf("%q = %q, want %q", key, got, value)
-		}
-	}
-	contextual := map[string]string{
-		"file.name":   "名稱",
-		"file.parent": "上層",
-	}
-	for key, value := range contextual {
-		message, ok := fyneTraditionalChinese[key].(map[string]string)
-		if !ok || message["other"] != value {
-			t.Errorf("%s = %#v, want %s", key, fyneTraditionalChinese[key], value)
-		}
-	}
+	assertFyneTraditionalChineseCatalog(t)
 
 	t.Setenv("LC_ALL", "zh_TW.UTF-8")
 	t.Setenv("LANGUAGE", "")
 	configureFyneTranslations("zh-TW")
-	if got := lang.X("file.parent", "Parent"); got != "上層" {
-		t.Errorf("localized file.parent = %q, want %q", got, "上層")
+	assertTranslation(t, "file.parent", lang.X("file.parent", "Parent"), "上層")
+	assertTranslation(t, "Error", lang.L("Error"), "錯誤")
+	assertTranslation(t, "OK", lang.L("OK"), "確定")
+}
+
+func assertFyneTraditionalChineseCatalog(t *testing.T) {
+	t.Helper()
+	want := map[string]any{
+		"File": "檔案", "Folder": "資料夾", "Favourites": "常用位置",
+		"New Folder": "新增資料夾", "Create Folder": "建立資料夾",
+		"Show Hidden Files": "顯示隱藏檔案", "Open": "開啟", "Cancel": "取消",
+		"Error": "錯誤", "OK": "確定",
+		"file.name":   map[string]string{"other": "名稱"},
+		"file.parent": map[string]string{"other": "上層"},
 	}
-	if got := lang.L("Error"); got != "錯誤" {
-		t.Errorf("localized Error = %q, want %q", got, "錯誤")
+	for key, value := range want {
+		assertCatalogEntry(t, key, fyneTraditionalChinese[key], value)
 	}
-	if got := lang.L("OK"); got != "確定" {
-		t.Errorf("localized OK = %q, want %q", got, "確定")
+}
+
+func assertCatalogEntry(t *testing.T, key string, got, want any) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%q = %#v, want %#v", key, got, want)
+	}
+}
+
+func assertTranslation(t *testing.T, key, got, want string) {
+	t.Helper()
+	if got != want {
+		t.Errorf("localized %s = %q, want %q", key, got, want)
 	}
 }
 

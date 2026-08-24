@@ -96,11 +96,18 @@ type WindowsInstallerBackend = device.WindowsInstallerBackend
 
 type RawWriteExecutor struct{ service *Service }
 
-func (x RawWriteExecutor) Execute(ctx context.Context, info image.Info, target device.Device, opts RunOptions, updates chan<- progress.Update, out *RunResult) error {
-	if err := x.service.writeImage(ctx, info, target, updates, out); err != nil {
+type rawWriteRequest struct {
+	operation workflowOperation
+	info      image.Info
+	options   RunOptions
+}
+
+func (x RawWriteExecutor) Execute(request rawWriteRequest) error {
+	request.operation.service = x.service
+	if err := request.operation.writeImage(request.info); err != nil {
 		return err
 	}
-	if err := x.service.verifyImage(ctx, target, opts.Verify, updates, out); err != nil {
+	if err := request.operation.verifyImage(request.options.Verify); err != nil {
 		return err
 	}
 	return nil

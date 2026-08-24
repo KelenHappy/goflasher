@@ -361,7 +361,7 @@ func TestServiceStageFailures(t *testing.T) {
 	mismatchHash := fmt.Sprintf("%x", sha256.Sum256(mismatchPayload))
 	for _, testCase := range serviceStageFailureCases(payload, sourceHash, mismatchPayload, mismatchHash) {
 		t.Run(testCase.name, func(t *testing.T) {
-			runServiceStageFailure(t, testCase, payload, sourceHash)
+			runServiceStageFailure(t, testCase, payload)
 		})
 	}
 }
@@ -392,21 +392,14 @@ func stageErrors(names ...string) map[string]error {
 	return result
 }
 
-func runServiceStageFailure(t *testing.T, testCase stageFailureCase, payload []byte, sourceHash string) {
+func runServiceStageFailure(t *testing.T, testCase stageFailureCase, payload []byte) {
 	t.Helper()
-	dir := t.TempDir()
-	source := filepath.Join(dir, "source.img")
-	if err := os.WriteFile(source, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newFileServiceFixture(t, payload, 1)
 	backend := &failureBackend{payload: payload}
 	testCase.configure(backend)
-	state := readyToRunState(t)
-	info := image.Info{Path: source, Format: image.FormatIMG, Compression: image.CompressionNone, UncompressedSize: uint64(len(payload)), SHA256: sourceHash}
-	target := device.Device{Size: uint64(len(payload))}
-	got, err := (&Service{Backend: backend, State: state}).Run(context.Background(), info, target, testCase.opts, nil)
+	got, err := (&Service{Backend: backend, State: fixture.state}).Run(context.Background(), fixture.info, fixture.device, testCase.opts, nil)
 	assertStageError(t, err, testCase)
-	assertStageExecution(t, state, backend, testCase)
+	assertStageExecution(t, fixture.state, backend, testCase)
 	assertStageResult(t, got, testCase.want)
 }
 

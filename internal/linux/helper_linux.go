@@ -750,20 +750,21 @@ func (s *installerSession) revalidateTarget() error {
 func (s *installerSession) perform(command privilege.SessionCommand, payload []byte) error {
 	switch command.Kind {
 	case privilege.SessionWriteAt:
-		if _, err := s.target.WriteAt(payload, int64(command.Offset)); err != nil {
-			return err
-		}
-		return s.reply(privilege.SessionResponse{OK: true})
+		return s.performWrite(command, payload)
 	case privilege.SessionReadAt:
 		return s.performRead(command)
 	case privilege.SessionFlush:
-		if err := s.target.Sync(); err != nil {
-			return err
-		}
-		return s.reply(privilege.SessionResponse{OK: true})
+		return s.performFlush()
 	default:
 		return s.failure("invalid-command", "unsupported session command")
 	}
+}
+
+func (s *installerSession) performWrite(command privilege.SessionCommand, payload []byte) error {
+	if _, err := s.target.WriteAt(payload, int64(command.Offset)); err != nil {
+		return err
+	}
+	return s.reply(privilege.SessionResponse{OK: true})
 }
 
 func (s *installerSession) performRead(command privilege.SessionCommand) error {
@@ -776,6 +777,13 @@ func (s *installerSession) performRead(command privilege.SessionCommand) error {
 	}
 	_, err := s.output.Write(payload)
 	return err
+}
+
+func (s *installerSession) performFlush() error {
+	if err := s.target.Sync(); err != nil {
+		return err
+	}
+	return s.reply(privilege.SessionResponse{OK: true})
 }
 
 func (s *installerSession) failure(code, message string) error {
