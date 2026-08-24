@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"math"
 	"path"
@@ -62,6 +63,14 @@ type PlanOptions struct {
 	// SplitPreflight may inject the application's platform WIM probe. Nil
 	// uses wim.Probe. It is evaluated before a split-WIM plan can succeed.
 	SplitPreflight func(context.Context) error
+}
+
+// BuildPlanInput groups the immutable source data used during preflight.
+type BuildPlanInput struct {
+	Source     io.ReaderAt
+	SourceSize uint64
+	Manifest   installeriso.Manifest
+	Options    PlanOptions
 }
 
 type ESPLayout struct {
@@ -162,18 +171,26 @@ func (p *BuildPlan) withPreparedSplitGeometry(sizes []uint64) (*BuildPlan, error
 }
 
 func (p *BuildPlan) validatePreparedSplitSizes(sizes []uint64) error {
-	if p == nil || p.strategy != SplitWIM || len(sizes) == 0 {
+	if !p.acceptsPreparedSplit(sizes) {
 		return fmt.Errorf("%w: missing prepared split geometry", ErrVerification)
 	}
 	if _, ok := plannedBySource(p, "sources/install.wim"); !ok {
 		return fmt.Errorf("%w: planned WIM is missing", ErrVerification)
 	}
 	for _, size := range sizes {
-		if size == 0 || size > p.splitSize || size > maxFATFileSize {
+		if !p.validSplitPartSize(size) {
 			return fmt.Errorf("%w: invalid prepared split part size", ErrVerification)
 		}
 	}
 	return nil
+}
+
+func (p *BuildPlan) acceptsPreparedSplit(sizes []uint64) bool {
+	return p != nil && p.strategy == SplitWIM && len(sizes) != 0
+}
+
+func (p *BuildPlan) validSplitPartSize(size uint64) bool {
+	return size != 0 && size <= p.splitSize && size <= maxFATFileSize
 }
 
 func splitFileClusters(sizes []uint64, clusterSize uint64) (clusters uint64) {
@@ -229,10 +246,10 @@ func fatDirectoryEntryBytes(name string) uint64 {
 	return uint64(32 * (2 + (len([]rune(name))+12)/13))
 }
 
-// NewBuildPlan performs the complete, non-destructive preflight. sourceSize is
-// the immutable ISO descriptor's size, not a pathname stat made later.
-func NewBuildPlan(ctx context.Context, source io.ReaderAt, sourceSize uint64, manifest installeriso.Manifest, options PlanOptions) (*BuildPlan, error) {
-	builder := planBuilder{ctx: ctx, source: source, sourceSize: sourceSize, entries: cloneManifest(manifest).Entries, options: options}
+// NewBuildPlan performs the complete, non-destructive preflight. Input's source
+// size is the immutable ISO descriptor's size, not a pathname stat made later.
+func NewBuildPlan(ctx context.Context, input BuildPlanInput) (*BuildPlan, error) {
+	builder := planBuilder{ctx: ctx, source: input.Source, sourceSize: input.SourceSize, entries: cloneManifest(input.Manifest).Entries, options: input.Options}
 	return builder.build()
 }
 
@@ -260,11 +277,10 @@ func (b *planBuilder) build() (*BuildPlan, error) {
 }
 
 func (b *planBuilder) validateInput() error {
-	options := b.options
-	if b.source == nil || b.sourceSize == 0 || options.SourceIdentity == "" || options.TargetSize == 0 {
+	if !b.hasRequiredInput() {
 		return fmt.Errorf("%w: incomplete preflight input", ErrUnsupported)
 	}
-	b.splitSize = options.SplitWIMPolicySize
+	b.splitSize = b.options.SplitWIMPolicySize
 	if b.splitSize == 0 {
 		b.splitSize = defaultSplitSize
 	}
@@ -272,6 +288,10 @@ func (b *planBuilder) validateInput() error {
 		return fmt.Errorf("%w: invalid split WIM policy", ErrUnsupported)
 	}
 	return nil
+}
+
+func (b *planBuilder) hasRequiredInput() bool {
+	return b.source != nil && b.sourceSize != 0 && b.options.SourceIdentity != "" && b.options.TargetSize != 0
 }
 
 func manifestFiles(entries []installeriso.Entry) map[string]installeriso.Entry {
@@ -399,16 +419,25 @@ func approveDestination(entry installeriso.Entry) (string, error) {
 	}
 	destination = strings.ReplaceAll(destination, "\\", "/")
 	clean := path.Clean(destination)
-	unsafe := destination == "" || path.IsAbs(destination) || clean != destination || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.ContainsRune(destination, 0)
-	if unsafe {
+	if unsafeDestination(destination, clean) {
 		return "", fmt.Errorf("%w: unsafe destination path %q", ErrUnsupported, destination)
 	}
 	return destination, nil
 }
 
+func unsafeDestination(destination, clean string) bool {
+	if destination == "" || path.IsAbs(destination) || clean != destination {
+		return true
+	}
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return true
+	}
+	return strings.ContainsRune(destination, 0)
+}
+
 func selectInstallStrategy(files map[string]installeriso.Entry, splitSize uint64) (InstallStrategy, uint64, int, error) {
-	wim, hasWIM := files["sources/install.wim"]
-	esd, hasESD := files["sources/install.esd"]
+	_, hasWIM := files["sources/install.wim"]
+	_, hasESD := files["sources/install.esd"]
 	swm, err := collectExistingSWM(files)
 	if err != nil {
 		return "", 0, 0, err
@@ -416,7 +445,7 @@ func selectInstallStrategy(files map[string]installeriso.Entry, splitSize uint64
 	if len(swm) != 0 {
 		return existingSWMStrategy(swm, hasWIM, hasESD)
 	}
-	return singleInstallImageStrategy(wim, hasWIM, esd, hasESD, splitSize)
+	return singleInstallImageStrategy(files, splitSize)
 }
 
 func collectExistingSWM(files map[string]installeriso.Entry) (map[int]installeriso.Entry, error) {
@@ -448,23 +477,29 @@ func existingSWMStrategy(swm map[int]installeriso.Entry, hasWIM, hasESD bool) (I
 	return CopyExistingSWM, 0, len(swm), nil
 }
 
-func singleInstallImageStrategy(wim installeriso.Entry, hasWIM bool, esd installeriso.Entry, hasESD bool, splitSize uint64) (InstallStrategy, uint64, int, error) {
+func singleInstallImageStrategy(files map[string]installeriso.Entry, splitSize uint64) (InstallStrategy, uint64, int, error) {
+	wim, hasWIM := files["sources/install.wim"]
+	esd, hasESD := files["sources/install.esd"]
 	if hasWIM && hasESD {
 		return "", 0, 0, fmt.Errorf("%w: multiple install images", ErrUnsupported)
 	}
 	if hasWIM {
-		if wim.Size <= maxFATFileSize {
-			return CopyWIM, wim.Size, 1, nil
-		}
-		return SplitWIM, wim.Size, int((wim.Size + splitSize - 1) / splitSize), nil
+		return wimStrategy(wim, splitSize)
 	}
-	if hasESD {
-		if esd.Size > maxFATFileSize {
-			return "", 0, 0, fmt.Errorf("%w: install.esd exceeds FAT32 file limit", ErrUnsupported)
-		}
-		return CopyESD, esd.Size, 1, nil
+	if !hasESD {
+		return NoInstallImage, 0, 0, nil
 	}
-	return NoInstallImage, 0, 0, nil
+	if esd.Size > maxFATFileSize {
+		return "", 0, 0, fmt.Errorf("%w: install.esd exceeds FAT32 file limit", ErrUnsupported)
+	}
+	return CopyESD, esd.Size, 1, nil
+}
+
+func wimStrategy(wim installeriso.Entry, splitSize uint64) (InstallStrategy, uint64, int, error) {
+	if wim.Size <= maxFATFileSize {
+		return CopyWIM, wim.Size, 1, nil
+	}
+	return SplitWIM, wim.Size, int((wim.Size + splitSize - 1) / splitSize), nil
 }
 
 func swmSequence(name string) (int, bool) {
@@ -498,7 +533,7 @@ func (b *planBuilder) inspectFiles(cluster uint64, strategy InstallStrategy, ins
 		}
 		result.fileClusters += b.entryClusters(entry, lower, cluster, strategy, installSize, splitParts)
 		dirBytes[parentKey(lower)] += fatDirectoryEntryBytes(path.Base(entry.Path))
-		hash, err := hashExtents(b.ctx, b.source, b.sourceSize, entry)
+		hash, err := b.hashExtents(entry)
 		if err != nil {
 			return fileInspection{}, err
 		}
@@ -542,32 +577,48 @@ func verificationDestination(entry installeriso.Entry) string {
 	return entry.Path
 }
 
-func hashExtents(ctx context.Context, source io.ReaderAt, sourceSize uint64, e installeriso.Entry) (string, error) {
-	h := sha256.New()
-	remaining := e.Size
-	buf := make([]byte, 1<<20)
-	for _, extent := range e.Extents {
+func (b *planBuilder) hashExtents(e installeriso.Entry) (string, error) {
+	h := extentHasher{builder: b, digest: sha256.New(), buffer: make([]byte, 1<<20)}
+	return h.sum(e)
+}
+
+type extentHasher struct {
+	builder *planBuilder
+	digest  hash.Hash
+	buffer  []byte
+}
+
+func (h *extentHasher) sum(entry installeriso.Entry) (string, error) {
+	remaining := entry.Size
+	for _, extent := range entry.Extents {
 		n := min(remaining, extent.Length)
-		if extent.Offset > sourceSize || n > sourceSize-extent.Offset {
-			return "", fmt.Errorf("%w: extent out of bounds", ErrUnsupported)
-		}
-		for off := uint64(0); off < n; {
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-			take := min(uint64(len(buf)), n-off)
-			if _, err := source.ReadAt(buf[:take], int64(extent.Offset+off)); err != nil {
-				return "", err
-			}
-			h.Write(buf[:take])
-			off += take
+		if err := h.add(extent.Offset, n); err != nil {
+			return "", err
 		}
 		remaining -= n
 	}
 	if remaining != 0 {
-		return "", fmt.Errorf("%w: incomplete extent for %s", ErrUnsupported, e.Path)
+		return "", fmt.Errorf("%w: incomplete extent for %s", ErrUnsupported, entry.Path)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.digest.Sum(nil)), nil
+}
+
+func (h *extentHasher) add(offset, size uint64) error {
+	if offset > h.builder.sourceSize || size > h.builder.sourceSize-offset {
+		return fmt.Errorf("%w: extent out of bounds", ErrUnsupported)
+	}
+	for done := uint64(0); done < size; {
+		if err := h.builder.ctx.Err(); err != nil {
+			return err
+		}
+		take := min(uint64(len(h.buffer)), size-done)
+		if _, err := h.builder.source.ReadAt(h.buffer[:take], int64(offset+done)); err != nil {
+			return err
+		}
+		_, _ = h.digest.Write(h.buffer[:take])
+		done += take
+	}
+	return nil
 }
 
 func hashRange(ctx context.Context, source io.ReaderAt, off, size uint64) (string, error) {

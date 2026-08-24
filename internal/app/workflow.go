@@ -74,9 +74,12 @@ func (p WorkflowPlanner) Plan(ctx context.Context, info image.Info, target devic
 			return WorkflowPlan{}, err
 		}
 		defer fs.Close()
-		plan, err := installer.NewBuildPlan(ctx, r, uint64(size), fs.Manifest(), installer.PlanOptions{
-			SourceIdentity: "retained:" + info.SHA256, TargetSize: target.Size,
-			TemporarySpace: p.TemporarySpace, SplitPreflight: p.SplitPreflight,
+		plan, err := installer.NewBuildPlan(ctx, installer.BuildPlanInput{
+			Source: r, SourceSize: uint64(size), Manifest: fs.Manifest(),
+			Options: installer.PlanOptions{
+				SourceIdentity: "retained:" + info.SHA256, TargetSize: target.Size,
+				TemporarySpace: p.TemporarySpace, SplitPreflight: p.SplitPreflight,
+			},
 		})
 		if err != nil {
 			return WorkflowPlan{}, err

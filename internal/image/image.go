@@ -83,10 +83,20 @@ func (i Info) ValidateSource() error {
 	if err != nil {
 		return fmt.Errorf("validate inspected source: %w", err)
 	}
-	if !os.SameFile(i.source.identity, current) || i.source.identity.Size() != current.Size() || !i.source.identity.ModTime().Equal(current.ModTime()) {
+	if !sameSourceMetadata(i.source.identity, current) {
 		return fmt.Errorf("%w: inspected source file changed", ErrUnsupported)
 	}
 	return nil
+}
+
+func sameSourceMetadata(expected, current os.FileInfo) bool {
+	if !os.SameFile(expected, current) {
+		return false
+	}
+	if expected.Size() != current.Size() {
+		return false
+	}
+	return expected.ModTime().Equal(current.ModTime())
 }
 
 // VerifySourceContext rereads the retained, decoded stream immediately before
@@ -102,26 +112,11 @@ func (i Info) VerifySourceContext(ctx context.Context) error {
 		return err
 	}
 	defer r.Close()
-	h := sha256.New()
-	buf := make([]byte, 4<<20)
-	var size uint64
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, readErr := r.Read(buf)
-		if n > 0 {
-			_, _ = h.Write(buf[:n])
-			size += uint64(n)
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
+	size, checksum, err := decodedDigest(ctx, r)
+	if err != nil {
+		return err
 	}
-	if size != i.UncompressedSize || hex.EncodeToString(h.Sum(nil)) != i.SHA256 {
+	if size != i.UncompressedSize || checksum != i.SHA256 {
 		return fmt.Errorf("%w: retained source bytes changed after inspection", ErrUnsupported)
 	}
 	return nil
@@ -216,56 +211,57 @@ func Open(info Info) (*ReadCloser, error) {
 
 func openFile(info Info, f *os.File, ownFile bool) (*ReadCloser, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		if ownFile {
-			_ = f.Close()
-		}
-		return nil, err
+		return nil, closeOwnedFile(f, ownFile, err)
 	}
-	var reader io.Reader = f
 	var closers []io.Closer
 	if ownFile {
 		closers = append(closers, f)
 	}
-	switch info.Compression {
+	reader, decoderCloser, err := decodedReader(info.Compression, f)
+	if err != nil {
+		return nil, closeOwnedFile(f, ownFile, err)
+	}
+	if decoderCloser != nil {
+		closers = append([]io.Closer{decoderCloser}, closers...)
+	}
+	return &ReadCloser{Reader: bufio.NewReaderSize(reader, 1<<20), closers: closers}, nil
+}
+
+func decodedReader(compression Compression, f *os.File) (io.Reader, io.Closer, error) {
+	switch compression {
 	case CompressionNone:
+		return f, nil, nil
 	case CompressionGzip:
 		gz, err := gzip.NewReader(f)
 		if err != nil {
-			if ownFile {
-				_ = f.Close()
-			}
-			return nil, err
+			return nil, nil, err
 		}
-		reader, closers = gz, append([]io.Closer{gz}, closers...)
+		return gz, gz, nil
 	case CompressionXZ:
-		// Go's standard library does not include XZ. Use a pure-Go streaming
-		// decoder so every packaged platform has identical support without an
-		// external executable or an uncompressed temporary file.
-		if err := requireXZStreamFooter(f); err != nil {
-			if ownFile {
-				_ = f.Close()
-			}
-			return nil, err
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			if ownFile {
-				_ = f.Close()
-			}
-			return nil, err
-		}
-		xr, err := xz.NewReader(f)
-		if err != nil {
-			f.Close()
-			return nil, err
-		}
-		reader = xr
+		reader, err := openXZReader(f)
+		return reader, nil, err
 	default:
-		if ownFile {
-			_ = f.Close()
-		}
-		return nil, ErrUnsupported
+		return nil, nil, ErrUnsupported
 	}
-	return &ReadCloser{Reader: bufio.NewReaderSize(reader, 1<<20), closers: closers}, nil
+}
+
+func openXZReader(f *os.File) (io.Reader, error) {
+	// Go's standard library does not include XZ. Use a pure-Go streaming
+	// decoder so every packaged platform has identical support.
+	if err := requireXZStreamFooter(f); err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return xz.NewReader(f)
+}
+
+func closeOwnedFile(f *os.File, owned bool, err error) error {
+	if owned {
+		return errors.Join(err, f.Close())
+	}
+	return err
 }
 
 // requireXZStreamFooter rejects XZ files that do not end with the two-byte
@@ -301,57 +297,59 @@ func Checksum(r io.Reader) (string, error) {
 func Inspect(info Info) (Info, error) { return InspectContext(context.Background(), info) }
 
 func InspectContext(ctx context.Context, info Info) (Info, error) {
-	created := false
-	if info.source == nil {
-		f, err := os.Open(info.Path)
-		if err != nil {
-			return Info{}, err
-		}
-		info.source = &Source{file: f}
-		created = true
+	info, created, err := retainSource(info)
+	if err != nil {
+		return Info{}, err
 	}
 	r, err := openFile(info, info.source.file, false)
 	if err != nil {
-		if created {
-			_ = info.CloseSource()
-		}
-		return Info{}, err
+		return Info{}, closeCreatedSource(info, created, err)
 	}
 	defer r.Close()
-	h := sha256.New()
-	buf := make([]byte, 4<<20)
-	var n uint64
-	for {
-		if err := ctx.Err(); err != nil {
-			if created {
-				_ = info.CloseSource()
-			}
-			return Info{}, err
-		}
-		read, readErr := r.Read(buf)
-		if read > 0 {
-			_, _ = h.Write(buf[:read])
-			n += uint64(read)
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			if created {
-				_ = info.CloseSource()
-			}
-			return Info{}, readErr
-		}
+	info.UncompressedSize, info.SHA256, err = decodedDigest(ctx, r)
+	if err != nil {
+		return Info{}, closeCreatedSource(info, created, err)
 	}
-	info.UncompressedSize = n
-	info.SHA256 = hex.EncodeToString(h.Sum(nil))
 	identity, err := info.source.file.Stat()
 	if err != nil {
-		if created {
-			_ = info.CloseSource()
-		}
-		return Info{}, err
+		return Info{}, closeCreatedSource(info, created, err)
 	}
 	info.source.identity = identity
 	return info, nil
+}
+
+func retainSource(info Info) (Info, bool, error) {
+	if info.source != nil {
+		return info, false, nil
+	}
+	f, err := os.Open(info.Path)
+	if err != nil {
+		return Info{}, false, err
+	}
+	info.source = &Source{file: f}
+	return info, true, nil
+}
+
+func closeCreatedSource(info Info, created bool, err error) error {
+	if created {
+		return errors.Join(err, info.CloseSource())
+	}
+	return err
+}
+
+type byteCounter uint64
+
+func (c *byteCounter) Write(p []byte) (int, error) {
+	*c += byteCounter(len(p))
+	return len(p), nil
+}
+
+func decodedDigest(ctx context.Context, reader io.Reader) (uint64, string, error) {
+	h := sha256.New()
+	var size byteCounter
+	source := contextReader{ctx: ctx, reader: reader}
+	if _, err := io.CopyBuffer(io.MultiWriter(h, &size), source, make([]byte, 4<<20)); err != nil {
+		return 0, "", err
+	}
+	return uint64(size), hex.EncodeToString(h.Sum(nil)), nil
 }

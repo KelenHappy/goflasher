@@ -60,106 +60,167 @@ type Executor struct {
 // cancellation Complete remains false, so partial copies or verification can
 // never be presented as a successful installer build.
 func (x Executor) Execute(ctx context.Context, plan *BuildPlan, source io.ReaderAt, target Target) (result ExecutionResult, err error) {
-	if plan == nil || source == nil || target == nil || len(plan.planned) == 0 {
-		return result, fmt.Errorf("%w: invalid execution input", ErrIncomplete)
+	run := execution{ctx: ctx, plan: plan, source: source, target: target, splitter: x.Splitter}
+	if err := run.execute(); err != nil {
+		return run.result, errors.Join(ErrIncomplete, err)
 	}
-	if err := ctx.Err(); err != nil {
-		return result, errors.Join(ErrIncomplete, err)
+	run.result.Complete = true
+	return run.result, nil
+}
+
+type execution struct {
+	ctx      context.Context
+	plan     *BuildPlan
+	source   io.ReaderAt
+	target   Target
+	splitter WIMSplitter
+	builder  *fat32.Builder
+	result   ExecutionResult
+}
+
+func (r *execution) execute() error {
+	if err := r.preflight(); err != nil {
+		return err
 	}
-	if plan.strategy == SplitWIM && x.Splitter == nil {
-		return result, errors.Join(ErrIncomplete, ErrSplitterRequired)
+	if err := r.createFilesystem(); err != nil {
+		return err
 	}
-	if plan.strategy == SplitWIM {
-		if preflight, ok := x.Splitter.(interface{ Preflight(context.Context) error }); ok {
-			if err := preflight.Preflight(ctx); err != nil {
-				return result, errors.Join(ErrIncomplete, err)
-			}
+	if err := r.createDirectories(); err != nil {
+		return err
+	}
+	if err := r.copyFiles(); err != nil {
+		return err
+	}
+	if r.plan.strategy == SplitWIM {
+		if err := r.copySplitWIM(); err != nil {
+			return err
 		}
 	}
+	if err := r.builder.Sync(); err != nil {
+		return err
+	}
+	return r.target.Sync()
+}
+
+func (r *execution) preflight() error {
+	if r.plan == nil || r.source == nil || r.target == nil || len(r.plan.planned) == 0 {
+		return errors.New("invalid execution input")
+	}
+	if err := r.ctx.Err(); err != nil {
+		return err
+	}
+	if r.plan.strategy != SplitWIM {
+		return nil
+	}
+	if r.splitter == nil {
+		return ErrSplitterRequired
+	}
+	if preflight, ok := r.splitter.(interface{ Preflight(context.Context) error }); ok {
+		return preflight.Preflight(r.ctx)
+	}
+	return nil
+}
+
+func (r *execution) createFilesystem() error {
+	plan := r.plan
 	totalLBAs := (plan.esp.StartOffset + plan.esp.Size + 33*logicalSectorSize) / logicalSectorSize
 	layout, err := gpt.Build(totalLBAs, logicalSectorSize, nil)
 	if err != nil {
-		return result, errors.Join(ErrIncomplete, err)
+		return err
 	}
 	if layout.PartitionStartLBA*logicalSectorSize != plan.esp.StartOffset || (layout.PartitionEndLBA-layout.PartitionStartLBA+1)*logicalSectorSize != plan.esp.Size {
-		return result, fmt.Errorf("%w: GPT layout differs from preflight", ErrIncomplete)
+		return errors.New("GPT layout differs from preflight")
 	}
-	if err := layout.WriteTo(target); err != nil {
-		return result, errors.Join(ErrIncomplete, err)
+	if err := layout.WriteTo(r.target); err != nil {
+		return err
 	}
-	esp, err := gpt.NewPartitionWriterAt(target, layout.PartitionStartLBA, layout.PartitionEndLBA, logicalSectorSize)
+	esp, err := gpt.NewPartitionWriterAt(r.target, layout.PartitionStartLBA, layout.PartitionEndLBA, logicalSectorSize)
 	if err != nil {
-		return result, errors.Join(ErrIncomplete, err)
+		return err
 	}
-	builder, err := fat32.NewBuilder(ctx, esp, plan.esp.Size, "GOFLASHER")
-	if err != nil {
-		return result, errors.Join(ErrIncomplete, err)
-	}
-	for _, item := range plan.planned {
+	r.builder, err = fat32.NewBuilder(r.ctx, esp, plan.esp.Size, "GOFLASHER")
+	return err
+}
+
+func (r *execution) createDirectories() error {
+	for _, item := range r.plan.planned {
 		if item.source.Type == installeriso.Directory {
-			if err := builder.MkdirAll(item.destination); err != nil {
-				return result, errors.Join(ErrIncomplete, err)
+			if err := r.builder.MkdirAll(item.destination); err != nil {
+				return err
 			}
 		}
 	}
-	for _, item := range plan.planned {
-		if item.source.Type != installeriso.File || plan.strategy == SplitWIM && strings.EqualFold(item.source.Path, "sources/install.wim") {
+	return nil
+}
+
+func (r *execution) copyFiles() error {
+	for _, item := range r.plan.planned {
+		if !r.shouldCopy(item) {
 			continue
 		}
-		verified, n, err := copyISOFile(ctx, builder, source, plan, item)
-		result.BytesWritten += n
+		verified, n, err := copyISOFile(r.ctx, r.builder, r.source, r.plan, item)
+		r.recordCopy(verified, n, err)
 		if err != nil {
-			return result, errors.Join(ErrIncomplete, err)
-		}
-		result.VerificationManifest = append(result.VerificationManifest, verified)
-	}
-	if plan.strategy == SplitWIM {
-		wim, ok := plannedBySource(plan, "sources/install.wim")
-		if !ok {
-			return result, fmt.Errorf("%w: planned WIM is missing", ErrIncomplete)
-		}
-		reader := newExtentReader(source, wim.source.Extents, wim.source.Size)
-		expectedWIMHash := verificationHash(plan, wim.destination, wim.source.Size)
-		if expectedWIMHash == "" {
-			return result, fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
-		}
-		nextPart := 1
-		err = x.Splitter.Split(ctx, reader, wim.source.Size, expectedWIMHash, plan.splitSize, func(part SplitPart) error {
-			if nextPart > plan.splitParts {
-				return fmt.Errorf("%w: split pipeline produced too many parts", ErrVerification)
-			}
-			want := "install.swm"
-			if nextPart > 1 {
-				want = "install" + strconv.Itoa(nextPart) + ".swm"
-			}
-			if part.Name != want || part.Data == nil || part.Size == 0 || part.Size > plan.splitSize {
-				return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Name)
-			}
-			destination := path.Join(path.Dir(wim.destination), want)
-			verified, n, copyErr := copyReaderFile(ctx, builder, destination, part.Data, part.Size, "")
-			result.BytesWritten += n
-			if copyErr != nil {
-				return copyErr
-			}
-			result.VerificationManifest = append(result.VerificationManifest, verified)
-			nextPart++
-			return nil
-		})
-		if err != nil {
-			return result, errors.Join(ErrIncomplete, ErrWIMSplitFailure, err)
-		}
-		if nextPart != plan.splitParts+1 {
-			return result, fmt.Errorf("%w: split pipeline produced %d of %d planned parts", ErrIncomplete, nextPart-1, plan.splitParts)
+			return err
 		}
 	}
-	if err := builder.Sync(); err != nil {
-		return result, errors.Join(ErrIncomplete, err)
+	return nil
+}
+
+func (r *execution) shouldCopy(item plannedEntry) bool {
+	if item.source.Type != installeriso.File {
+		return false
 	}
-	if err := target.Sync(); err != nil {
-		return result, errors.Join(ErrIncomplete, err)
+	return r.plan.strategy != SplitWIM || !strings.EqualFold(item.source.Path, "sources/install.wim")
+}
+
+func (r *execution) recordCopy(verified VerificationEntry, n uint64, err error) {
+	r.result.BytesWritten += n
+	if err != nil {
+		return
 	}
-	result.Complete = true
-	return result, nil
+	r.result.VerificationManifest = append(r.result.VerificationManifest, verified)
+}
+
+func (r *execution) copySplitWIM() error {
+	plan := r.plan
+	wim, ok := plannedBySource(plan, "sources/install.wim")
+	if !ok {
+		return errors.New("planned WIM is missing")
+	}
+	reader := newExtentReader(r.source, wim.source.Extents, wim.source.Size)
+	expectedWIMHash := verificationHash(plan, wim.destination, wim.source.Size)
+	if expectedWIMHash == "" {
+		return fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
+	}
+	nextPart := 1
+	err := r.splitter.Split(r.ctx, reader, wim.source.Size, expectedWIMHash, plan.splitSize, func(part SplitPart) error {
+		if nextPart > plan.splitParts {
+			return fmt.Errorf("%w: split pipeline produced too many parts", ErrVerification)
+		}
+		want := "install.swm"
+		if nextPart > 1 {
+			want = "install" + strconv.Itoa(nextPart) + ".swm"
+		}
+		if part.Name != want || part.Data == nil || part.Size == 0 || part.Size > plan.splitSize {
+			return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Name)
+		}
+		destination := path.Join(path.Dir(wim.destination), want)
+		verified, n, copyErr := copyReaderFile(r.ctx, r.builder, fileCopy{destination: destination, source: part.Data, expectedSize: part.Size})
+		r.recordCopy(verified, n, copyErr)
+		if copyErr != nil {
+			return copyErr
+		}
+		nextPart++
+		return nil
+	})
+	if err != nil {
+		return errors.Join(ErrWIMSplitFailure, err)
+	}
+	if nextPart != plan.splitParts+1 {
+		return fmt.Errorf("split pipeline produced %d of %d planned parts", nextPart-1, plan.splitParts)
+	}
+	return nil
 }
 
 func plannedBySource(plan *BuildPlan, name string) (plannedEntry, bool) {
@@ -177,7 +238,12 @@ func copyISOFile(ctx context.Context, builder *fat32.Builder, source io.ReaderAt
 		return VerificationEntry{}, 0, fmt.Errorf("%w: no preflight hash for %s", ErrVerification, item.destination)
 	}
 	reader := newExtentReader(source, item.source.Extents, item.source.Size)
-	return copyReaderFile(ctx, builder, item.destination, reader, item.source.Size, expected)
+	return copyReaderFile(ctx, builder, fileCopy{
+		destination:  item.destination,
+		source:       reader,
+		expectedSize: item.source.Size,
+		expectedHash: expected,
+	})
 }
 
 func verificationHash(plan *BuildPlan, destination string, size uint64) string {
@@ -189,58 +255,62 @@ func verificationHash(plan *BuildPlan, destination string, size uint64) string {
 	return ""
 }
 
-func copyReaderFile(ctx context.Context, builder *fat32.Builder, destination string, source io.Reader, expectedSize uint64, expectedHash string) (VerificationEntry, uint64, error) {
-	if parent := path.Dir(destination); parent != "." {
+type fileCopy struct {
+	destination  string
+	source       io.Reader
+	expectedSize uint64
+	expectedHash string
+}
+
+func copyReaderFile(ctx context.Context, builder *fat32.Builder, file fileCopy) (VerificationEntry, uint64, error) {
+	if parent := path.Dir(file.destination); parent != "." {
 		if err := builder.MkdirAll(parent); err != nil {
 			return VerificationEntry{}, 0, err
 		}
 	}
-	dst, err := builder.Create(destination)
+	dst, err := builder.Create(file.destination)
 	if err != nil {
 		return VerificationEntry{}, 0, err
 	}
 	h := sha256.New()
-	limited := io.LimitReader(source, int64(expectedSize)+1)
+	limited := io.LimitReader(file.source, int64(file.expectedSize)+1)
 	written, copyErr := copyContext(ctx, io.MultiWriter(dst, h), limited)
 	closeErr := dst.Close()
 	if copyErr != nil || closeErr != nil {
 		return VerificationEntry{}, uint64(written), errors.Join(copyErr, closeErr)
 	}
 	actualHash := hex.EncodeToString(h.Sum(nil))
-	if uint64(written) != expectedSize || expectedHash != "" && actualHash != expectedHash {
-		return VerificationEntry{}, uint64(written), fmt.Errorf("%w: %s: got %d bytes", ErrVerification, destination, written)
+	if !file.matches(uint64(written), actualHash) {
+		return VerificationEntry{}, uint64(written), fmt.Errorf("%w: %s: got %d bytes", ErrVerification, file.destination, written)
 	}
-	return VerificationEntry{Path: destination, Size: uint64(written), SHA256: actualHash}, uint64(written), nil
+	return VerificationEntry{Path: file.destination, Size: uint64(written), SHA256: actualHash}, uint64(written), nil
+}
+
+func (f fileCopy) matches(size uint64, hash string) bool {
+	if size != f.expectedSize {
+		return false
+	}
+	return f.expectedHash == "" || hash == f.expectedHash
 }
 
 func copyContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
-	buf := make([]byte, copyBufferSize)
-	var total int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return total, err
-		}
-		n, readErr := src.Read(buf)
-		if n > 0 {
-			written, writeErr := dst.Write(buf[:n])
-			total += int64(written)
-			if writeErr != nil {
-				return total, writeErr
-			}
-			if written != n {
-				return total, io.ErrShortWrite
-			}
-		}
-		if readErr == io.EOF {
-			return total, nil
-		}
-		if readErr != nil {
-			return total, readErr
-		}
-		if n == 0 {
-			return total, io.ErrNoProgress
-		}
+	return io.CopyBuffer(dst, contextReader{ctx: ctx, reader: src}, make([]byte, copyBufferSize))
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
 	}
+	n, err := r.reader.Read(p)
+	if n == 0 && err == nil {
+		return 0, io.ErrNoProgress
+	}
+	return n, err
 }
 
 type extentReader struct {

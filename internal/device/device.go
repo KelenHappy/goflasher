@@ -56,20 +56,42 @@ type WindowsInstallerBackend interface {
 // WWN mismatch is always fatal; major/minor and sysfs path protect devices that
 // do not expose either hardware identifier.
 func SameIdentity(a, b Device) bool {
-	if a.ID == "" || b.ID == "" || a.ID != b.ID || a.Path != b.Path {
+	if !sameKernelIdentity(a, b) {
 		return false
 	}
-	if a.Major != b.Major || a.Minor != b.Minor {
+	if !sameHardwareIdentity(a, b) {
 		return false
 	}
-	if (a.Serial != "" || b.Serial != "") && (a.Serial == "" || a.Serial != b.Serial) {
-		return false
-	}
-	if (a.WWN != "" || b.WWN != "") && (a.WWN == "" || a.WWN != b.WWN) {
-		return false
-	}
-	if a.Serial != "" || a.WWN != "" {
+	if hasHardwareIdentity(a) {
 		return true
 	}
+	return sameSysfsIdentity(a, b)
+}
+
+type kernelIdentity struct {
+	id, path     string
+	major, minor uint32
+}
+
+func sameKernelIdentity(a, b Device) bool {
+	if a.ID == "" {
+		return false
+	}
+	return kernelIdentityOf(a) == kernelIdentityOf(b)
+}
+
+func kernelIdentityOf(d Device) kernelIdentity {
+	return kernelIdentity{id: d.ID, path: d.Path, major: d.Major, minor: d.Minor}
+}
+
+func sameHardwareIdentity(a, b Device) bool {
+	return a.Serial == b.Serial && a.WWN == b.WWN
+}
+
+func hasHardwareIdentity(d Device) bool {
+	return d.Serial != "" || d.WWN != ""
+}
+
+func sameSysfsIdentity(a, b Device) bool {
 	return a.SysfsPath != "" && a.SysfsPath == b.SysfsPath
 }
