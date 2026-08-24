@@ -85,10 +85,35 @@ func (r Request) Validate() error {
 		return ErrInvalidTarget
 	}
 	t := r.Target
-	if t.ID == "" || t.RegistryID == "" || t.Capacity == 0 || !t.Whole || !t.Removable || !t.External || !t.NonSystem || !t.USB {
+	if !t.hasRequiredClaims() {
 		return ErrInvalidTarget
 	}
 	return nil
+}
+
+func (t Target) hasRequiredClaims() bool {
+	if t.ID == "" {
+		return false
+	}
+	if t.RegistryID == "" {
+		return false
+	}
+	if t.Capacity == 0 {
+		return false
+	}
+	if !t.Whole {
+		return false
+	}
+	if !t.Removable {
+		return false
+	}
+	if !t.External {
+		return false
+	}
+	if !t.NonSystem {
+		return false
+	}
+	return t.USB
 }
 
 func (c SessionCommand) Validate(capacity uint64) error {

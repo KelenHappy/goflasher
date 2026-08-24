@@ -21,6 +21,10 @@ type blockTopology struct {
 }
 
 func readBlockTopology(classRoot string) (*blockTopology, error) {
+	// This snapshot is intentionally read synchronously and is never cached.
+	// Mount, swap, partition, holder, and slave relationships are authorization
+	// inputs: returning before the complete current sysfs view is available, or
+	// reusing an older view, could authorize a device whose topology changed.
 	entries, err := os.ReadDir(classRoot)
 	if err != nil {
 		return nil, err

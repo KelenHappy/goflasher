@@ -779,10 +779,10 @@ type pnpDisk struct {
 	usb      bool
 }
 
-// setupDisks maps every present disk-interface device to its disk number. A
+// enumeratePnPDisks maps every present disk-interface device to its disk number. A
 // failure mid-enumeration discards the partial map so callers cannot mistake
 // it for the complete topology.
-func setupDisks() (map[uint32]pnpDisk, error) {
+var enumeratePnPDisks = func() (map[uint32]pnpDisk, error) {
 	h, _, e := setupGetClassDevs.Call(uintptr(unsafe.Pointer(&diskInterfaceGUID)), 0, 0, uintptr(windows.DIGCF_PRESENT|windows.DIGCF_DEVICEINTERFACE))
 	if h == uintptr(windows.InvalidHandle) {
 		return nil, fmt.Errorf("SetupDiGetClassDevsW: %w", e)
@@ -905,7 +905,7 @@ var (
 	procFindVolumeClose = kernel.NewProc("FindVolumeClose")
 )
 
-func allVolumes() ([]string, error) {
+var enumerateVolumes = func() ([]string, error) {
 	buf := make([]uint16, 1024)
 	h, _, e := procFindFirstVolume.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if h == uintptr(windows.InvalidHandle) {
@@ -1041,11 +1041,9 @@ func parseVolumeDiskExtents(b []byte) ([]uint32, error) {
 }
 
 var (
-	openVolumeHandle  = openHandle
-	enumerateVolumes  = allVolumes
-	queryVolumeDisks  = volumeDisks
-	querySystemDisks  = systemDiskNumbers
-	enumeratePnPDisks = setupDisks
+	openVolumeHandle = openHandle
+	queryVolumeDisks = volumeDisks
+	querySystemDisks = systemDiskNumbers
 )
 
 func volumesForDisk(n uint32) ([]string, error) {
