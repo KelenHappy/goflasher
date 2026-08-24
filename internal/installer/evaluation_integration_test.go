@@ -42,7 +42,7 @@ func TestAuthorizedWindowsEvaluationISO(t *testing.T) {
 		}
 	}
 	splitter := installer.NewNativeWIMSplitter()
-	plan, err := installer.NewBuildPlan(context.Background(), r, uint64(size), fs.Manifest(), installer.PlanOptions{SourceIdentity: "authorized-evaluation", TargetSize: targetSize, TemporarySpace: targetSize, SplitPreflight: splitter.Preflight})
+	plan, err := installer.NewBuildPlan(context.Background(), installer.BuildPlanInput{Source: r, SourceSize: uint64(size), Manifest: fs.Manifest(), Options: installer.PlanOptions{SourceIdentity: "authorized-evaluation", TargetSize: targetSize, TemporarySpace: targetSize, SplitPreflight: splitter.Preflight}})
 	if err != nil {
 		t.Fatal(err)
 	}

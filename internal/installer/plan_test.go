@@ -19,7 +19,7 @@ func TestBuildPlanIsCompleteAndImmutable(t *testing.T) {
 		{Path: "efi/boot/bootx64.efi", DestinationFATPath: "efi/boot/bootx64.efi", Type: installeriso.File, Size: 1000, Extents: []installeriso.Extent{{Offset: 0, Length: 1000}}},
 		{Path: "sources/install.wim", DestinationFATPath: "sources/install.wim", Type: installeriso.File, Size: 4096, Extents: []installeriso.Extent{{Offset: 4096, Length: 4096}}},
 	}}
-	plan, err := NewBuildPlan(context.Background(), bytes.NewReader(source), uint64(len(source)), manifest, PlanOptions{SourceIdentity: "iso:fixture", TargetSize: 8 << 30})
+	plan, err := NewBuildPlan(context.Background(), BuildPlanInput{Source: bytes.NewReader(source), SourceSize: uint64(len(source)), Manifest: manifest, Options: PlanOptions{SourceIdentity: "iso:fixture", TargetSize: 8 << 30}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestBuildPlanIsCompleteAndImmutable(t *testing.T) {
 }
 
 func TestBuildPlanRequiresX64FallbackLoader(t *testing.T) {
-	_, err := NewBuildPlan(context.Background(), bytes.NewReader(make([]byte, 512)), 512, installeriso.Manifest{}, PlanOptions{SourceIdentity: "iso", TargetSize: 1 << 30})
+	_, err := NewBuildPlan(context.Background(), BuildPlanInput{Source: bytes.NewReader(make([]byte, 512)), SourceSize: 512, Manifest: installeriso.Manifest{}, Options: PlanOptions{SourceIdentity: "iso", TargetSize: 1 << 30}})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("error = %v", err)
 	}
@@ -50,7 +50,7 @@ func TestBuildPlanRequiresX64FallbackLoader(t *testing.T) {
 
 func TestBuildPlanValidatesExistingSplitSet(t *testing.T) {
 	entries := []installeriso.Entry{{Path: "efi/boot/bootx64.efi", Type: installeriso.File}, {Path: "sources/install.swm", Type: installeriso.File}, {Path: "sources/install3.swm", Type: installeriso.File}}
-	_, err := NewBuildPlan(context.Background(), bytes.NewReader(make([]byte, 512)), 512, installeriso.Manifest{Entries: entries}, PlanOptions{SourceIdentity: "iso", TargetSize: 1 << 30})
+	_, err := NewBuildPlan(context.Background(), BuildPlanInput{Source: bytes.NewReader(make([]byte, 512)), SourceSize: 512, Manifest: installeriso.Manifest{Entries: entries}, Options: PlanOptions{SourceIdentity: "iso", TargetSize: 1 << 30}})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("non-contiguous split set error = %v", err)
 	}
@@ -119,10 +119,10 @@ func TestBuildPlanProbesSplitSupportBeforeCompletingPreflight(t *testing.T) {
 		{Path: "efi/boot/bootx64.efi", Type: installeriso.File},
 		{Path: "sources/install.wim", Type: installeriso.File, Size: maxFATFileSize + 1},
 	}}
-	_, err := NewBuildPlan(context.Background(), bytes.NewReader(make([]byte, 512)), 512, manifest, PlanOptions{
+	_, err := NewBuildPlan(context.Background(), BuildPlanInput{Source: bytes.NewReader(make([]byte, 512)), SourceSize: 512, Manifest: manifest, Options: PlanOptions{
 		SourceIdentity: "iso", TargetSize: 8 << 30, TemporarySpace: 8 << 30,
 		SplitPreflight: func(context.Context) error { return probeErr },
-	})
+	}})
 	if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), probeErr.Error()) {
 		t.Fatalf("error=%v", err)
 	}

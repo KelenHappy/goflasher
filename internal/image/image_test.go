@@ -220,54 +220,78 @@ func TestInspect(t *testing.T) {
 func TestInspectedSourceRetainsOriginalFileAcrossPathReplacement(t *testing.T) {
 	for _, symlink := range []bool{false, true} {
 		t.Run(fmt.Sprintf("symlink=%t", symlink), func(t *testing.T) {
-			dir := t.TempDir()
-			original := filepath.Join(dir, "original.img")
-			selected := original
-			want := []byte("inspected bytes")
-			if err := os.WriteFile(original, want, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if symlink {
-				selected = filepath.Join(dir, "selected.img")
-				if err := os.Symlink(original, selected); err != nil {
-					t.Fatal(err)
-				}
-			}
-			info, err := Inspect(Info{Path: selected, Compression: CompressionNone})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer info.CloseSource()
-			replacement := filepath.Join(dir, "replacement.img")
-			if err := os.WriteFile(replacement, []byte("attacker bytes"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if symlink {
-				if err := os.Remove(selected); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(replacement, selected); err != nil {
-					t.Fatal(err)
-				}
-			} else if err := os.Rename(replacement, selected); err != nil {
-				// Windows normally denies replacement while the inspected handle is
-				// retained because os.Open does not share delete access. That is the
-				// stronger acceptable outcome: the pathname race is prevented by the
-				// OS rather than survived by the retained inode handle as on Unix.
-				if runtime.GOOS != "windows" || !errors.Is(err, os.ErrPermission) {
-					t.Fatal(err)
-				}
-			}
-			r, err := Open(info)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got, err := io.ReadAll(r)
-			_ = r.Close()
-			if err != nil || !bytes.Equal(got, want) {
-				t.Fatalf("retained source = %q, err=%v", got, err)
-			}
+			testRetainedSourcePathReplacement(t, symlink)
 		})
+	}
+}
+
+func testRetainedSourcePathReplacement(t *testing.T, symlink bool) {
+	t.Helper()
+	info, selected, want := inspectReplacementFixture(t, symlink)
+	defer info.CloseSource()
+	replaceInspectedPath(t, selected, symlink)
+	assertRetainedSource(t, info, want)
+}
+
+func inspectReplacementFixture(t *testing.T, symlink bool) (Info, string, []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	original := filepath.Join(dir, "original.img")
+	want := []byte("inspected bytes")
+	if err := os.WriteFile(original, want, 0600); err != nil {
+		t.Fatal(err)
+	}
+	selected := original
+	if symlink {
+		selected = filepath.Join(dir, "selected.img")
+		if err := os.Symlink(original, selected); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := Inspect(Info{Path: selected, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info, selected, want
+}
+
+func replaceInspectedPath(t *testing.T, selected string, symlink bool) {
+	t.Helper()
+	replacement := filepath.Join(filepath.Dir(selected), "replacement.img")
+	if err := os.WriteFile(replacement, []byte("attacker bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if symlink {
+		if err := os.Remove(selected); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(replacement, selected); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	err := os.Rename(replacement, selected)
+	if err == nil {
+		return
+	}
+	// Windows may deny replacement while the retained handle is open. Preventing
+	// the pathname race entirely is an equally safe outcome for this test.
+	if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
+		return
+	}
+	t.Fatal(err)
+}
+
+func assertRetainedSource(t *testing.T, info Info, want []byte) {
+	t.Helper()
+	r, err := Open(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	closeErr := r.Close()
+	if err != nil || closeErr != nil || !bytes.Equal(got, want) {
+		t.Fatalf("retained source = %q, read error=%v, close error=%v", got, err, closeErr)
 	}
 }
 

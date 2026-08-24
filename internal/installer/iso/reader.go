@@ -56,8 +56,8 @@ func invalid(format string, args ...any) error {
 // New completely parses and validates the immutable manifest before returning.
 // retained pins the caller's source object for both parsing and later extraction.
 func New(source io.ReaderAt, size int64, retained io.Closer) (*Reader, error) {
-	if source == nil || retained == nil || size < 0 {
-		return nil, invalid("invalid source")
+	if err := validateSource(source, size, retained); err != nil {
+		return nil, err
 	}
 	r := &Reader{source: source, size: uint64(size), retained: retained}
 	entries, err := r.parse()
@@ -67,6 +67,19 @@ func New(source io.ReaderAt, size int64, retained io.Closer) (*Reader, error) {
 	}
 	r.manifest.Entries = entries
 	return r, nil
+}
+
+func validateSource(source io.ReaderAt, size int64, retained io.Closer) error {
+	if source == nil {
+		return invalid("invalid source")
+	}
+	if retained == nil {
+		return invalid("invalid source")
+	}
+	if size < 0 {
+		return invalid("invalid source")
+	}
+	return nil
 }
 
 func (r *Reader) parse() ([]Entry, error) {
@@ -97,7 +110,7 @@ func (r *Reader) Manifest() Manifest {
 func (r *Reader) ReadAt(p []byte, off int64) (int, error) { return r.source.ReadAt(p, off) }
 
 func (r *Reader) bytes(off, length uint64) ([]byte, error) {
-	if off > r.size || length > r.size-off || length > maxRead {
+	if !r.validRead(off, length) {
 		return nil, invalid("extent out of bounds")
 	}
 	b := make([]byte, length)
@@ -105,6 +118,13 @@ func (r *Reader) bytes(off, length uint64) ([]byte, error) {
 		return nil, invalid("truncated extent: %v", err)
 	}
 	return b, nil
+}
+
+func (r *Reader) validRead(off, length uint64) bool {
+	if length > maxRead || off > r.size {
+		return false
+	}
+	return length <= r.size-off
 }
 
 func (r *Reader) sector(n uint64) ([]byte, error) {
@@ -117,30 +137,46 @@ func (r *Reader) readISO9660() ([]Entry, bool, error) {
 	var all []Entry
 	found := false
 	for sec := uint64(16); sec < 256; sec++ {
-		b, err := r.sector(sec)
+		entries, joliet, usable, stop, err := r.readISODescriptor(sec)
 		if err != nil {
 			return nil, found, err
 		}
-		if !isVolumeDescriptor(b) {
-			continue
-		}
-		if b[0] == 255 {
+		if stop {
 			break
 		}
-		joliet, usable := usableVolumeDescriptor(b)
 		if !usable {
 			continue
 		}
 		found = true
-		entries, err := r.walkVolumeDescriptor(b, joliet)
-		if err != nil {
-			return nil, true, err
-		}
 		if joliet || len(all) == 0 {
 			all = entries
 		}
 	}
 	return all, found, nil
+}
+
+func (r *Reader) readISODescriptor(sector uint64) (entries []Entry, joliet, usable, stop bool, err error) {
+	b, err := r.sector(sector)
+	if err != nil {
+		return nil, false, false, false, err
+	}
+	joliet, usable, stop = classifyVolumeDescriptor(b)
+	if !usable {
+		return nil, joliet, false, stop, nil
+	}
+	entries, err = r.walkVolumeDescriptor(b, joliet)
+	return entries, joliet, true, false, err
+}
+
+func classifyVolumeDescriptor(b []byte) (joliet, usable, stop bool) {
+	if !isVolumeDescriptor(b) {
+		return false, false, false
+	}
+	if b[0] == 255 {
+		return false, false, true
+	}
+	joliet, usable = usableVolumeDescriptor(b)
+	return joliet, usable, false
 }
 
 func isVolumeDescriptor(b []byte) bool { return string(b[1:6]) == "CD001" }
@@ -317,6 +353,18 @@ type udfWalker struct {
 }
 
 func (w *udfWalker) walk(block uint32, prefix string, depth int) error {
+	if err := w.enter(block, depth); err != nil {
+		return err
+	}
+	defer w.leave(block)
+	fids, err := w.directoryIdentifiers(block)
+	if err != nil {
+		return err
+	}
+	return w.addChildren(fids, prefix, depth)
+}
+
+func (w *udfWalker) enter(block uint32, depth int) error {
 	if depth > maxDepth {
 		return invalid("directory depth")
 	}
@@ -324,26 +372,31 @@ func (w *udfWalker) walk(block uint32, prefix string, depth int) error {
 		return invalid("directory cycle")
 	}
 	w.seen[block] = true
-	defer delete(w.seen, block)
+	return nil
+}
+
+func (w *udfWalker) leave(block uint32) { delete(w.seen, block) }
+
+func (w *udfWalker) directoryIdentifiers(block uint32) ([]udfFID, error) {
 	fe, err := w.r.udfFileEntry(w.part, block)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	exts, err := udfExtents(w.part, fe.allocs, fe.allocType)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !fe.isDir() {
-		return invalid("root is not directory")
+		return nil, invalid("root is not directory")
 	}
 	data, err := w.r.readExtents(exts, fe.infoLen)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	fids, err := parseUDFFileIdentifiers(data)
-	if err != nil {
-		return err
-	}
+	return parseUDFFileIdentifiers(data)
+}
+
+func (w *udfWalker) addChildren(fids []udfFID, prefix string, depth int) error {
 	for _, fid := range fids {
 		if err := w.addChild(fid, prefix, depth); err != nil {
 			return err
@@ -503,26 +556,50 @@ type isoWalker struct {
 }
 
 func (w *isoWalker) walk(rec []byte, prefix string, depth int) error {
-	if depth > maxDepth {
-		return invalid("directory depth")
-	}
-	if len(rec) < 34 {
-		return invalid("directory record")
-	}
-	ext, size := binary.LittleEndian.Uint32(rec[2:6]), binary.LittleEndian.Uint32(rec[10:14])
-	if w.seen[ext] {
-		return invalid("directory cycle")
-	}
-	w.seen[ext] = true
-	defer delete(w.seen, ext)
-	b, err := w.r.bytes(uint64(ext)*uint64(sectorSize), uint64(size))
+	ext, err := w.enter(rec, depth)
 	if err != nil {
 		return err
+	}
+	defer w.leave(ext)
+	records, err := w.directoryRecords(rec)
+	if err != nil {
+		return err
+	}
+	return w.addRecords(records, prefix, depth)
+}
+
+func (w *isoWalker) enter(rec []byte, depth int) (uint32, error) {
+	if depth > maxDepth {
+		return 0, invalid("directory depth")
+	}
+	if len(rec) < 34 {
+		return 0, invalid("directory record")
+	}
+	ext := binary.LittleEndian.Uint32(rec[2:6])
+	if w.seen[ext] {
+		return 0, invalid("directory cycle")
+	}
+	w.seen[ext] = true
+	return ext, nil
+}
+
+func (w *isoWalker) leave(ext uint32) { delete(w.seen, ext) }
+
+func (w *isoWalker) directoryRecords(rec []byte) ([][]byte, error) {
+	ext := binary.LittleEndian.Uint32(rec[2:6])
+	size := binary.LittleEndian.Uint32(rec[10:14])
+	b, err := w.r.bytes(uint64(ext)*uint64(sectorSize), uint64(size))
+	if err != nil {
+		return nil, err
 	}
 	records, err := isoDirectoryRecords(b)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return records, nil
+}
+
+func (w *isoWalker) addRecords(records [][]byte, prefix string, depth int) error {
 	pending := map[string]int{}
 	for _, x := range records {
 		if err := w.addRecord(x, prefix, depth, pending); err != nil {
@@ -581,26 +658,41 @@ func isoRecordContinues(x []byte) bool { return x[25]&0x80 != 0 }
 
 func (w *isoWalker) addRecord(x []byte, prefix string, depth int, pending map[string]int) error {
 	name, skip, err := isoRecordName(x, w.joliet)
-	if err != nil || skip {
+	if err != nil {
 		return err
+	}
+	if skip {
+		return nil
 	}
 	p, err := normalize(prefix, name)
 	if err != nil {
 		return err
 	}
 	e := isoEntry(x, p)
-	if idx, ok := pending[p]; ok && e.Type == File {
+	if idx, ok := pendingFile(pending, e); ok {
 		return w.mergeExtent(idx, e, isoRecordContinues(x), pending)
 	}
+	return w.addEntry(x, e, depth, pending)
+}
+
+func pendingFile(pending map[string]int, e Entry) (int, bool) {
+	if e.Type != File {
+		return 0, false
+	}
+	idx, ok := pending[e.Path]
+	return idx, ok
+}
+
+func (w *isoWalker) addEntry(record []byte, e Entry, depth int, pending map[string]int) error {
 	w.out = append(w.out, e)
-	if e.Type == File && isoRecordContinues(x) {
-		pending[p] = len(w.out) - 1
+	if e.Type == File && isoRecordContinues(record) {
+		pending[e.Path] = len(w.out) - 1
 	}
 	if len(w.out) > maxEntries {
 		return invalid("too many entries")
 	}
 	if e.Type == Directory {
-		return w.walk(x, p, depth+1)
+		return w.walk(record, e.Path, depth+1)
 	}
 	return nil
 }

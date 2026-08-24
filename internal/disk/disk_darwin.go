@@ -34,7 +34,7 @@ func NewManager() Manager {
 func probeDisk(p darwinapi.ProbeResult) (Disk, bool) {
 	// A registry entry ID is deliberately scoped to this enumeration lifetime.
 	// Registry path, BSD node, size and model never substitute for it.
-	if !p.Whole || p.Internal || !p.Removable || !p.Ejectable || !p.USBAncestor || p.Size == 0 || p.RegistryID == "" || p.BSDName == "" {
+	if !eligibleDarwinProbe(p) {
 		return Disk{}, false
 	}
 	mounts := append([]string(nil), p.MountPoints...)
@@ -45,6 +45,19 @@ func probeDisk(p darwinapi.ProbeResult) (Disk, bool) {
 		Mounted: len(mounts) != 0, MountPoints: mounts,
 		RegistryID: p.RegistryID, RegistryPath: p.RegistryPath, MediaID: p.MediaID, TransportSerial: p.TransportSerial,
 	}, true
+}
+
+func eligibleDarwinProbe(p darwinapi.ProbeResult) bool {
+	if !p.Whole || p.Internal {
+		return false
+	}
+	if !p.Removable || !p.Ejectable {
+		return false
+	}
+	if !p.USBAncestor || p.Size == 0 {
+		return false
+	}
+	return p.RegistryID != "" && p.BSDName != ""
 }
 
 func firstNonempty(values ...string) string {
@@ -87,16 +100,27 @@ func (m *darwinManager) Refresh(ctx context.Context, id string) (Disk, error) {
 }
 
 func validateDarwinSelection(selected, fresh Disk) error {
-	if selected.System || fresh.System {
+	if isSystemSelection(selected, fresh) {
 		return ErrSystemDisk
 	}
-	if !selected.Removable || !fresh.Removable || !selected.External || !fresh.External || !selected.Ejectable || !fresh.Ejectable || selected.Bus != "usb" || fresh.Bus != "usb" {
+	if !isRemovableUSB(selected) || !isRemovableUSB(fresh) {
 		return ErrNotRemovable
 	}
 	if !SameIdentity(selected, fresh) {
 		return ErrChanged
 	}
 	return nil
+}
+
+func isSystemSelection(selected, fresh Disk) bool {
+	return selected.System || fresh.System
+}
+
+func isRemovableUSB(d Disk) bool {
+	if !d.Removable || !d.External {
+		return false
+	}
+	return d.Ejectable && d.Bus == "usb"
 }
 
 func bsdName(device string) (string, bool) {
@@ -134,22 +158,36 @@ func (m *darwinManager) Unmount(ctx context.Context, selected Disk) error {
 func (m *darwinManager) Eject(ctx context.Context, selected Disk) error {
 	ctx, cancel := context.WithTimeout(ctx, darwinOperationTimeout)
 	defer cancel()
-	fresh, err := m.Refresh(ctx, selected.ID)
+	bsd, err := m.ejectTarget(ctx, selected)
 	if err != nil {
 		return err
-	}
-	if err := validateDarwinSelection(selected, fresh); err != nil {
-		return err
-	}
-	bsd, ok := bsdName(fresh.Device)
-	if !ok {
-		return ErrChanged
 	}
 	if err := m.probe.Eject(ctx, bsd); err != nil {
 		return errors.Join(ErrEjectFailed, mapDarwinError(err))
 	}
+	return m.waitForEjection(ctx, selected.ID)
+}
+
+func (m *darwinManager) ejectTarget(ctx context.Context, selected Disk) (string, error) {
+	fresh, err := m.Refresh(ctx, selected.ID)
+	if err != nil {
+		return "", err
+	}
+	if err := validateDarwinSelection(selected, fresh); err != nil {
+		return "", err
+	}
+	bsd, ok := bsdName(fresh.Device)
+	if !ok {
+		return "", ErrChanged
+	}
+	return bsd, nil
+}
+
+func (m *darwinManager) waitForEjection(ctx context.Context, id string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		_, err := m.Refresh(ctx, selected.ID)
+		_, err := m.Refresh(ctx, id)
 		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
@@ -159,7 +197,7 @@ func (m *darwinManager) Eject(ctx context.Context, selected Disk) error {
 		select {
 		case <-ctx.Done():
 			return errors.Join(ErrEjectFailed, ctx.Err())
-		case <-time.After(100 * time.Millisecond):
+		case <-ticker.C:
 		}
 	}
 }

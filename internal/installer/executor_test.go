@@ -35,7 +35,7 @@ func executorFixture(t *testing.T) (*BuildPlan, []byte) {
 		{Path: "sources", DestinationFATPath: "sources", Type: installeriso.Directory},
 		{Path: "sources/install.wim", DestinationFATPath: "sources\\install.wim", Type: installeriso.File, Size: 3000, Extents: []installeriso.Extent{{Offset: 1000, Length: 3000}}},
 	}}
-	plan, err := NewBuildPlan(context.Background(), bytes.NewReader(source), uint64(len(source)), manifest, PlanOptions{SourceIdentity: "fixture", TargetSize: 80 << 20})
+	plan, err := NewBuildPlan(context.Background(), BuildPlanInput{Source: bytes.NewReader(source), SourceSize: uint64(len(source)), Manifest: manifest, Options: PlanOptions{SourceIdentity: "fixture", TargetSize: 80 << 20}})
 	if err != nil {
 		t.Fatal(err)
 	}
