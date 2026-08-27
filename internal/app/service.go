@@ -140,11 +140,11 @@ func (s *Service) runWorkflow(ctx context.Context, request RunRequest) (out RunR
 	if err = s.executePlan(ctx, plan, info, request.Target, request.Options, request.Updates, windowsBackend, effectiveSplitter, &out); err != nil {
 		return out, err
 	}
-	operation := workflowOperation{service: s, ctx: ctx, target: request.Target, updates: request.Updates, out: &out}
-	if err = operation.ejectDevice(request.Options.Eject); err != nil {
+	if err = releaseDevice(); err != nil {
 		return out, err
 	}
-	if err = releaseDevice(); err != nil {
+	operation := workflowOperation{service: s, ctx: ctx, target: request.Target, updates: request.Updates, out: &out}
+	if err = operation.ejectDevice(request.Options.Eject); err != nil {
 		return out, err
 	}
 	if err = s.State.Transition(Completed); err != nil {
@@ -310,8 +310,9 @@ func (s *Service) unmountDevice(ctx context.Context, target device.Device) error
 }
 
 // newDeviceRelease returns an idempotent cleanup function. Windows keeps
-// dismounted-volume handles across writer close, flush, verification, and
-// eject, so the service releases them only when the entire workflow finishes.
+// dismounted-volume handles across writer close, flush, and verification, so
+// the service releases them only after destructive work finishes and before
+// any requested eject.
 func newDeviceRelease(backend device.Backend, target device.Device) func() error {
 	releaser, ok := backend.(interface{ ReleaseDevice(device.Device) error })
 	return func() error {
@@ -372,13 +373,14 @@ func (w workflowOperation) finishWrite(expectedSHA256 string, dst interface{ Clo
 		sendStage(w.ctx, w.updates, progress.StageFlushing)
 	}
 	closeErr := dst.Close()
+	writeCloseErr := errors.Join(writeErr, closeErr)
 	if writeErr != nil {
-		return writeErr
+		return writeCloseErr
 	}
 	w.out.BytesWritten = result.BytesWritten
 	w.out.SourceSHA256 = result.SHA256
-	if closeErr != nil {
-		return closeErr
+	if writeCloseErr != nil {
+		return writeCloseErr
 	}
 	if result.SHA256 != expectedSHA256 {
 		return fmt.Errorf("%w: checksum no longer matches inspected image", writer.ErrSourceChanged)
@@ -402,11 +404,8 @@ func (w workflowOperation) verifyImage(enabled bool) error {
 	}
 	w.out.TargetSHA256, err = verify.ReadBack(w.ctx, reader, w.out.BytesWritten, w.out.SourceSHA256, w.updates)
 	closeErr := reader.Close()
-	if err != nil {
+	if err = errors.Join(err, closeErr); err != nil {
 		return err
-	}
-	if closeErr != nil {
-		return closeErr
 	}
 	w.out.Verified = true
 	return nil

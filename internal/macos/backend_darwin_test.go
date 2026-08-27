@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/disk"
 )
 
@@ -137,6 +138,23 @@ func TestOpenNeverUsesSelectedPath(t *testing.T) {
 }
 
 func TestInstallerSessionsReuseIdentityBoundRawOpen(t *testing.T) {
+	b, selected, flags := installerSessionTestBackend(t)
+
+	target, err := b.OpenInstallerTarget(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = target.Close()
+	installerReader, err := b.OpenInstallerReader(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = installerReader.Close()
+	requireAccessModes(t, *flags, os.O_RDWR, os.O_RDONLY)
+}
+
+func installerSessionTestBackend(t *testing.T) (*backend, device.Device, *[]int) {
+	t.Helper()
 	m := &fakeManager{current: safeDisk()}
 	m.current.Mounted, m.current.MountPoints = false, nil
 	b := NewBackendWithManager(m)
@@ -149,12 +167,12 @@ func TestInstallerSessionsReuseIdentityBoundRawOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
+	t.Cleanup(func() { _ = writer.Close() })
 	reader, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	t.Cleanup(func() { _ = reader.Close() })
 	var flags []int
 	b.openRaw = func(openedPath string, flag int) (*os.File, error) {
 		if openedPath != m.current.Device {
@@ -168,18 +186,17 @@ func TestInstallerSessionsReuseIdentityBoundRawOpen(t *testing.T) {
 	}
 	b.fstat = func(_ int, st *syscall.Stat_t) error { st.Mode, st.Rdev = syscall.S_IFCHR, 7; return nil }
 	b.stat = func(_ string, st *syscall.Stat_t) error { st.Mode, st.Rdev = syscall.S_IFCHR, 7; return nil }
+	return b, selected, &flags
+}
 
-	target, err := b.OpenInstallerTarget(context.Background(), selected)
-	if err != nil {
-		t.Fatal(err)
+func requireAccessModes(t *testing.T, flags []int, expected ...int) {
+	t.Helper()
+	if len(flags) != len(expected) {
+		t.Fatalf("open flags=%#v, want access modes %#v", flags, expected)
 	}
-	_ = target.Close()
-	installerReader, err := b.OpenInstallerReader(context.Background(), selected)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = installerReader.Close()
-	if len(flags) != 2 || flags[0]&syscall.O_ACCMODE != os.O_RDWR || flags[1]&syscall.O_ACCMODE != os.O_RDONLY {
-		t.Fatalf("open flags=%#v", flags)
+	for index, flag := range flags {
+		if flag&syscall.O_ACCMODE != expected[index] {
+			t.Fatalf("open flags=%#v, want access modes %#v", flags, expected)
+		}
 	}
 }

@@ -54,6 +54,21 @@ type releaseErrorBackend struct {
 
 func (b *releaseErrorBackend) ReleaseDevice(device.Device) error { return b.err }
 
+type orderedReleaseBackend struct {
+	*fileBackend
+	calls []string
+}
+
+func (b *orderedReleaseBackend) ReleaseDevice(device.Device) error {
+	b.calls = append(b.calls, "ReleaseDevice")
+	return nil
+}
+
+func (b *orderedReleaseBackend) Eject(ctx context.Context, target device.Device) error {
+	b.calls = append(b.calls, "Eject")
+	return b.fileBackend.Eject(ctx, target)
+}
+
 func TestServiceReportsDeviceReleaseFailure(t *testing.T) {
 	payload := []byte("image payload")
 	fixture := newFileServiceFixture(t, payload, 2)
@@ -67,6 +82,20 @@ func TestServiceReportsDeviceReleaseFailure(t *testing.T) {
 	}
 	if got := fixture.state.State(); got != Failed {
 		t.Fatalf("state = %s, want Failed", got)
+	}
+}
+
+func TestServiceReleasesDeviceBeforeEject(t *testing.T) {
+	fixture := newFileServiceFixture(t, []byte("image payload"), 2)
+	backend := &orderedReleaseBackend{fileBackend: fixture.backend}
+	fixture.service.Backend = backend
+
+	_, err := fixture.service.Run(context.Background(), RunRequest{Image: fixture.info, Target: fixture.device, Options: RunOptions{Eject: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ReleaseDevice", "Eject"}; !slices.Equal(backend.calls, want) {
+		t.Fatalf("backend calls = %v, want %v", backend.calls, want)
 	}
 }
 
@@ -347,6 +376,7 @@ type stageFailureCase struct {
 	configure                          func(*failureBackend)
 	opts                               RunOptions
 	wantErr                            error
+	wantAlsoErr                        error
 	wantPrefix                         string
 	wantState                          State
 	wantCalls                          []string
@@ -374,10 +404,12 @@ func serviceStageFailureCases(payload []byte, sourceHash string, mismatchPayload
 		{name: "Unmount cancellation", configure: func(b *failureBackend) { b.unmountErr = context.Canceled }, wantErr: context.Canceled, wantState: Cancelled, wantCalls: []string{"Unmount"}},
 		{name: "OpenWriter", configure: func(b *failureBackend) { b.openWriterErr = errs["open writer"] }, wantErr: errs["open writer"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}},
 		{name: "writer Write", configure: func(b *failureBackend) { b.writeErr = errs["write"] }, wantErr: writer.ErrWriteFailed, wantPrefix: "write failed", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}, wantWriterCloses: 1},
+		{name: "writer Write and Close", configure: func(b *failureBackend) { b.writeErr, b.writerCloseErr = errs["write"], errs["writer close"] }, wantErr: writer.ErrWriteFailed, wantAlsoErr: errs["writer close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}, wantWriterCloses: 1},
 		{name: "writer Close", configure: func(b *failureBackend) { b.writerCloseErr = errs["writer close"] }, wantErr: errs["writer close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter"}, wantWriterCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
 		{name: "Flush", configure: func(b *failureBackend) { b.flushErr = errs["flush"] }, wantErr: errs["flush"], wantPrefix: "flush: ", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush"}, wantWriterCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
 		{name: "OpenReader", configure: func(b *failureBackend) { b.openReaderErr = errs["open reader"] }, opts: RunOptions{Verify: true}, wantErr: errs["open reader"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
 		{name: "verify Read", configure: func(b *failureBackend) { b.readErr = errs["verify read"] }, opts: RunOptions{Verify: true}, wantErr: errs["verify read"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
+		{name: "verify Read and reader Close", configure: func(b *failureBackend) { b.readErr, b.readerCloseErr = errs["verify read"], errs["reader close"] }, opts: RunOptions{Verify: true}, wantErr: errs["verify read"], wantAlsoErr: errs["reader close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash}},
 		{name: "verify checksum mismatch", configure: func(b *failureBackend) { b.readerPayload = mismatchPayload }, opts: RunOptions{Verify: true}, wantErr: verify.ErrMismatch, wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash, targetHash: mismatchHash}},
 		{name: "reader Close", configure: func(b *failureBackend) { b.readerCloseErr = errs["reader close"] }, opts: RunOptions{Verify: true}, wantErr: errs["reader close"], wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash, targetHash: sourceHash}},
 		{name: "Eject", configure: func(b *failureBackend) { b.ejectErr = errs["eject"] }, opts: RunOptions{Verify: true, Eject: true}, wantErr: errs["eject"], wantPrefix: "eject: ", wantState: Failed, wantCalls: []string{"Unmount", "OpenWriter", "Flush", "OpenReader", "Eject"}, wantWriterCloses: 1, wantReaderCloses: 1, want: expectedStageResult{written: written, sourceHash: sourceHash, targetHash: sourceHash, verified: true}},
@@ -407,6 +439,9 @@ func assertStageError(t *testing.T, err error, testCase stageFailureCase) {
 	t.Helper()
 	if !errors.Is(err, testCase.wantErr) {
 		t.Errorf("error = %v, want errors.Is(%v)", err, testCase.wantErr)
+	}
+	if testCase.wantAlsoErr != nil && !errors.Is(err, testCase.wantAlsoErr) {
+		t.Errorf("error = %v, want errors.Is(%v)", err, testCase.wantAlsoErr)
 	}
 	if testCase.wantPrefix == "" {
 		return

@@ -906,10 +906,17 @@ func containsIdentity(values []string, wanted string) bool {
 // identity without trusting data supplied by the GUI.
 func readUSBAncestorAttribute(real, attribute string) string {
 	path := usbDeviceAncestor(real)
-	if path == "" || !exists(filepath.Join(path, "idVendor")) || !exists(filepath.Join(path, "idProduct")) {
+	if path == "" {
+		return ""
+	}
+	if !hasUSBDeviceIdentifiers(path) {
 		return ""
 	}
 	return readTrim(filepath.Join(path, attribute))
+}
+
+func hasUSBDeviceIdentifiers(path string) bool {
+	return exists(filepath.Join(path, "idVendor")) && exists(filepath.Join(path, "idProduct"))
 }
 
 // usbDeviceAncestor uses the kernel's documented USB sysfs node names to find
@@ -928,9 +935,16 @@ func usbDeviceAncestor(real string) string {
 
 func isUSBDeviceNode(name string) bool {
 	bus, ports, found := strings.Cut(name, "-")
-	if !found || !decimalDigits(bus) || ports == "" {
+	if !found {
 		return false
 	}
+	if !decimalDigits(bus) {
+		return false
+	}
+	return isUSBPortChain(ports)
+}
+
+func isUSBPortChain(ports string) bool {
 	for _, port := range strings.Split(ports, ".") {
 		if !decimalDigits(port) {
 			return false
