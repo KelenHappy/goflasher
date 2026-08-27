@@ -168,6 +168,28 @@ func TestParseStorageIdentifierRejectsInvalidEntryBounds(t *testing.T) {
 	}
 }
 
+func TestValidateStorageIdentifierLink(t *testing.T) {
+	tests := []struct {
+		name          string
+		next          int
+		parsed, count uint32
+		wantError     bool
+	}{
+		{name: "middle entry links to next", next: storageIdentifierHeaderSize, parsed: 1, count: 2},
+		{name: "middle entry ends list", parsed: 1, count: 2, wantError: true},
+		{name: "last entry ends list", parsed: 2, count: 2},
+		{name: "last entry links beyond count", next: storageIdentifierHeaderSize, parsed: 2, count: 2, wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateStorageIdentifierLink(tt.next, tt.parsed, tt.count)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("validateStorageIdentifierLink(%d, %d, %d) error = %v, want error %t", tt.next, tt.parsed, tt.count, err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestVolumeGUIDValidation(t *testing.T) {
 	const guid = "01234567-89ab-CDEF-0123-456789abcdef"
 	tests := []struct {
@@ -405,6 +427,22 @@ func TestQueryStorageDescriptorTwoPhase(t *testing.T) {
 	requireNoError(t, err)
 	requireEqual(t, "len", len(b), 40)
 	requireEqual(t, "buffer sizes", fmt.Sprint(sizes), fmt.Sprint([]int{storageDescriptorHeaderSize, 40}))
+}
+
+func TestQueryStorageDescriptorRejectsOversizedByteCount(t *testing.T) {
+	calls := 0
+	_, err := queryStorageDescriptor(func(out []byte) (uint32, error) {
+		calls++
+		if calls == 1 {
+			binary.LittleEndian.PutUint32(out[4:8], 40)
+			return storageDescriptorHeaderSize, nil
+		}
+		return uint32(len(out) + 1), nil
+	})
+	if err == nil {
+		t.Fatal("oversized storage descriptor byte count accepted")
+	}
+	requireErrorContains(t, err, "invalid storage descriptor byte count")
 }
 
 func TestQueryStorageDescriptorGrowsOnBufferError(t *testing.T) {

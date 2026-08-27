@@ -205,8 +205,11 @@ func mergeStorageIdentifier(found, value string) (string, error) {
 }
 
 func validateStorageIdentifierLink(next int, parsed, count uint32) error {
-	if next == 0 && parsed != count {
+	if parsed < count && next == 0 {
 		return errors.New("incomplete STORAGE_IDENTIFIER list")
+	}
+	if parsed == count && next != 0 {
+		return errors.New("STORAGE_IDENTIFIER list exceeds declared count")
 	}
 	return nil
 }
@@ -314,6 +317,12 @@ func queryStorageDescriptor(call ioctlCall) ([]byte, error) {
 	out := make([]byte, size)
 	if n, err = call(out); err != nil {
 		return nil, err
+	}
+	if n > uint32(len(out)) {
+		return nil, fmt.Errorf(
+			"invalid storage descriptor byte count %d for %d-byte buffer",
+			n, len(out),
+		)
 	}
 	if n < storageDescriptorHeaderSize {
 		return nil, fmt.Errorf("short storage descriptor: got %d bytes", n)
@@ -746,17 +755,35 @@ func (a *winAPI) eject(ctx context.Context, r diskRecord) error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(h)
-	_ = windows.FlushFileBuffers(h)
+	if err := windows.FlushFileBuffers(h); err != nil {
+		flushErr := fmt.Errorf("flush PhysicalDrive before eject: %w", err)
+		closeErr := windows.CloseHandle(h)
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close PhysicalDrive after flush failure: %w", closeErr)
+		}
+		return errors.Join(flushErr, closeErr)
+	}
 	prevent := []byte{0}
 	var n uint32
 	_ = windows.DeviceIoControl(h, ioctlStorageMediaRemoval, &prevent[0], 1, nil, 0, &n, nil)
+	if err := windows.CloseHandle(h); err != nil {
+		return fmt.Errorf("close PhysicalDrive before eject: %w", err)
+	}
 	if r.devInst != 0 {
 		if err := requestDeviceEject(r.devInst); err == nil {
 			return nil
 		}
 	}
-	return ioctl(h, ioctlStorageEjectMedia, nil)
+	h, err = openHandle(r.Path, windows.GENERIC_READ|windows.GENERIC_WRITE)
+	if err != nil {
+		return err
+	}
+	ejectErr := ioctl(h, ioctlStorageEjectMedia, nil)
+	closeErr := windows.CloseHandle(h)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close PhysicalDrive after eject fallback: %w", closeErr)
+	}
+	return errors.Join(ejectErr, closeErr)
 }
 
 // Native PnP APIs avoid relying on WMI or an external process.
