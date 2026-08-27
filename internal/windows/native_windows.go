@@ -756,8 +756,12 @@ func (a *winAPI) eject(ctx context.Context, r diskRecord) error {
 		return err
 	}
 	if err := windows.FlushFileBuffers(h); err != nil {
-		windows.CloseHandle(h)
-		return fmt.Errorf("flush PhysicalDrive before eject: %w", err)
+		flushErr := fmt.Errorf("flush PhysicalDrive before eject: %w", err)
+		closeErr := windows.CloseHandle(h)
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close PhysicalDrive after flush failure: %w", closeErr)
+		}
+		return errors.Join(flushErr, closeErr)
 	}
 	prevent := []byte{0}
 	var n uint32
@@ -774,8 +778,12 @@ func (a *winAPI) eject(ctx context.Context, r diskRecord) error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(h)
-	return ioctl(h, ioctlStorageEjectMedia, nil)
+	ejectErr := ioctl(h, ioctlStorageEjectMedia, nil)
+	closeErr := windows.CloseHandle(h)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close PhysicalDrive after eject fallback: %w", closeErr)
+	}
+	return errors.Join(ejectErr, closeErr)
 }
 
 // Native PnP APIs avoid relying on WMI or an external process.
