@@ -299,23 +299,39 @@ func queryStorageProperty(h windows.Handle, property uint32) ([]byte, error) {
 // the full request. Drivers that report the short buffer as an error instead
 // of filling the header fall back to geometric growth.
 func queryStorageDescriptor(call ioctlCall) ([]byte, error) {
-	header := make([]byte, storageDescriptorHeaderSize)
-	n, err := call(header)
-	if bufferTooSmall(err) {
+	size, grow, err := queryStorageDescriptorSize(call)
+	if grow {
 		return queryGrowingBuffer(maxStorageDescriptorSize, call)
 	}
 	if err != nil {
 		return nil, err
 	}
+	return querySizedStorageDescriptor(size, call)
+}
+
+func queryStorageDescriptorSize(call ioctlCall) (uint32, bool, error) {
+	header := make([]byte, storageDescriptorHeaderSize)
+	n, err := call(header)
+	if bufferTooSmall(err) {
+		return 0, true, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
 	if n < storageDescriptorHeaderSize {
-		return nil, fmt.Errorf("short STORAGE_DESCRIPTOR_HEADER: got %d bytes", n)
+		return 0, false, fmt.Errorf("short STORAGE_DESCRIPTOR_HEADER: got %d bytes", n)
 	}
 	size := binary.LittleEndian.Uint32(header[4:8])
 	if size < storageDescriptorHeaderSize || size > maxStorageDescriptorSize {
-		return nil, fmt.Errorf("invalid storage descriptor size %d", size)
+		return 0, false, fmt.Errorf("invalid storage descriptor size %d", size)
 	}
+	return size, false, nil
+}
+
+func querySizedStorageDescriptor(size uint32, call ioctlCall) ([]byte, error) {
 	out := make([]byte, size)
-	if n, err = call(out); err != nil {
+	n, err := call(out)
+	if err != nil {
 		return nil, err
 	}
 	if n > uint32(len(out)) {
@@ -751,30 +767,54 @@ func (a *winAPI) eject(ctx context.Context, r diskRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	h, err := openHandle(r.Path, windows.GENERIC_READ|windows.GENERIC_WRITE)
+	if err := preparePhysicalDriveForEject(r.Path); err != nil {
+		return err
+	}
+	if requestPnPEject(r.devInst) {
+		return nil
+	}
+	return ejectPhysicalDriveMedia(r.Path)
+}
+
+func preparePhysicalDriveForEject(path string) error {
+	h, err := openHandle(path, windows.GENERIC_READ|windows.GENERIC_WRITE)
 	if err != nil {
 		return err
 	}
 	if err := windows.FlushFileBuffers(h); err != nil {
-		flushErr := fmt.Errorf("flush PhysicalDrive before eject: %w", err)
-		closeErr := windows.CloseHandle(h)
-		if closeErr != nil {
-			closeErr = fmt.Errorf("close PhysicalDrive after flush failure: %w", closeErr)
-		}
-		return errors.Join(flushErr, closeErr)
+		return closeAfterFlushFailure(h, err)
 	}
-	prevent := []byte{0}
-	var n uint32
-	_ = windows.DeviceIoControl(h, ioctlStorageMediaRemoval, &prevent[0], 1, nil, 0, &n, nil)
+	allowMediaRemoval(h)
 	if err := windows.CloseHandle(h); err != nil {
 		return fmt.Errorf("close PhysicalDrive before eject: %w", err)
 	}
-	if r.devInst != 0 {
-		if err := requestDeviceEject(r.devInst); err == nil {
-			return nil
-		}
+	return nil
+}
+
+func closeAfterFlushFailure(h windows.Handle, flushErr error) error {
+	flushErr = fmt.Errorf("flush PhysicalDrive before eject: %w", flushErr)
+	closeErr := windows.CloseHandle(h)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close PhysicalDrive after flush failure: %w", closeErr)
 	}
-	h, err = openHandle(r.Path, windows.GENERIC_READ|windows.GENERIC_WRITE)
+	return errors.Join(flushErr, closeErr)
+}
+
+func allowMediaRemoval(h windows.Handle) {
+	prevent := []byte{0}
+	var n uint32
+	_ = windows.DeviceIoControl(h, ioctlStorageMediaRemoval, &prevent[0], 1, nil, 0, &n, nil)
+}
+
+func requestPnPEject(devInst uint32) bool {
+	if devInst == 0 {
+		return false
+	}
+	return requestDeviceEject(devInst) == nil
+}
+
+func ejectPhysicalDriveMedia(path string) error {
+	h, err := openHandle(path, windows.GENERIC_READ|windows.GENERIC_WRITE)
 	if err != nil {
 		return err
 	}

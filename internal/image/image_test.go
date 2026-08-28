@@ -23,53 +23,80 @@ func TestDetectAndOpen(t *testing.T) {
 	tests := []struct {
 		name        string
 		compression Compression
-		encode      func(*bytes.Buffer)
 	}{
-		{"disk.img", CompressionNone, func(b *bytes.Buffer) { b.Write(payload) }},
-		{"disk.img.gz", CompressionGzip, func(b *bytes.Buffer) { w := gzip.NewWriter(b); w.Write(payload); w.Close() }},
-		{"disk.iso.xz", CompressionXZ, func(b *bytes.Buffer) {
-			w, err := xz.NewWriter(b)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := w.Write(payload); err != nil {
-				t.Fatal(err)
-			}
-			if err := w.Close(); err != nil {
-				t.Fatal(err)
-			}
-		}},
+		{"disk.img", CompressionNone},
+		{"disk.img.gz", CompressionGzip},
+		{"disk.iso.xz", CompressionXZ},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var encoded bytes.Buffer
-			tt.encode(&encoded)
-			path := filepath.Join(t.TempDir(), tt.name)
-			if err := os.WriteFile(path, encoded.Bytes(), 0600); err != nil {
-				t.Fatal(err)
-			}
-			info, err := Detect(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if info.Compression != tt.compression {
-				t.Fatalf("compression = %s", info.Compression)
-			}
-			r, err := Open(info)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer r.Close()
-			got, err := Checksum(r)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want, _ := Checksum(bytes.NewReader(payload))
-			if got != want {
-				t.Fatalf("checksum = %s, want %s", got, want)
-			}
+			testDetectAndOpen(t, tt.name, tt.compression, payload)
 		})
 	}
+}
+
+func testDetectAndOpen(t *testing.T, name string, compression Compression, payload []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, encodeTestImage(t, compression, payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Detect(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Compression != compression {
+		t.Fatalf("compression = %s", info.Compression)
+	}
+	r, err := Open(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	got, err := Checksum(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := mustChecksum(t, bytes.NewReader(payload))
+	if got != want {
+		t.Fatalf("checksum = %s, want %s", got, want)
+	}
+}
+
+func mustChecksum(t *testing.T, r io.Reader) string {
+	t.Helper()
+	sum, err := Checksum(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sum
+}
+
+func encodeTestImage(t *testing.T, compression Compression, payload []byte) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	var writer io.WriteCloser
+	switch compression {
+	case CompressionNone:
+		return payload
+	case CompressionGzip:
+		writer = gzip.NewWriter(&encoded)
+	case CompressionXZ:
+		var err error
+		writer, err = xz.NewWriter(&encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unsupported test compression %q", compression)
+	}
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
 }
 
 func TestOpenRejectsCorruptXZWithoutExternalExecutable(t *testing.T) {
@@ -116,20 +143,8 @@ func TestOpenRejectsMissingXZFooter(t *testing.T) {
 
 func TestXZRoundTripPureGo(t *testing.T) {
 	payload := bytes.Repeat([]byte("pure-go-xz-stream"), 4096)
-	var encoded bytes.Buffer
-	w, err := xz.NewWriter(&encoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	path := filepath.Join(t.TempDir(), "disk.raw.xz")
-	if err := os.WriteFile(path, encoded.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(path, encodeTestImage(t, CompressionXZ, payload), 0600); err != nil {
 		t.Fatal(err)
 	}
 	info, err := Detect(path)
@@ -145,8 +160,13 @@ func TestXZRoundTripPureGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("decoded payload length = %d, want %d", len(got), len(payload))
+	assertBytesEqual(t, "decoded payload", got, payload)
+}
+
+func assertBytesEqual(t *testing.T, label string, got, want []byte) {
+	t.Helper()
+	if !bytes.Equal(got, want) {
+		t.Fatalf("%s length = %d, want %d", label, len(got), len(want))
 	}
 }
 
@@ -206,14 +226,26 @@ func TestInspect(t *testing.T) {
 	}
 	defer got.CloseSource()
 	wantSum := sha256.Sum256(payload)
+	assertInspectedContent(t, got, payload, hex.EncodeToString(wantSum[:]))
+	assertSourceMetadata(t, got, info)
+}
+
+func assertInspectedContent(t *testing.T, got Info, payload []byte, wantSHA256 string) {
+	t.Helper()
 	if got.UncompressedSize != uint64(len(payload)) {
 		t.Fatalf("UncompressedSize = %d, want %d", got.UncompressedSize, len(payload))
 	}
-	if got.SHA256 != hex.EncodeToString(wantSum[:]) {
-		t.Fatalf("SHA256 = %q, want %q", got.SHA256, hex.EncodeToString(wantSum[:]))
+	if got.SHA256 != wantSHA256 {
+		t.Fatalf("SHA256 = %q, want %q", got.SHA256, wantSHA256)
 	}
-	if got.Path != info.Path || got.Format != info.Format || got.Compression != info.Compression {
-		t.Fatalf("Inspect() changed source metadata: got %+v, input %+v", got, info)
+}
+
+func assertSourceMetadata(t *testing.T, got, want Info) {
+	t.Helper()
+	gotMetadata := [3]string{got.Path, string(got.Format), string(got.Compression)}
+	wantMetadata := [3]string{want.Path, string(want.Format), string(want.Compression)}
+	if gotMetadata != wantMetadata {
+		t.Fatalf("Inspect() changed source metadata: got %+v, input %+v", got, want)
 	}
 }
 
@@ -290,9 +322,13 @@ func assertRetainedSource(t *testing.T, info Info, want []byte) {
 	}
 	got, err := io.ReadAll(r)
 	closeErr := r.Close()
-	if err != nil || closeErr != nil || !bytes.Equal(got, want) {
-		t.Fatalf("retained source = %q, read error=%v, close error=%v", got, err, closeErr)
+	if err != nil {
+		t.Fatalf("read retained source: %v", err)
 	}
+	if closeErr != nil {
+		t.Fatalf("close retained source: %v", closeErr)
+	}
+	assertBytesEqual(t, "retained source", got, want)
 }
 
 func TestInspectedSourceRejectsInPlaceChange(t *testing.T) {
