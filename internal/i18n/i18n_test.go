@@ -19,14 +19,15 @@ func TestCatalogsHaveSameMessages(t *testing.T) {
 
 func assertCatalogMatchesEnglish(t *testing.T, locale Locale) {
 	t.Helper()
-	for id := range catalogs[English] {
-		if _, ok := catalogs[locale][id]; !ok {
-			t.Errorf("%s catalog is missing %q", locale, id)
-		}
-	}
-	for id := range catalogs[locale] {
-		if _, ok := catalogs[English][id]; !ok {
-			t.Errorf("English catalog is missing %q (present in %s)", id, locale)
+	assertCatalogContainsIDs(t, locale, English)
+	assertCatalogContainsIDs(t, English, locale)
+}
+
+func assertCatalogContainsIDs(t *testing.T, target, source Locale) {
+	t.Helper()
+	for id := range catalogs[source] {
+		if _, ok := catalogs[target][id]; !ok {
+			t.Errorf("%s catalog is missing %q (present in %s)", target, id, source)
 		}
 	}
 }
@@ -71,13 +72,26 @@ func TestWindowsPlanAndProgressNeverFallBackInEnglishOrTraditionalChinese(t *tes
 	keys := []string{"plan.windows.summary", "plan.split.reason.none", "plan.split.reason.fat32", "stage.inspecting", "stage.planning", "stage.staging_wim", "stage.splitting_wim", "stage.formatting", "stage.extracting", "stage.verifying_filesystem"}
 	for _, locale := range []Locale{English, TraditionalChinese} {
 		for _, key := range keys {
-			message, ok := catalogs[locale][key]
-			if !ok || message == "" || message == key {
-				t.Errorf("%s has no explicit translation for %s", locale, key)
-			}
+			assertExplicitTranslation(t, locale, key)
 		}
 	}
 	if catalogs[English]["plan.windows.summary"] == catalogs[TraditionalChinese]["plan.windows.summary"] {
 		t.Fatal("Traditional Chinese plan summary unintentionally falls back to English")
+	}
+}
+
+func assertExplicitTranslation(t *testing.T, locale Locale, key string) {
+	t.Helper()
+	message, ok := catalogs[locale][key]
+	if !ok {
+		t.Errorf("%s has no translation for %s", locale, key)
+		return
+	}
+	if message == "" {
+		t.Errorf("%s has an empty translation for %s", locale, key)
+		return
+	}
+	if message == key {
+		t.Errorf("%s translation for %s falls back to its key", locale, key)
 	}
 }

@@ -11,6 +11,14 @@ import (
 )
 
 func TestPhase1FrameworksSessionDescriptionAndIOKit(t *testing.T) {
+	f, s := openTestSession(t)
+	defer s.Close()
+	assertDisk0Description(t, s)
+	assertDisk0RegistryIdentity(t, f)
+}
+
+func openTestSession(t *testing.T) (*Frameworks, *Session) {
+	t.Helper()
 	f, err := OpenFrameworks()
 	if err != nil {
 		t.Fatal(err)
@@ -19,19 +27,33 @@ func TestPhase1FrameworksSessionDescriptionAndIOKit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	return f, s
+}
+
+func assertDisk0Description(t *testing.T, s *Session) {
+	t.Helper()
 	d, err := s.DiskFromBSDName("disk0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.BSDName != "disk0" || d.Size == 0 {
+	if d.BSDName != "disk0" {
 		t.Fatalf("description=%+v", d)
 	}
+	if d.Size == 0 {
+		t.Fatalf("description=%+v", d)
+	}
+}
+
+func assertDisk0RegistryIdentity(t *testing.T, f *Frameworks) {
+	t.Helper()
 	id, err := f.RegistryIdentity("disk0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id.EntryID == "" || id.Path == "" {
+	if id.EntryID == "" {
+		t.Fatalf("identity=%+v", id)
+	}
+	if id.Path == "" {
 		t.Fatalf("identity=%+v", id)
 	}
 }
