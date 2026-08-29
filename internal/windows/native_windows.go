@@ -52,7 +52,10 @@ const (
 	storageIdentifierHeaderSize = 16
 	// STORAGE_HOTPLUG_INFO: Size followed by MediaRemovable, MediaHotplug,
 	// DeviceHotplug, and WriteCacheEnableOverride BOOLEAN fields.
-	storageHotplugInfoSize   = 8
+	storageHotplugInfoSize = 8
+	// STORAGE_HOTPLUG_INFO 欄位位移；b[4] 是 MediaRemovable，admission 不採用。
+	hotplugMediaOffset       = 5
+	hotplugDeviceOffset      = 6
 	maxStorageDescriptorSize = 1 << 20
 
 	storageIDCodeSetBinary = 1
@@ -107,7 +110,7 @@ func cString(b []byte) string {
 	return string(b)
 }
 
-var busNames = map[uint32]string{1: "scsi", 3: "ata", 7: "usb", 8: "raid", 11: "sata", 17: "nvme", 14: "virtual", 15: "filebackedvirtual"}
+var busNames = map[uint32]string{1: "scsi", 3: "ata", 7: "usb", 8: "raid", 11: "sata", 14: "virtual", 15: "filebackedvirtual", 17: "nvme"}
 
 func busName(v uint32) string { return busNames[v] }
 
@@ -162,6 +165,7 @@ func sameWindowsIdentity(a, b windowsIdentityEvidence) bool {
 	return a == b
 }
 
+// parseStorageDeviceIDs extracts the WWN from a STORAGE_DEVICE_ID_DESCRIPTOR.
 // Conflicting WWNs are rejected because choosing one based on descriptor order
 // would make the device identity unstable.
 func parseStorageDeviceIDs(b []byte) (string, error) {
@@ -229,6 +233,8 @@ func identifiersConflict(found, value string) bool {
 	return found != "" && value != "" && found != value
 }
 
+// parseStorageIdentifier decodes one STORAGE_IDENTIFIER entry and returns its
+// value and the offset to the next entry.
 // Only device-associated NAA and EUI identifiers provide stable WWN evidence;
 // other valid identifier types are intentionally ignored.
 func parseStorageIdentifier(b []byte, off int, index uint32) (string, int, error) {
@@ -265,7 +271,7 @@ func identifierFits(b []byte, off, size int) bool {
 }
 
 func validIdentifierNextOffset(b []byte, off, size, next int) bool {
-	return next == 0 || next >= storageIdentifierHeaderSize+size && off+next <= len(b)
+	return next == 0 || (next >= storageIdentifierHeaderSize+size && off+next <= len(b))
 }
 
 func stableStorageIdentifier(idType, association uint32) bool {
@@ -293,6 +299,9 @@ func queryStorageProperty(h windows.Handle, property uint32) ([]byte, error) {
 		return storagePropertyIOCTL(h, in, out)
 	})
 }
+
+// ioctlCall fills out and reports the returned byte count.
+type ioctlCall func(out []byte) (uint32, error)
 
 // queryStorageDescriptor performs the documented two-phase query: a
 // header-sized buffer yields STORAGE_DESCRIPTOR_HEADER.Size, which then sizes
@@ -354,6 +363,7 @@ func propertyUnsupported(err error) bool {
 	return errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) || errors.Is(err, windows.ERROR_INVALID_PARAMETER)
 }
 
+// storageWWN queries StorageDeviceIdProperty for the disk's WWN.
 // A malformed or conflicting identifier descriptor yields no WWN rather than
 // hiding the disk: the serial alone is accepted identity evidence, and the
 // absence of a WWN is as stable across enumerations as any choice among
@@ -448,10 +458,11 @@ func storageDescriptor(h windows.Handle) ([]byte, error) {
 	return q, nil
 }
 
-type hotplugFlags struct{ media, device bool }
+type hotplugFlags struct{ mediaHotplug, deviceHotplug bool }
 
-// Hotplug evidence gates admission, so a failed query is an error rather than
-// a silent "not removable" verdict.
+// hotplugInfo reads STORAGE_HOTPLUG_INFO from a disk handle. Hotplug evidence
+// gates admission, so a failed query is an error rather than a silent "not
+// removable" verdict.
 func hotplugInfo(h windows.Handle) (hotplugFlags, error) {
 	b, err := query(h, ioctlStorageGetHotplugInfo, storageHotplugInfoSize)
 	if err != nil {
@@ -464,7 +475,7 @@ func parseHotplugInfo(b []byte) (hotplugFlags, error) {
 	if len(b) < storageHotplugInfoSize {
 		return hotplugFlags{}, fmt.Errorf("short STORAGE_HOTPLUG_INFO: got %d bytes", len(b))
 	}
-	return hotplugFlags{media: b[5] != 0, device: b[6] != 0}, nil
+	return hotplugFlags{mediaHotplug: b[hotplugMediaOffset] != 0, deviceHotplug: b[hotplugDeviceOffset] != 0}, nil
 }
 
 func diskRecordFromEvidence(ev diskEvidence) (diskRecord, error) {
@@ -485,7 +496,7 @@ func diskRecordFromEvidence(ev diskEvidence) (diskRecord, error) {
 	id := identity.canonicalID()
 	path := physicalDrivePath(ev.number)
 	r := diskRecord{Device: device.Device{ID: id, Path: path, Vendor: vendor, Model: model, Serial: identity.Serial, WWN: identity.WWN, Transport: busName(bus), Major: ev.number, Size: ev.length}, identity: identity, deviceNumber: ev.number, usbAncestor: bus == busTypeUSB}
-	r.mediaHotplug, r.deviceHotplug = ev.hotplug.media, ev.hotplug.device
+	r.mediaHotplug, r.deviceHotplug = ev.hotplug.mediaHotplug, ev.hotplug.deviceHotplug
 	return r, nil
 }
 
@@ -493,6 +504,7 @@ func physicalDrivePath(number uint32) string {
 	return `\\.\PhysicalDrive` + strconv.FormatUint(uint64(number), 10)
 }
 
+// list returns one diskRecord per present PnP disk.
 // Enumeration fails closed when safety-related topology is unavailable rather
 // than returning disks whose eligibility could be misclassified. The PnP tree
 // is part of that topology: without it USB attachment would rest on bus type
@@ -539,6 +551,8 @@ func completeDiskRecord(r diskRecord, system bool, pnp pnpDisk, mounted bool) di
 	return r
 }
 
+// inspectDiskNumber opens one PhysicalDrive and reports whether it yielded a
+// complete record.
 // A disk that cannot be inspected is omitted rather than listed with partial
 // evidence. Expected causes are media-less readers (ERROR_NOT_READY) and
 // drivers that reject identity queries; both fail closed by omission.
@@ -877,7 +891,7 @@ func setupDiskAtIndex(set uintptr, index uint32) (uint32, pnpDisk, bool, bool, e
 	binary.LittleEndian.PutUint32(iface, uint32(structureSize))
 	r, _, callErr := setupEnumInterfaces.Call(set, 0, uintptr(unsafe.Pointer(&diskInterfaceGUID)), uintptr(index), uintptr(unsafe.Pointer(&iface[0])))
 	if r == 0 {
-		if callErr == windows.ERROR_NO_MORE_ITEMS {
+		if errors.Is(callErr, windows.ERROR_NO_MORE_ITEMS) {
 			return 0, pnpDisk{}, false, true, nil
 		}
 		return 0, pnpDisk{}, false, false, callErr
@@ -976,7 +990,7 @@ var enumerateVolumes = func() ([]string, error) {
 	buf := make([]uint16, 1024)
 	h, _, e := procFindFirstVolume.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if h == uintptr(windows.InvalidHandle) {
-		return nil, e
+		return nil, fmt.Errorf("FindFirstVolumeW: %w", e)
 	}
 	defer procFindVolumeClose.Call(h)
 	var out []string
@@ -987,16 +1001,13 @@ var enumerateVolumes = func() ([]string, error) {
 			if e == windows.ERROR_NO_MORE_FILES {
 				break
 			}
-			return nil, e
+			return nil, fmt.Errorf("FindNextVolumeW: %w", e)
 		}
 	}
 	return out, nil
 }
 
 const maxVolumeExtentBuffer = 1 << 20
-
-// ioctlCall fills out and reports the returned byte count.
-type ioctlCall func(out []byte) (uint32, error)
 
 var callVolumeExtentIOCTL = func(h windows.Handle, b []byte) (uint32, error) {
 	var n uint32
@@ -1061,7 +1072,7 @@ func isGUIDSeparator(index int) bool {
 }
 
 func isHexByte(value byte) bool {
-	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
+	return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F')
 }
 
 func volumeDisks(v string) ([]uint32, error) {
@@ -1097,6 +1108,9 @@ func parseVolumeDiskExtents(b []byte) ([]uint32, error) {
 	if required > uint64(len(b)) {
 		return nil, fmt.Errorf("truncated VOLUME_DISK_EXTENTS: count %d requires %d bytes, got %d", count, required, len(b))
 	}
+	// Defensive duplicate of the length check above: unreachable while the
+	// buffer cap bounds len(b), but keeps the limit enforced if headerSize,
+	// extentSize, or maxVolumeExtentBuffer are ever retuned.
 	if uint64(count) > uint64((maxVolumeExtentBuffer-headerSize)/extentSize) {
 		return nil, fmt.Errorf("VOLUME_DISK_EXTENTS count %d exceeds supported limit", count)
 	}
@@ -1117,8 +1131,8 @@ func volumesForDisk(n uint32) ([]string, error) {
 	return volumesForDiskUsing(n, queryVolumeDisks)
 }
 
-func volumesForDiskUsing(n uint32, query func(string) ([]uint32, error)) ([]string, error) {
-	index, err := diskVolumeIndexUsing(query)
+func volumesForDiskUsing(n uint32, diskQuery func(string) ([]uint32, error)) ([]string, error) {
+	index, err := diskVolumeIndexUsing(diskQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -1133,7 +1147,7 @@ func diskVolumeIndex() (map[uint32][]string, error) {
 // the volumes with an extent on it, so enumeration does not repeat the walk
 // per disk. A volume with several extents on one disk appears once for that
 // disk; locking it twice would fail against its own lock.
-func diskVolumeIndexUsing(query func(string) ([]uint32, error)) (map[uint32][]string, error) {
+func diskVolumeIndexUsing(diskQuery func(string) ([]uint32, error)) (map[uint32][]string, error) {
 	vs, err := enumerateVolumes()
 	if err != nil {
 		return nil, fmt.Errorf("%w: enumerate Windows volumes: %w", ErrVolumeTopologyUnavailable, err)
@@ -1145,7 +1159,7 @@ func diskVolumeIndexUsing(query func(string) ([]uint32, error)) (map[uint32][]st
 			continue
 		}
 		seen[v] = true
-		disks, err := query(v)
+		disks, err := diskQuery(v)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrVolumeTopologyUnavailable, err)
 		}

@@ -11,7 +11,8 @@ import (
 	installeriso "github.com/goflasher/goflasher/internal/installer/iso"
 )
 
-func TestBuildPlanIsCompleteAndImmutable(t *testing.T) {
+func newCopyWIMPlan(t *testing.T) *BuildPlan {
+	t.Helper()
 	source := bytes.Repeat([]byte{0x5a}, 8192)
 	manifest := installeriso.Manifest{Entries: []installeriso.Entry{
 		{Path: "efi", Type: installeriso.Directory},
@@ -23,17 +24,47 @@ func TestBuildPlanIsCompleteAndImmutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Architecture() != UEFIX64 || plan.InstallStrategy() != CopyWIM || plan.SourceSHA256() == "" {
-		t.Fatalf("incomplete plan: %#v", plan)
+	return plan
+}
+
+func TestBuildPlanIsComplete(t *testing.T) {
+	plan := newCopyWIMPlan(t)
+	if got := plan.Architecture(); got != UEFIX64 {
+		t.Errorf("architecture = %v, want %v", got, UEFIX64)
 	}
-	if plan.FATLayoutEstimate().FileClusters != 2 || plan.FATLayoutEstimate().FATBytes == 0 || plan.ESPLayout().GPTMetadataBytes == 0 {
-		t.Fatalf("invalid allocation estimate: %+v", plan.FATLayoutEstimate())
+	if got := plan.InstallStrategy(); got != CopyWIM {
+		t.Errorf("strategy = %v, want %v", got, CopyWIM)
 	}
-	copy := plan.Manifest()
-	copy.Entries[0].Path = "changed"
+	if plan.SourceSHA256() == "" {
+		t.Error("source digest is empty")
+	}
+}
+
+func TestBuildPlanEstimatesAllocation(t *testing.T) {
+	plan := newCopyWIMPlan(t)
+	fat := plan.FATLayoutEstimate()
+	if fat.FileClusters != 2 {
+		t.Errorf("file clusters = %d, want 2", fat.FileClusters)
+	}
+	if fat.FATBytes == 0 {
+		t.Errorf("FAT bytes = 0, want a sized allocation table: %+v", fat)
+	}
+	if esp := plan.ESPLayout(); esp.GPTMetadataBytes == 0 {
+		t.Errorf("GPT metadata bytes = 0, want reserved partition metadata: %+v", esp)
+	}
+}
+
+func TestBuildPlanManifestAccessorIsImmutable(t *testing.T) {
+	plan := newCopyWIMPlan(t)
+	snapshot := plan.Manifest()
+	snapshot.Entries[0].Path = "changed"
 	if plan.Manifest().Entries[0].Path == "changed" {
 		t.Fatal("manifest accessor mutated the build plan")
 	}
+}
+
+func TestBuildPlanVerificationAccessorIsImmutable(t *testing.T) {
+	plan := newCopyWIMPlan(t)
 	verification := plan.VerificationManifest()
 	verification[0].Path = "changed"
 	if plan.VerificationManifest()[0].Path == "changed" {
@@ -56,13 +87,29 @@ func TestBuildPlanValidatesExistingSplitSet(t *testing.T) {
 	}
 }
 
-func TestSplitWIMAccountsForAllocationAndTemporarySpace(t *testing.T) {
+func TestSplitWIMStrategySizesOversizedInstallWIM(t *testing.T) {
 	files := map[string]installeriso.Entry{"sources/install.wim": {Size: maxFATFileSize + 1}}
 	strategy, size, parts, err := selectInstallStrategy(files, defaultSplitSize)
-	if err != nil || strategy != SplitWIM || size != maxFATFileSize+1 || parts != 2 {
-		t.Fatalf("strategy = %s, size=%d, parts=%d, err=%v", strategy, size, parts, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	cluster := uint64(4096)
+	if strategy != SplitWIM {
+		t.Errorf("strategy = %s, want %s", strategy, SplitWIM)
+	}
+	if size != maxFATFileSize+1 {
+		t.Errorf("size = %d, want %d", size, maxFATFileSize+1)
+	}
+	if parts != 2 {
+		t.Errorf("parts = %d, want 2", parts)
+	}
+}
+
+func TestSplitWIMAccountsForAllocationAndTemporarySpace(t *testing.T) {
+	const (
+		size    = maxFATFileSize + 1
+		parts   = 2
+		cluster = uint64(4096)
+	)
 	allocated := ceilDiv(defaultSplitSize, cluster) + ceilDiv(size-defaultSplitSize, cluster)
 	if allocated*cluster < size {
 		t.Fatal("split allocation did not round each output to an allocation unit")

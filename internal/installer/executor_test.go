@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	installeriso "github.com/goflasher/goflasher/internal/installer/iso"
@@ -17,11 +18,20 @@ type sparseTarget struct {
 }
 
 func (d *sparseTarget) WriteAt(p []byte, off int64) (int, error) {
-	if off < 0 || uint64(off) > d.size || uint64(len(p)) > d.size-uint64(off) {
+	if !d.holds(off, len(p)) {
 		return 0, io.ErrShortWrite
 	}
 	d.writes += uint64(len(p))
 	return len(p), nil
+}
+
+// holds models a fixed-size device: a write must start inside the target and
+// end within it.
+func (d *sparseTarget) holds(off int64, n int) bool {
+	if off < 0 || uint64(off) > d.size {
+		return false
+	}
+	return uint64(n) <= d.size-uint64(off)
 }
 func (d *sparseTarget) Sync() error { d.syncs++; return nil }
 
@@ -49,8 +59,17 @@ func TestExecutorStreamsAndVerifiesEveryCopiedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Complete || result.BytesWritten != 4000 || len(result.VerificationManifest) != 2 || target.syncs == 0 {
-		t.Fatalf("result=%+v syncs=%d", result, target.syncs)
+	if !result.Complete {
+		t.Errorf("result is incomplete: %+v", result)
+	}
+	if result.BytesWritten != 4000 {
+		t.Errorf("bytes written = %d, want 4000", result.BytesWritten)
+	}
+	if len(result.VerificationManifest) != 2 {
+		t.Errorf("verified files = %d, want 2", len(result.VerificationManifest))
+	}
+	if target.syncs == 0 {
+		t.Error("executor never synced the target")
 	}
 }
 
@@ -100,8 +119,14 @@ func TestExecutorRequiresSplitPipelineBeforeFirstTargetWrite(t *testing.T) {
 	plan.strategy = SplitWIM
 	target := &sparseTarget{size: 80 << 20}
 	result, err := (Executor{}).Execute(context.Background(), plan, bytes.NewReader(source), target)
-	if !errors.Is(err, ErrSplitterRequired) || result.Complete || target.writes != 0 {
-		t.Fatalf("result=%+v error=%v target writes=%d", result, err, target.writes)
+	if !errors.Is(err, ErrSplitterRequired) {
+		t.Errorf("error = %v, want %v", err, ErrSplitterRequired)
+	}
+	if result.Complete {
+		t.Errorf("result reports complete: %+v", result)
+	}
+	if target.writes != 0 {
+		t.Errorf("target writes = %d, want none before the splitter is checked", target.writes)
 	}
 }
 
@@ -133,8 +158,15 @@ func TestExecutorRejectsFewerSplitPartsThanPlanned(t *testing.T) {
 	plan.splitSize = 4096
 	plan.splitParts = 2
 	result, err := (Executor{Splitter: fixtureSplitter{}}).Execute(context.Background(), plan, bytes.NewReader(source), &sparseTarget{size: 80 << 20})
-	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("split pipeline produced 1 of 2 planned parts")) || result.Complete {
-		t.Fatalf("result=%+v error=%v", result, err)
+	const want = "split pipeline produced 1 of 2 planned parts"
+	if err == nil {
+		t.Fatalf("short split set accepted: result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to report %q", err, want)
+	}
+	if result.Complete {
+		t.Errorf("result reports complete: %+v", result)
 	}
 }
 

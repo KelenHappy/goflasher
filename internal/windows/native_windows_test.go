@@ -486,8 +486,8 @@ func TestParseHotplugInfo(t *testing.T) {
 		data []byte
 		want hotplugFlags
 	}{
-		{"device hotplug", []byte{8, 0, 0, 0, 1, 0, 1, 0}, hotplugFlags{device: true}},
-		{"media hotplug", []byte{8, 0, 0, 0, 0, 1, 0, 0}, hotplugFlags{media: true}},
+		{"device hotplug", []byte{8, 0, 0, 0, 1, 0, 1, 0}, hotplugFlags{deviceHotplug: true}},
+		{"media hotplug", []byte{8, 0, 0, 0, 0, 1, 0, 0}, hotplugFlags{mediaHotplug: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -515,7 +515,7 @@ func TestDiskRecordFromEvidence(t *testing.T) {
 	binary.LittleEndian.PutUint32(q[16:20], modelOff)
 	binary.LittleEndian.PutUint32(q[24:28], serialOff)
 	binary.LittleEndian.PutUint32(q[28:32], busTypeUSB)
-	r, err := diskRecordFromEvidence(diskEvidence{number: 3, length: 1 << 30, descriptor: q, wwn: "5000c50012345678", hotplug: hotplugFlags{device: true}})
+	r, err := diskRecordFromEvidence(diskEvidence{number: 3, length: 1 << 30, descriptor: q, wwn: "5000c50012345678", hotplug: hotplugFlags{deviceHotplug: true}})
 	if err != nil {
 		t.Fatal(err)
 	}

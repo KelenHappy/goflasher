@@ -187,10 +187,16 @@ func usableVolumeDescriptor(b []byte) (joliet, usable bool) {
 	if b[0] == 1 {
 		return false, true
 	}
-	if b[0] == 2 && b[88] == 0x25 && b[89] == 0x2f {
+	if b[0] == 2 && jolietEscapeSequence(b) {
 		return true, true
 	}
 	return false, false
+}
+
+// jolietEscapeSequence reports the UCS-2 escape sequence at offset 88 that
+// distinguishes a Joliet supplementary descriptor from any other one.
+func jolietEscapeSequence(b []byte) bool {
+	return b[88] == 0x25 && b[89] == 0x2f
 }
 
 func (r *Reader) walkVolumeDescriptor(b []byte, joliet bool) ([]Entry, error) {
@@ -639,10 +645,19 @@ func isoRecordName(x []byte, joliet bool) (name string, skip bool, err error) {
 		return "", false, invalid("malformed name")
 	}
 	nb := x[33 : 33+nl]
-	if nl == 1 && (nb[0] == 0 || nb[0] == 1) {
+	if isoDotIdentifier(nb) {
 		return "", true, nil
 	}
 	return strings.TrimSuffix(decodeName(nb, joliet), ";1"), false, nil
+}
+
+// isoDotIdentifier reports the reserved single-byte identifiers: 0x00 is "."
+// and 0x01 is "..".
+func isoDotIdentifier(nb []byte) bool {
+	if len(nb) != 1 {
+		return false
+	}
+	return nb[0] == 0 || nb[0] == 1
 }
 
 func isoEntry(x []byte, p string) Entry {
@@ -735,10 +750,10 @@ func normalize(parent, name string) (string, error) {
 }
 
 func unsafeName(name string) bool {
-	if name == "." || name == ".." || path.IsAbs(name) {
+	if name == "." || name == ".." {
 		return true
 	}
-	return strings.ContainsAny(name, "\x00/\\")
+	return path.IsAbs(name) || strings.ContainsAny(name, "\x00/\\")
 }
 
 func escapesRoot(p string) bool {
