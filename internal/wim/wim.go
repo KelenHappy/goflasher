@@ -43,7 +43,23 @@ func Split(ctx context.Context, sourcePath, outputDir string, partSize uint64, p
 	if err := rejectExistingParts(outputDir); err != nil {
 		return nil, err
 	}
-	return backendSplit(ctx, sourcePath, outputDir, partSize, progress)
+	return backendSplit(ctx, splitRequest{sourcePath: sourcePath, outputDir: outputDir, partSize: partSize, progress: progress})
+}
+
+// splitRequest carries the validated inputs of one Split call to the
+// compile-time-selected platform backend.
+type splitRequest struct {
+	sourcePath string
+	outputDir  string
+	partSize   uint64
+	progress   ProgressFunc
+}
+
+// report forwards progress only when the caller asked for it.
+func (r splitRequest) report(completed, total uint64) {
+	if r.progress != nil {
+		r.progress(completed, total)
+	}
 }
 
 func canonicalAbsolute(name string) (string, error) {
@@ -75,32 +91,58 @@ func discoverParts(dir string) ([]Part, error) {
 	}
 	indexed := map[int]Part{}
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+		n, err := splitPartIndex(entry)
+		if err != nil {
+			return nil, err
 		}
-		lowerName := strings.ToLower(entry.Name())
-		n, ok := partNumber(lowerName)
-		if !ok {
-			if strings.HasPrefix(lowerName, "install") && strings.HasSuffix(lowerName, ".swm") {
-				return nil, fmt.Errorf("%w: unexpected split output %q", ErrUnsupported, entry.Name())
-			}
+		if n == 0 {
 			continue
-		}
-		if entry.Name() != lowerName {
-			return nil, fmt.Errorf("%w: non-canonical split output %q", ErrUnsupported, entry.Name())
 		}
 		if _, duplicate := indexed[n]; duplicate {
 			return nil, fmt.Errorf("%w: duplicate split output %d", ErrUnsupported, n)
 		}
-		info, err := entry.Info()
-		if err != nil {
+		if indexed[n], err = measurePart(dir, entry); err != nil {
 			return nil, err
 		}
-		if info.Size() <= 0 {
-			return nil, fmt.Errorf("%w: empty split part", ErrUnsupported)
-		}
-		indexed[n] = Part{Path: filepath.Join(dir, entry.Name()), Size: uint64(info.Size())}
 	}
+	return orderedParts(indexed)
+}
+
+// splitPartIndex reports the part number of entry, or 0 when the entry is not
+// split output at all. It rejects an entry that looks like split output but is
+// not named the way the backends write it.
+func splitPartIndex(entry os.DirEntry) (int, error) {
+	if entry.IsDir() {
+		return 0, nil
+	}
+	lowerName := strings.ToLower(entry.Name())
+	n, ok := partNumber(lowerName)
+	if !ok {
+		if strings.HasPrefix(lowerName, "install") && strings.HasSuffix(lowerName, ".swm") {
+			return 0, fmt.Errorf("%w: unexpected split output %q", ErrUnsupported, entry.Name())
+		}
+		return 0, nil
+	}
+	if entry.Name() != lowerName {
+		return 0, fmt.Errorf("%w: non-canonical split output %q", ErrUnsupported, entry.Name())
+	}
+	return n, nil
+}
+
+// measurePart sizes one canonically named part and rejects an empty one.
+func measurePart(dir string, entry os.DirEntry) (Part, error) {
+	info, err := entry.Info()
+	if err != nil {
+		return Part{}, err
+	}
+	if info.Size() <= 0 {
+		return Part{}, fmt.Errorf("%w: empty split part", ErrUnsupported)
+	}
+	return Part{Path: filepath.Join(dir, entry.Name()), Size: uint64(info.Size())}, nil
+}
+
+// orderedParts returns the parts in index order, requiring 1..n with no gaps.
+func orderedParts(indexed map[int]Part) ([]Part, error) {
 	parts := make([]Part, 0, len(indexed))
 	for n := 1; n <= len(indexed); n++ {
 		part, ok := indexed[n]

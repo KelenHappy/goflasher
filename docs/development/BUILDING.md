@@ -287,7 +287,9 @@ started manually. It:
 
 1. runs the headless tests;
 2. builds the Linux Fyne binary;
-3. builds the Debian, RPM, Arch Linux, and signed Windows amd64 portable ZIP assets;
+3. builds the Debian, RPM, Arch Linux, and Windows amd64 portable ZIP assets
+   (Windows support is still under development, and the executable is not yet
+   Authenticode signed);
 4. generates platform checksums;
 5. uploads each platform's files as Actions artifacts; and
 6. on tag builds, attaches them to the same GitHub release.

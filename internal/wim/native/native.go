@@ -89,19 +89,37 @@ func controlledPath(name, root string) (string, error) {
 	if !filepath.IsAbs(name) || !filepath.IsAbs(root) {
 		return "", ErrInvalidPath
 	}
-	resolvedRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
+	resolvedRoot, err := resolvePath(root)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidPath, err)
+		return "", err
 	}
-	resolvedName, err := filepath.EvalSymlinks(filepath.Clean(name))
+	resolvedName, err := resolvePath(name)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidPath, err)
+		return "", err
 	}
-	rel, err := filepath.Rel(resolvedRoot, resolvedName)
-	if err != nil || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !containedBy(resolvedRoot, resolvedName) {
 		return "", ErrInvalidPath
 	}
 	return resolvedName, nil
+}
+
+// resolvePath cleans path and follows every symlink in it.
+func resolvePath(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidPath, err)
+	}
+	return resolved, nil
+}
+
+// containedBy reports whether path is root itself or lives beneath it. Both
+// arguments must already be resolved by resolvePath.
+func containedBy(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (l *Library) bind() error {

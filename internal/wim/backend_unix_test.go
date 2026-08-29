@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -128,9 +129,7 @@ func TestSplitFailureClosesObjectsAndRemovesPartialParts(t *testing.T) {
 	if _, err := Split(context.Background(), source, output, 1024, nil); err == nil {
 		t.Fatal("Split succeeded")
 	}
-	if image.closeCalls != 1 || lib.closeCalls != 1 {
-		t.Fatalf("image closes=%d library closes=%d", image.closeCalls, lib.closeCalls)
-	}
+	assertNativeReleased(t, lib, image)
 	if _, err := os.Stat(filepath.Join(output, "install.swm")); !os.IsNotExist(err) {
 		t.Fatalf("partial output remains: %v", err)
 	}
@@ -142,17 +141,44 @@ func TestSplitReturnsContiguousPartsAndSynchronousProgress(t *testing.T) {
 	lib := &fakeLibrary{image: image}
 	withFakeNative(t, func(string, string) (nativeLibrary, error) { return lib, nil })
 	var progress [][2]uint64
-	parts, err := Split(context.Background(), source, output, 1024, func(done, total uint64) { progress = append(progress, [2]uint64{done, total}) })
+	record := func(done, total uint64) { progress = append(progress, [2]uint64{done, total}) }
+	parts, err := Split(context.Background(), source, output, 1024, record)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parts) != 2 || filepath.Base(parts[0].Path) != "install.swm" || filepath.Base(parts[1].Path) != "install2.swm" {
-		t.Fatalf("parts=%+v", parts)
+	assertPartNames(t, parts, "install.swm", "install2.swm")
+	assertProgress(t, progress, [2]uint64{0, 1}, [2]uint64{1, 1})
+	assertNativeReleased(t, lib, image)
+}
+
+// assertPartNames checks that parts carry exactly the wanted base names, in order.
+func assertPartNames(t *testing.T, parts []Part, want ...string) {
+	t.Helper()
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		names = append(names, filepath.Base(part.Path))
 	}
-	if len(progress) != 2 || progress[0] != [2]uint64{0, 1} || progress[1] != [2]uint64{1, 1} {
-		t.Fatalf("progress=%v", progress)
+	if !slices.Equal(names, want) {
+		t.Fatalf("parts=%v, want %v", names, want)
 	}
-	if image.closeCalls != 1 || lib.closeCalls != 1 {
-		t.Fatal("native ownership was not released")
+}
+
+// assertProgress checks that the callback fired synchronously with exactly the
+// wanted done/total pairs, in order.
+func assertProgress(t *testing.T, got [][2]uint64, want ...[2]uint64) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Fatalf("progress=%v, want %v", got, want)
+	}
+}
+
+// assertNativeReleased checks that Split closed the image and the library once.
+func assertNativeReleased(t *testing.T, lib *fakeLibrary, image *fakeImage) {
+	t.Helper()
+	if image.closeCalls != 1 {
+		t.Errorf("image closes=%d, want 1", image.closeCalls)
+	}
+	if lib.closeCalls != 1 {
+		t.Errorf("library closes=%d, want 1", lib.closeCalls)
 	}
 }

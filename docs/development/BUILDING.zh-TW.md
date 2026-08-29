@@ -193,7 +193,7 @@ cd dist && sha256sum --check SHA256SUMS
 
 ## GitHub Actions release
 
-`.github/workflows/release.yml`在符合`v*`的tag或manual dispatch執行：headless tests、Linux package與已Authenticode簽章的Windows amd64 portable ZIP、產生各平台checksum並上傳Actions artifact；`v*` tag build會把平台assets附加到同一個GitHub Release。Manual run只產生Actions artifact，不發布Release。
+`.github/workflows/release.yml`在符合`v*`的tag或manual dispatch執行：headless tests、Linux package與Windows amd64 portable ZIP（Windows支援尚未開發完成，executable目前未經Authenticode簽章）、產生各平台checksum並上傳Actions artifact；`v*` tag build會把平台assets附加到同一個GitHub Release。Manual run只產生Actions artifact，不發布Release。
 
 ## Windows release boundary
 

@@ -70,7 +70,8 @@ volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動
 ## 預先建置的下載套件
 
 程式碼支援的平台與目前提供預先建置套件的平台是兩件不同的事。Release workflow
-會發布Linux packages與已完成Authenticode簽章的Windows amd64 portable ZIP。
+會發布Linux packages與Windows amd64 portable ZIP；Windows執行檔目前未經
+Authenticode簽章，請以隨附的`.sha256`檔驗證下載內容。
 macOS在signed/notarized release gate啟用前仍提供source build。
 
 封裝版本發布後，儲存庫的發行工作流程會在 GitHub Release 提供下列檔案：
@@ -196,10 +197,10 @@ GoFlasher 是依 **GNU General Public License version 3** 授權的自由軟體�
 ## Release boundary
 
 Windows GUI、原生 Explorer 選擇器、可移除式裝置探索、重複身分驗證、離線操作、
-原始寫入與回讀驗證均已實作。Release workflow會產生已Authenticode簽章的amd64
-portable ZIP與checksum；exact artifact仍須完成實體硬體驗收。Windows永久採單一
-elevated GUI process，不使用helper、service或跨程序IPC。Linux仍維持polkit與受限
-helper架構。
+原始寫入與回讀驗證均已實作。Release workflow會產生amd64 portable ZIP與
+checksum；Authenticode簽章尚未啟用，exact artifact仍須完成實體硬體驗收。
+Windows永久採單一elevated GUI process，不使用helper、service或跨程序IPC。
+Linux仍維持polkit與受限helper架構。
 
 macOS GUI、原生 Finder 選擇器、可移除式 USB 後端、原始寫入、回讀驗證與
 `diskutil` 退出操作均已實作。正式發布前仍需要實體硬體隔離測試、專用權限提升

@@ -18,7 +18,13 @@ import (
 	"strings"
 )
 
-var versionPattern = regexp.MustCompile(`^v?[0-9A-Za-z][0-9A-Za-z._-]*$`)
+var (
+	versionPattern     = regexp.MustCompile(`^v?[0-9A-Za-z][0-9A-Za-z._-]*$`)
+	licenseNamePattern = regexp.MustCompile(`^(LICENSE|COPYING|NOTICE)(\..*)?$`)
+	unsafeNameChars    = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+)
+
+var errUsage = errors.New("usage: go run ./packaging/windows --executable EXE --version VERSION --output DIR")
 
 func main() {
 	executable := flag.String("executable", "", "signed GoFlasher executable")
@@ -32,8 +38,8 @@ func main() {
 }
 
 func packagePortable(executable, version, output string) error {
-	if executable == "" || output == "" || !versionPattern.MatchString(version) {
-		return errors.New("usage: go run ./packaging/windows --executable EXE --version VERSION --output DIR")
+	if err := checkFlags(executable, version, output); err != nil {
+		return err
 	}
 	repo, err := filepath.Abs(filepath.Join("packaging", "windows", "..", ".."))
 	if err != nil {
@@ -49,14 +55,41 @@ func packagePortable(executable, version, output string) error {
 	}
 	name := "GoFlasher-" + version + "-windows-amd64"
 	stage, archive := filepath.Join(output, name), filepath.Join(output, name+".zip")
+	if err := resetArtifacts(stage, archive); err != nil {
+		return err
+	}
+	if err := stageLayout(repo, stage, executable, version); err != nil {
+		return err
+	}
+	if err := zipTree(output, stage, archive); err != nil {
+		return err
+	}
+	return writeChecksum(archive)
+}
+
+// checkFlags rejects the flag combinations no layout can be built from.
+func checkFlags(executable, version, output string) error {
+	switch {
+	case executable == "", output == "":
+		return errUsage
+	case !versionPattern.MatchString(version):
+		return errUsage
+	}
+	return nil
+}
+
+// resetArtifacts discards any previous run and creates the empty stage tree.
+func resetArtifacts(stage, archive string) error {
 	if err := os.RemoveAll(stage); err != nil {
 		return err
 	}
 	_ = os.Remove(archive)
 	_ = os.Remove(archive + ".sha256")
-	if err := os.MkdirAll(filepath.Join(stage, "licenses"), 0o755); err != nil {
-		return err
-	}
+	return os.MkdirAll(filepath.Join(stage, "licenses"), 0o755)
+}
+
+// stageLayout fills the stage directory with everything the ZIP ships.
+func stageLayout(repo, stage, executable, version string) error {
 	if err := copyFile(executable, filepath.Join(stage, "GoFlasher.exe")); err != nil {
 		return err
 	}
@@ -65,42 +98,75 @@ func packagePortable(executable, version, output string) error {
 			return err
 		}
 	}
+	if err := stageReadme(repo, stage, version); err != nil {
+		return err
+	}
+	return collectLicenses(repo, stage)
+}
+
+// stageReadme copies README-Windows.txt with VERSION substituted.
+func stageReadme(repo, stage, version string) error {
 	readme, err := os.ReadFile(filepath.Join(repo, "packaging", "windows", "README-Windows.txt"))
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(stage, "README-Windows.txt"), []byte(strings.ReplaceAll(string(readme), "VERSION", version)), 0o644); err != nil {
-		return err
-	}
-	if err := collectLicenses(repo, stage); err != nil {
-		return err
-	}
-	if err := zipTree(output, stage, archive); err != nil {
-		return err
-	}
-	f, err := os.Open(archive)
+	text := strings.ReplaceAll(string(readme), "VERSION", version)
+	return os.WriteFile(filepath.Join(stage, "README-Windows.txt"), []byte(text), 0o644)
+}
+
+// writeChecksum writes the sha256sum-style companion file for the archive.
+func writeChecksum(archive string) error {
+	sum, err := fileSHA256(archive)
 	if err != nil {
 		return err
+	}
+	line := sum + "  " + filepath.Base(archive) + "\n"
+	return os.WriteFile(archive+".sha256", []byte(line), 0o644)
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
 	h := sha256.New()
 	_, copyErr := io.Copy(h, f)
 	closeErr := f.Close()
 	if copyErr != nil {
-		return copyErr
+		return "", copyErr
 	}
 	if closeErr != nil {
-		return closeErr
+		return "", closeErr
 	}
-	line := hex.EncodeToString(h.Sum(nil)) + "  " + filepath.Base(archive) + "\n"
-	return os.WriteFile(archive+".sha256", []byte(line), 0o644)
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func collectLicenses(repo, stage string) error {
+	modules, err := compiledModuleDirs(repo)
+	if err != nil {
+		return err
+	}
+	paths := make([]string, 0, len(modules))
+	for path := range modules {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, module := range paths {
+		if err := copyModuleLicenses(module, modules[module], filepath.Join(stage, "licenses")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// compiledModuleDirs maps every module compiled into the GUI binary to its
+// source directory.
+func compiledModuleDirs(repo string) (map[string]string, error) {
 	cmd := exec.Command("go", "list", "-deps", "-tags", "fyne", "-f", `{{with .Module}}{{if .Dir}}{{.Path}}|{{.Dir}}{{end}}{{end}}`, "./cmd/usbwriter")
 	cmd.Dir = repo
 	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("go list compiled modules: %w", err)
+		return nil, fmt.Errorf("go list compiled modules: %w", err)
 	}
 	modules := make(map[string]string)
 	scan := bufio.NewScanner(strings.NewReader(string(out)))
@@ -111,32 +177,31 @@ func collectLicenses(repo, stage string) error {
 		}
 	}
 	if err := scan.Err(); err != nil {
+		return nil, err
+	}
+	return modules, nil
+}
+
+// copyModuleLicenses copies each root license file of module into licenses and
+// fails when the module ships none.
+func copyModuleLicenses(module, dir, licenses string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return err
 	}
-	paths := make([]string, 0, len(modules))
-	for path := range modules {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	licenseName := regexp.MustCompile(`^(LICENSE|COPYING|NOTICE)(\..*)?$`)
-	for _, module := range paths {
-		entries, err := os.ReadDir(modules[module])
-		if err != nil {
+	safe := unsafeNameChars.ReplaceAllString(module, "_")
+	found := false
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !licenseNamePattern.MatchString(entry.Name()) {
+			continue
+		}
+		found = true
+		if err := copyFile(filepath.Join(dir, entry.Name()), filepath.Join(licenses, safe+"_"+entry.Name())); err != nil {
 			return err
 		}
-		found := false
-		for _, entry := range entries {
-			if entry.Type().IsRegular() && licenseName.MatchString(entry.Name()) {
-				found = true
-				safe := regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(module, "_")
-				if err := copyFile(filepath.Join(modules[module], entry.Name()), filepath.Join(stage, "licenses", safe+"_"+entry.Name())); err != nil {
-					return err
-				}
-			}
-		}
-		if !found {
-			return fmt.Errorf("compiled module %s has no root license file", module)
-		}
+	}
+	if !found {
+		return fmt.Errorf("compiled module %s has no root license file", module)
 	}
 	return nil
 }
@@ -148,40 +213,10 @@ func zipTree(base, stage, destination string) error {
 	}
 	zw := zip.NewWriter(f)
 	err = filepath.WalkDir(stage, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
+		if walkErr != nil || d.IsDir() {
 			return walkErr
 		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		h, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		h.Name = filepath.ToSlash(rel)
-		h.Method = zip.Deflate
-		w, err := zw.CreateHeader(h)
-		if err != nil {
-			return err
-		}
-		src, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		_, copyErr := io.Copy(w, src)
-		closeErr := src.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		return closeErr
+		return addZipEntry(zw, base, path, d)
 	})
 	if closeErr := zw.Close(); err == nil {
 		err = closeErr
@@ -190,6 +225,43 @@ func zipTree(base, stage, destination string) error {
 		err = closeErr
 	}
 	return err
+}
+
+// addZipEntry writes one deflated file, named relative to base.
+func addZipEntry(zw *zip.Writer, base, path string, d os.DirEntry) error {
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return err
+	}
+	info, err := d.Info()
+	if err != nil {
+		return err
+	}
+	h, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return err
+	}
+	h.Name = filepath.ToSlash(rel)
+	h.Method = zip.Deflate
+	w, err := zw.CreateHeader(h)
+	if err != nil {
+		return err
+	}
+	return copyInto(w, path)
+}
+
+// copyInto streams the file at path into w and closes the source.
+func copyInto(w io.Writer, path string) error {
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(w, src)
+	closeErr := src.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func copyFile(source, destination string) error {
