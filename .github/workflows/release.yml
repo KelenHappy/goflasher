@@ -35,7 +35,7 @@ jobs:
           test -n "$windres"
           "$windres" --target=pe-x86-64 -I packaging/windows packaging/windows/goflasher.rc -O coff -o cmd/usbwriter/goflasher_windows_amd64.syso
           mkdir -p dist
-          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/GoFlasher.exe ./cmd/usbwriter
+          go build -trimpath -tags fyne -ldflags "-s -w -H=windowsgui" -o dist/GoFlasher.exe ./cmd/usbwriter
           rm cmd/usbwriter/goflasher_windows_amd64.syso
           mt=$(find '/c/Program Files (x86)/Windows Kits/10/bin' -path '*/x64/mt.exe' -print 2>/dev/null | sort -V | tail -1)
           test -n "$mt"

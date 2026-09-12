@@ -86,7 +86,7 @@ Windows：
 
 ```bat
 go test ./...
-go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
+go build -trimpath -tags fyne -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
 ```
 
 以Administrator執行 `dist\goflasher.exe`，讓Windows允許lock/dismount及raw open；backend仍會在destructive access前重新驗證identity。

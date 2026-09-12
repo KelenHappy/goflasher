@@ -135,7 +135,7 @@ GUI entry point from an Administrator Command Prompt:
 
 ```bat
 go test ./...
-go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
+go build -trimpath -tags fyne -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
 ```
 
 Run `dist\goflasher.exe` as Administrator so that Windows permits the selected

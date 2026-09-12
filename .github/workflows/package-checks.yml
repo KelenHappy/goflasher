@@ -165,7 +165,7 @@ jobs:
           go build \
             -trimpath \
             -tags fyne \
-            -ldflags "-s -w" \
+            -ldflags "-s -w -H=windowsgui" \
             -o dist/GoFlasher.exe \
             ./cmd/usbwriter
 

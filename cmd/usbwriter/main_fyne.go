@@ -88,6 +88,7 @@ const languagePreference = "language"
 
 func newGUIController(tr i18n.Localizer) *guiController {
 	a := app.NewWithID("org.goflasher.usbwriter")
+	applyUIScale(loadUIScale(a.Preferences()))
 	a.Settings().SetTheme(newReadableTheme(loadThemeMode(a.Preferences())))
 	if saved := a.Preferences().String(languagePreference); saved != "" {
 		tr = i18n.New(saved)
@@ -174,9 +175,15 @@ func (c *guiController) showSettings() {
 	})
 	themes := []settingChoice[themeMode]{{c.tr.T("settings.theme.system"), themeModeSystem}, {c.tr.T("settings.theme.light"), themeModeLight}, {c.tr.T("settings.theme.dark"), themeModeDark}}
 	themeSelect := newSettingSelect(themes, loadThemeMode(c.app.Preferences()), c.setTheme)
+	scales := make([]settingChoice[float64], len(uiScaleChoices))
+	for i, choice := range uiScaleChoices {
+		scales[i] = settingChoice[float64]{uiScaleLabel(choice), choice}
+	}
+	scaleSelect := newSettingSelect(scales, loadUIScale(c.app.Preferences()), c.setUIScale)
 	content := container.NewGridWithColumns(2,
 		widget.NewLabel(c.tr.T("settings.language")), language,
 		widget.NewLabel(c.tr.T("settings.theme")), themeSelect,
+		widget.NewLabel(c.tr.T("settings.scale")), scaleSelect,
 	)
 	dialog.NewCustom(c.tr.T("settings.title"), c.tr.T("settings.close"), content, c.view.window).Show()
 }
@@ -208,6 +215,16 @@ func newSettingSelect[T comparable](choices []settingChoice[T], current T, chang
 func (c *guiController) setTheme(mode themeMode) {
 	c.app.Preferences().SetString(themePreference, string(mode))
 	c.app.Settings().SetTheme(newReadableTheme(mode))
+}
+
+// setUIScale re-broadcasts the current theme once the new ratio is in place,
+// which is what makes every open canvas recalculate its scale immediately
+// instead of waiting for a restart.
+func (c *guiController) setUIScale(scale float64) {
+	scale = knownUIScale(scale)
+	c.app.Preferences().SetFloat(scalePreference, scale)
+	applyUIScale(scale)
+	c.app.Settings().SetTheme(newReadableTheme(loadThemeMode(c.app.Preferences())))
 }
 
 func (c *guiController) setLanguage(locale i18n.Locale) {

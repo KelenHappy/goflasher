@@ -141,7 +141,7 @@ go run -tags fyne ./cmd/usbwriter
 
 ```bat
 go test ./...
-go build -trimpath -tags fyne -o dist\goflasher.exe ./cmd/usbwriter
+go build -trimpath -tags fyne -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
 ```
 
 請以系統管理員身分執行 `dist\goflasher.exe`，讓程式可以將已確認的可移除式磁碟
