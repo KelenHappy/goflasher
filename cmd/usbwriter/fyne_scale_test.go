@@ -20,34 +20,28 @@ func TestKnownUIScaleRejectsUnofferedRatios(t *testing.T) {
 	}
 }
 
-func TestCompensatedUserScaleCancelsDesktopScaling(t *testing.T) {
-	// Fyne renders at round(system*user, 1 decimal), so the compensated value
-	// has to reproduce the requested ratio exactly at every desktop setting.
-	for _, system := range []float64{1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 3.0} {
-		for _, requested := range uiScaleChoices {
-			user := compensatedUserScale(requested, system)
-			if rendered := roundToTenth(system * user); rendered != requested {
-				t.Errorf("system %v with ratio %v rendered %v, want %v", system, requested, rendered, requested)
-			}
+func TestApplyUIScalePublishesChosenRatio(t *testing.T) {
+	t.Setenv(scaleEnvKey, "")
+	applyUIScale(1.2)
+	if got := os.Getenv(scaleEnvKey); got != "1.2000" {
+		t.Errorf("%s = %q, want \"1.2000\"", scaleEnvKey, got)
+	}
+}
+
+func TestBaseWindowSizeKeepsPixelFootprint(t *testing.T) {
+	for _, scale := range uiScaleChoices {
+		size := baseWindowSize(scale)
+		width := float64(size.Width) * scale
+		height := float64(size.Height) * scale
+		if width < baseWindowWidth-1 || width > baseWindowWidth+1 {
+			t.Errorf("baseWindowSize(%v) width footprint %v, want ~%v", scale, width, baseWindowWidth)
+		}
+		if height < baseWindowHeight-1 || height > baseWindowHeight+1 {
+			t.Errorf("baseWindowSize(%v) height footprint %v, want ~%v", scale, height, baseWindowHeight)
 		}
 	}
-}
-
-func TestCompensatedUserScaleIgnoresUnusableSystemScale(t *testing.T) {
-	if got := compensatedUserScale(1.25, 0); got != 1.25 {
-		t.Errorf("compensatedUserScale with zero system scale = %v, want 1.25", got)
-	}
-}
-
-func TestApplyUIScaleDisablesDPIDetection(t *testing.T) {
-	t.Setenv(scaleEnvKey, "")
-	t.Setenv(disableDPIDetectionKey, "")
-	applyUIScale(1.5)
-	if got := os.Getenv(disableDPIDetectionKey); got != "true" {
-		t.Errorf("%s = %q, want \"true\"", disableDPIDetectionKey, got)
-	}
-	if os.Getenv(scaleEnvKey) == "" {
-		t.Errorf("%s was not set", scaleEnvKey)
+	if got := baseWindowSize(0); got != baseWindowSize(defaultUIScale) {
+		t.Errorf("baseWindowSize(0) = %v, want the default ratio size", got)
 	}
 }
 
@@ -58,8 +52,4 @@ func TestUIScaleLabel(t *testing.T) {
 			t.Errorf("uiScaleLabel(%v) = %q, want %q", scale, got, want)
 		}
 	}
-}
-
-func roundToTenth(value float64) float64 {
-	return float64(int(value*10+0.5)) / 10
 }

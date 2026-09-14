@@ -88,14 +88,15 @@ const languagePreference = "language"
 
 func newGUIController(tr i18n.Localizer) *guiController {
 	a := app.NewWithID("org.goflasher.usbwriter")
-	applyUIScale(loadUIScale(a.Preferences()))
+	scale := loadUIScale(a.Preferences())
+	applyUIScale(scale)
 	a.Settings().SetTheme(newReadableTheme(loadThemeMode(a.Preferences())))
 	if saved := a.Preferences().String(languagePreference); saved != "" {
 		tr = i18n.New(saved)
 	}
 	configureFyneTranslations(string(tr.Locale()))
 	w := a.NewWindow(tr.T("window.title"))
-	w.Resize(fyne.NewSize(720, 620))
+	w.Resize(baseWindowSize(scale))
 	view := newApplicationView(tr, w)
 	return &guiController{tr: tr, view: view, backend: newBackend(), machine: core.NewStateMachine(), app: a}
 }
@@ -118,7 +119,7 @@ func newApplicationView(tr i18n.Localizer, w fyne.Window) *applicationView {
 	v.logs = widget.NewMultiLineEntry()
 	v.logs.Disable()
 	v.logPanel = widget.NewAccordion(widget.NewAccordionItem(tr.T("log.details"), v.logs))
-	v.logPanel.CloseAll()
+	v.logPanel.Open(0)
 	v.start = widget.NewButton(tr.T("action.start"), nil)
 	v.format = widget.NewButton(tr.T("action.format_fat32"), nil)
 	v.format.Disable()
@@ -222,9 +223,19 @@ func (c *guiController) setTheme(mode themeMode) {
 // instead of waiting for a restart.
 func (c *guiController) setUIScale(scale float64) {
 	scale = knownUIScale(scale)
+	previous := loadUIScale(c.app.Preferences())
 	c.app.Preferences().SetFloat(scalePreference, scale)
 	applyUIScale(scale)
 	c.app.Settings().SetTheme(newReadableTheme(loadThemeMode(c.app.Preferences())))
+	if previous == scale {
+		return
+	}
+	// Fyne keeps the logical size across a rescale, which would grow or shrink
+	// the window itself; shrinking the logical size by the inverse ratio keeps
+	// the window's pixel size where the user put it and zooms only the content.
+	size := c.view.window.Canvas().Size()
+	ratio := float32(previous / scale)
+	c.view.window.Resize(fyne.NewSize(size.Width*ratio, size.Height*ratio))
 }
 
 func (c *guiController) setLanguage(locale i18n.Locale) {
