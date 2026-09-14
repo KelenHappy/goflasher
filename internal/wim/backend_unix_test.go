@@ -102,7 +102,7 @@ func TestSplitRejectsNativeInitializationAndMissingSymbols(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			source, output := splitPaths(t)
 			withFakeNative(t, func(string, string) (nativeLibrary, error) { return nil, tt.err })
-			if _, err := Split(context.Background(), source, output, 1024, nil); !errors.Is(err, ErrUnsupported) {
+			if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024}); !errors.Is(err, ErrUnsupported) {
 				t.Fatalf("error=%v", err)
 			}
 		})
@@ -113,7 +113,7 @@ func TestSplitOpenFailureCleansUpLibrary(t *testing.T) {
 	source, output := splitPaths(t)
 	lib := &fakeLibrary{openErr: errors.New("open")}
 	withFakeNative(t, func(string, string) (nativeLibrary, error) { return lib, nil })
-	if _, err := Split(context.Background(), source, output, 1024, nil); err == nil {
+	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024}); err == nil {
 		t.Fatal("Split succeeded")
 	}
 	if lib.closeCalls != 1 {
@@ -126,7 +126,7 @@ func TestSplitFailureClosesObjectsAndRemovesPartialParts(t *testing.T) {
 	image := &fakeImage{splitErr: errors.New("split")}
 	lib := &fakeLibrary{image: image}
 	withFakeNative(t, func(string, string) (nativeLibrary, error) { return lib, nil })
-	if _, err := Split(context.Background(), source, output, 1024, nil); err == nil {
+	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024}); err == nil {
 		t.Fatal("Split succeeded")
 	}
 	assertNativeReleased(t, lib, image)
@@ -142,7 +142,7 @@ func TestSplitReturnsContiguousPartsAndSynchronousProgress(t *testing.T) {
 	withFakeNative(t, func(string, string) (nativeLibrary, error) { return lib, nil })
 	var progress [][2]uint64
 	record := func(done, total uint64) { progress = append(progress, [2]uint64{done, total}) }
-	parts, err := Split(context.Background(), source, output, 1024, record)
+	parts, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024, Progress: record})
 	if err != nil {
 		t.Fatal(err)
 	}

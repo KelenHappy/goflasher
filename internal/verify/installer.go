@@ -614,12 +614,18 @@ func shortName(e []byte) string {
 	return base
 }
 
+// lfnNameFields are the byte ranges holding UTF-16 name characters in a
+// long-name directory entry.
+var lfnNameFields = []struct{ start, end int }{{1, 11}, {14, 26}, {28, 32}}
+
+func lfnSequence(e []byte) byte { return e[0] & 0x1f }
+
 func longName(es [][]byte) string {
-	sort.Slice(es, func(i, j int) bool { return es[i][0]&0x1f < es[j][0]&0x1f })
+	sort.Slice(es, func(i, j int) bool { return lfnSequence(es[i]) < lfnSequence(es[j]) })
 	var u []uint16
 	for _, e := range es {
-		for _, x := range [][2]int{{1, 11}, {14, 26}, {28, 32}} {
-			for i := x[0]; i < x[1]; i += 2 {
+		for _, field := range lfnNameFields {
+			for i := field.start; i < field.end; i += 2 {
 				c := binary.LittleEndian.Uint16(e[i : i+2])
 				if c == 0 || c == 0xffff {
 					break

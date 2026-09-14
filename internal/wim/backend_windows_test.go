@@ -91,7 +91,7 @@ func TestDISMArgumentsAreSeparateExactAndSizeRoundsDown(t *testing.T) {
 		return nil, os.WriteFile(filepath.Join(output, "install.swm"), []byte("part"), 0600)
 	})
 	var progress [][2]uint64
-	_, err := Split(context.Background(), source, output, 5*1024*1024+999, func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) })
+	_, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 5*1024*1024 + 999, Progress: func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestDISMRejectsSubMiBPartSizeWithoutExecution(t *testing.T) {
 	source, output := windowsSplitPaths(t)
 	called := false
 	fakeWindowsBackend(t, func(context.Context, string, []string) ([]byte, error) { called = true; return nil, nil })
-	if _, err := Split(context.Background(), source, output, 1024*1024-1, nil); !errors.Is(err, ErrUnsupported) {
+	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024*1024 - 1}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("error=%v", err)
 	}
 	if called {
@@ -141,7 +141,7 @@ func TestDISMFailureAndCancellationCleanPartialOutput(t *testing.T) {
 				return []byte("diagnostic"), errors.New("exit status 1")
 			})
 			var progress [][2]uint64
-			_, err := Split(ctx, source, output, 2*1024*1024, func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) })
+			_, err := Split(ctx, Request{SourcePath: source, OutputDir: output, PartSize: 2 * 1024 * 1024, Progress: func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) }})
 			if err == nil || (cancel && !errors.Is(err, context.Canceled)) {
 				t.Fatalf("error=%v", err)
 			}
@@ -160,7 +160,7 @@ func TestDISMSuccessStillValidatesAndCleansOutput(t *testing.T) {
 	fakeWindowsBackend(t, func(context.Context, string, []string) ([]byte, error) {
 		return nil, os.WriteFile(filepath.Join(output, "install2.swm"), []byte("gap"), 0600)
 	})
-	if _, err := Split(context.Background(), source, output, 2*1024*1024, nil); !errors.Is(err, ErrUnsupported) {
+	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 2 * 1024 * 1024}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("error=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(output, "install2.swm")); !os.IsNotExist(err) {

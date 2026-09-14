@@ -43,7 +43,7 @@ type SplitPart struct {
 // canonical install.swm, install2.swm, ... sequence and must not emit the
 // original WIM or any empty placeholder.
 type WIMSplitter interface {
-	Split(context.Context, io.Reader, uint64, string, uint64, func(SplitPart) error) error
+	Split(context.Context, SplitRequest, func(SplitPart) error) error
 }
 
 type ExecutionResult struct {
@@ -198,7 +198,8 @@ func (r *execution) copySplitWIM() error {
 		return fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
 	}
 	nextPart := 1
-	err := r.splitter.Split(r.ctx, reader, wim.source.Size, expectedWIMHash, plan.splitSize, func(part SplitPart) error {
+	request := SplitRequest{Source: reader, SourceSize: wim.source.Size, ExpectedSHA256: expectedWIMHash, PartSize: plan.splitSize}
+	err := r.splitter.Split(r.ctx, request, func(part SplitPart) error {
 		name, err := validateSplitPart(part, nextPart, plan.splitParts, plan.splitSize)
 		if err != nil {
 			return err

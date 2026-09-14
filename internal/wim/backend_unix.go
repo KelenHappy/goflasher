@@ -49,7 +49,7 @@ func backendProbe() (err error) {
 	return lib.Close()
 }
 
-func backendSplit(ctx context.Context, req splitRequest) (parts []Part, err error) {
+func backendSplit(ctx context.Context, req Request) (parts []Part, err error) {
 	libraryPath, libraryRoot, err := locateBundledLibrary()
 	if err != nil {
 		return nil, err
@@ -59,23 +59,23 @@ func backendSplit(ctx context.Context, req splitRequest) (parts []Part, err erro
 		return nil, errors.Join(ErrUnsupported, err)
 	}
 	defer func() { err = errors.Join(err, lib.Close()) }()
-	image, err := lib.OpenWIM(req.sourcePath)
+	image, err := lib.OpenWIM(req.SourcePath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, image.Close()) }()
 	req.report(0, 1)
-	if err := image.Split(filepath.Join(req.outputDir, "install.swm"), req.partSize); err != nil {
-		removeParts(req.outputDir)
+	if err := image.Split(filepath.Join(req.OutputDir, "install.swm"), req.PartSize); err != nil {
+		removeParts(req.OutputDir)
 		return nil, err
 	}
-	parts, err = discoverParts(req.outputDir)
+	parts, err = discoverParts(req.OutputDir)
 	if err != nil {
-		removeParts(req.outputDir)
+		removeParts(req.OutputDir)
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
-		removeParts(req.outputDir)
+		removeParts(req.OutputDir)
 		return nil, err
 	}
 	req.report(1, 1)

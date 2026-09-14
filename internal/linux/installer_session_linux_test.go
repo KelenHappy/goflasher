@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -61,28 +62,45 @@ func TestInstallerSessionUsesBoundedRandomAccessAndStructuredReplies(t *testing.
 	if err := runInstallerSession(installerSession{request: req, target: target, input: bufio.NewReader(input), output: &output, env: env}); err != nil {
 		t.Fatal(err)
 	}
-	got := make([]byte, len(payload))
-	if _, err := target.ReadAt(got, 4096); err != nil {
+	assertTargetBytes(t, target, 4096, payload)
+	replies := decodeSessionReplies(t, &output)
+	if len(replies) != 3 {
+		t.Fatalf("replies=%d", len(replies))
+	}
+	for _, response := range replies {
+		if !response.OK || response.Version != privilege.ProtocolVersion {
+			t.Fatalf("response=%+v", response)
+		}
+	}
+}
+
+func assertTargetBytes(t *testing.T, target *os.File, offset int64, want []byte) {
+	t.Helper()
+	got := make([]byte, len(want))
+	if _, err := target.ReadAt(got, offset); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, payload) {
+	if !bytes.Equal(got, want) {
 		t.Fatalf("payload=%q", got)
 	}
-	scanner := bufio.NewScanner(&output)
-	replies := 0
+}
+
+// decodeSessionReplies parses the newline-delimited JSON replies of a session.
+func decodeSessionReplies(t *testing.T, output io.Reader) []privilege.SessionResponse {
+	t.Helper()
+	var replies []privilege.SessionResponse
+	scanner := bufio.NewScanner(output)
 	for scanner.Scan() {
 		var response privilege.SessionResponse
 		if err := json.Unmarshal(scanner.Bytes(), &response); err != nil {
 			t.Fatal(err)
 		}
-		if !response.OK || response.Version != privilege.ProtocolVersion {
-			t.Fatalf("response=%+v", response)
-		}
-		replies++
+		replies = append(replies, response)
 	}
-	if replies != 3 {
-		t.Fatalf("replies=%d", replies)
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
 	}
+	return replies
 }
 
 func TestInstallerSessionRejectsOutOfBoundsBeforeWrite(t *testing.T) {

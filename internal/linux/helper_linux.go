@@ -587,7 +587,9 @@ func readPrivilegedRequest(in io.Reader) (privilegedRequest, io.Reader, error) {
 	return req, payload, nil
 }
 
-func flushAndInvalidate(target interface{ Sync() error }, invalidate func() error) error {
+type syncer interface{ Sync() error }
+
+func flushAndInvalidate(target syncer, invalidate func() error) error {
 	if err := target.Sync(); err != nil {
 		return err
 	}

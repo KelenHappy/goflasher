@@ -25,7 +25,7 @@ func main() {
 		panic(err)
 	}
 	defer os.RemoveAll(out)
-	parts, err := wim.Split(context.Background(), os.Args[1], out, 4<<20, nil)
+	parts, err := wim.Split(context.Background(), wim.Request{SourcePath: os.Args[1], OutputDir: out, PartSize: 4 << 20})
 	if err != nil || len(parts) == 0 || filepath.Base(parts[0].Path) != "install.swm" {
 		panic(fmt.Sprintf("split smoke failed: parts=%v error=%v", parts, err))
 	}

@@ -26,39 +26,39 @@ func Probe() error { return backendProbe() }
 
 // Split canonicalizes and validates its paths before invoking the
 // compile-time-selected platform backend.
-func Split(ctx context.Context, sourcePath, outputDir string, partSize uint64, progress ProgressFunc) ([]Part, error) {
+func Split(ctx context.Context, req Request) ([]Part, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if partSize == 0 {
+	if req.PartSize == 0 {
 		return nil, fmt.Errorf("%w: invalid part size", ErrUnsupported)
 	}
 	var err error
-	if sourcePath, err = canonicalAbsolute(sourcePath); err != nil {
+	if req.SourcePath, err = canonicalAbsolute(req.SourcePath); err != nil {
 		return nil, err
 	}
-	if outputDir, err = canonicalAbsolute(outputDir); err != nil {
+	if req.OutputDir, err = canonicalAbsolute(req.OutputDir); err != nil {
 		return nil, err
 	}
-	if err := rejectExistingParts(outputDir); err != nil {
+	if err := rejectExistingParts(req.OutputDir); err != nil {
 		return nil, err
 	}
-	return backendSplit(ctx, splitRequest{sourcePath: sourcePath, outputDir: outputDir, partSize: partSize, progress: progress})
+	return backendSplit(ctx, req)
 }
 
-// splitRequest carries the validated inputs of one Split call to the
-// compile-time-selected platform backend.
-type splitRequest struct {
-	sourcePath string
-	outputDir  string
-	partSize   uint64
-	progress   ProgressFunc
+// Request describes one Split call. SourcePath and OutputDir must be absolute;
+// Progress is optional.
+type Request struct {
+	SourcePath string
+	OutputDir  string
+	PartSize   uint64
+	Progress   ProgressFunc
 }
 
 // report forwards progress only when the caller asked for it.
-func (r splitRequest) report(completed, total uint64) {
-	if r.progress != nil {
-		r.progress(completed, total)
+func (r Request) report(completed, total uint64) {
+	if r.Progress != nil {
+		r.Progress(completed, total)
 	}
 }
 

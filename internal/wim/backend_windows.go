@@ -89,8 +89,8 @@ func backendProbe() error {
 	return nil
 }
 
-func backendSplit(ctx context.Context, req splitRequest) ([]Part, error) {
-	sizeMiB := req.partSize / (1024 * 1024)
+func backendSplit(ctx context.Context, req Request) ([]Part, error) {
+	sizeMiB := req.PartSize / (1024 * 1024)
 	if sizeMiB == 0 {
 		return nil, fmt.Errorf("%w: part size is smaller than one MiB", ErrUnsupported)
 	}
@@ -99,12 +99,12 @@ func backendSplit(ctx context.Context, req splitRequest) ([]Part, error) {
 		return nil, errors.Join(ErrUnsupported, err)
 	}
 	req.report(0, 1)
-	output, runErr := executeDISM(ctx, dismPath, splitImageArgs(req.sourcePath, req.outputDir, sizeMiB))
+	output, runErr := executeDISM(ctx, dismPath, splitImageArgs(req.SourcePath, req.OutputDir, sizeMiB))
 	if runErr != nil {
-		removeParts(req.outputDir)
+		removeParts(req.OutputDir)
 		return nil, dismFailure(ctx, output, runErr)
 	}
-	parts, err := collectDISMParts(ctx, req.outputDir)
+	parts, err := collectDISMParts(ctx, req.OutputDir)
 	if err != nil {
 		return nil, err
 	}

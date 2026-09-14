@@ -84,12 +84,12 @@ func TestExecutorHashMismatchIsIncomplete(t *testing.T) {
 
 type fixtureSplitter struct{}
 
-func (fixtureSplitter) Split(_ context.Context, source io.Reader, size uint64, _ string, _ uint64, emit func(SplitPart) error) error {
-	b, err := io.ReadAll(source)
+func (fixtureSplitter) Split(_ context.Context, request SplitRequest, emit func(SplitPart) error) error {
+	b, err := io.ReadAll(request.Source)
 	if err != nil {
 		return err
 	}
-	if uint64(len(b)) != size {
+	if uint64(len(b)) != request.SourceSize {
 		return io.ErrUnexpectedEOF
 	}
 	return emit(SplitPart{Name: "install.swm", Size: uint64(len(b)), Data: bytes.NewReader(b)})

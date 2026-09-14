@@ -225,14 +225,17 @@ func (s *Service) prepareSplitWIM(ctx context.Context, info image.Info, plan *Wo
 		return nil, nil, err
 	}
 	sendStage(ctx, updates, progress.StageStagingWIM)
-	finalized, prepared, cleanup, err := installer.PrepareSplitWIM(ctx, plan.Windows, r, s.InstallerSplitter, func() error {
-		return s.startWIMSplit(ctx, updates)
+	prepared, err := installer.PrepareSplitWIM(ctx, installer.SplitPreparation{
+		Plan:        plan.Windows,
+		Source:      r,
+		Splitter:    s.InstallerSplitter,
+		OnSplitting: func() error { return s.startWIMSplit(ctx, updates) },
 	})
 	if err != nil {
 		return nil, nil, errors.Join(installer.ErrWIMSplitFailure, err)
 	}
-	plan.Windows = finalized
-	return prepared, cleanup.Close, nil
+	plan.Windows = prepared.Plan
+	return prepared.Splitter, prepared.Cleanup.Close, nil
 }
 
 func (s *Service) startWIMSplit(ctx context.Context, updates chan<- progress.Update) error {

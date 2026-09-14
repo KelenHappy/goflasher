@@ -515,7 +515,7 @@ func parseSwaps(path string) (map[string]bool, error) {
 	return out, s.Err()
 }
 func decodeMount(s string) string {
-	r := strings.NewReplacer("\\040", " ", "\\011", "\t", "\\012", "\n", "\\134", "\\")
+	r := strings.NewReplacer("\\040", " ", "\\011", "\t", "\\012", "\n", "\\134", "\x5c")
 	return r.Replace(s)
 }
 func readDeviceNumber(path string) (uint32, uint32, error) {

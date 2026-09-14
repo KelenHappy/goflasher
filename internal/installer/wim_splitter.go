@@ -15,7 +15,43 @@ import (
 	"github.com/goflasher/goflasher/internal/wim"
 )
 
-type wimSplitFunc func(context.Context, string, string, uint64, wim.ProgressFunc) ([]wim.Part, error)
+type wimSplitFunc func(context.Context, wim.Request) ([]wim.Part, error)
+
+// SplitRequest describes one install.wim split job: where the bytes come
+// from, how many there are, the hash they must match, and the part policy.
+type SplitRequest struct {
+	Source         io.Reader
+	SourceSize     uint64
+	ExpectedSHA256 string
+	PartSize       uint64
+}
+
+func (r SplitRequest) valid() bool {
+	return r.Source != nil && r.SourceSize != 0 && r.ExpectedSHA256 != "" && r.PartSize != 0 && r.PartSize < maxFATFileSize
+}
+
+// matches reports whether both requests describe the same job, ignoring the
+// reader. Prepared splitters replay retained parts and never read Source.
+func (r SplitRequest) matches(other SplitRequest) bool {
+	return r.SourceSize == other.SourceSize && r.ExpectedSHA256 == other.ExpectedSHA256 && r.PartSize == other.PartSize
+}
+
+// SplitPreparation is the input to PrepareSplitWIM.
+type SplitPreparation struct {
+	Plan     *BuildPlan
+	Source   io.ReaderAt
+	Splitter WIMSplitter
+	// OnSplitting runs after staging succeeds and before the backend splits.
+	OnSplitting func() error
+}
+
+// PreparedSplitWIM is the result of PrepareSplitWIM. Splitter only replays
+// the retained validated parts and Cleanup removes all staged data.
+type PreparedSplitWIM struct {
+	Plan     *BuildPlan
+	Splitter WIMSplitter
+	Cleanup  io.Closer
+}
 
 // NativeWIMSplitter stages only install.wim in a private temporary directory,
 // invokes the platform WIM backend, validates its complete output set, and
@@ -26,15 +62,13 @@ type NativeWIMSplitter struct {
 }
 
 type wimPreparer interface {
-	PrepareWithProgress(context.Context, io.Reader, uint64, string, uint64, func() error) (WIMSplitter, io.Closer, error)
+	PrepareWithProgress(context.Context, SplitRequest, func() error) (WIMSplitter, io.Closer, error)
 }
 
 type preparedNativeWIM struct {
 	temporary       string
 	parts           []wim.Part
-	sourceSize      uint64
-	expectedHash    string
-	partSize        uint64
+	request         SplitRequest
 	mu              sync.Mutex
 	closed, emitted bool
 }
@@ -54,113 +88,149 @@ func (s *NativeWIMSplitter) Preflight(ctx context.Context) error {
 }
 
 // PrepareSplitWIM stages, parses, splits, and validates install.wim without a
-// target handle. The returned splitter only replays the retained validated
-// parts and cleanup removes all staged data.
-func PrepareSplitWIM(ctx context.Context, plan *BuildPlan, source io.ReaderAt, splitter WIMSplitter, onSplitting func() error) (*BuildPlan, WIMSplitter, io.Closer, error) {
-	if plan == nil || source == nil || plan.strategy != SplitWIM {
-		return nil, nil, nil, fmt.Errorf("%w: invalid split preparation input", ErrVerification)
+// target handle.
+func PrepareSplitWIM(ctx context.Context, in SplitPreparation) (*PreparedSplitWIM, error) {
+	if in.Plan == nil || in.Source == nil || in.Plan.strategy != SplitWIM {
+		return nil, fmt.Errorf("%w: invalid split preparation input", ErrVerification)
 	}
-	preparer, ok := splitter.(wimPreparer)
+	preparer, ok := in.Splitter.(wimPreparer)
 	if !ok {
-		return nil, nil, nil, ErrSplitterRequired
+		return nil, ErrSplitterRequired
 	}
-	wimEntry, ok := plannedBySource(plan, "sources/install.wim")
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("%w: planned WIM is missing", ErrVerification)
-	}
-	expected := verificationHash(plan, wimEntry.destination, wimEntry.source.Size)
-	if expected == "" {
-		return nil, nil, nil, fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
-	}
-	reader := newExtentReader(source, wimEntry.source.Extents, wimEntry.source.Size)
-	prepared, cleanup, err := preparer.PrepareWithProgress(ctx, reader, wimEntry.source.Size, expected, plan.splitSize, onSplitting)
+	request, err := plannedSplitRequest(in.Plan, in.Source)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	if prepared == nil || cleanup == nil {
-		if cleanup != nil {
-			_ = cleanup.Close()
-		}
-		return nil, nil, nil, fmt.Errorf("%w: split preparation returned incomplete result", ErrVerification)
-	}
-	geometry, ok := prepared.(interface{ PreparedPartSizes() []uint64 })
-	if !ok {
-		_ = cleanup.Close()
-		return nil, nil, nil, fmt.Errorf("%w: prepared split geometry is unavailable", ErrVerification)
-	}
-	finalized, err := plan.withPreparedSplitGeometry(geometry.PreparedPartSizes())
+	prepared, cleanup, err := prepareComplete(ctx, preparer, request, in.OnSplitting)
 	if err != nil {
-		_ = cleanup.Close()
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return finalized, prepared, cleanup, nil
+	finalized, err := finalizeSplitGeometry(in.Plan, prepared)
+	if err != nil {
+		return nil, errors.Join(err, cleanup.Close())
+	}
+	return &PreparedSplitWIM{Plan: finalized, Splitter: prepared, Cleanup: cleanup}, nil
 }
 
-func (s *NativeWIMSplitter) Split(ctx context.Context, source io.Reader, sourceSize uint64, expectedSHA256 string, partSize uint64, emit func(SplitPart) error) (err error) {
-	prepared, cleanup, err := s.Prepare(ctx, source, sourceSize, expectedSHA256, partSize)
+// prepareComplete runs the preparer and rejects a partial result so callers
+// never receive a splitter without its cleanup or vice versa.
+func prepareComplete(ctx context.Context, preparer wimPreparer, request SplitRequest, onSplitting func() error) (WIMSplitter, io.Closer, error) {
+	prepared, cleanup, err := preparer.PrepareWithProgress(ctx, request, onSplitting)
+	if err != nil {
+		return nil, nil, err
+	}
+	if prepared != nil && cleanup != nil {
+		return prepared, cleanup, nil
+	}
+	if cleanup != nil {
+		_ = cleanup.Close()
+	}
+	return nil, nil, fmt.Errorf("%w: split preparation returned incomplete result", ErrVerification)
+}
+
+// plannedSplitRequest resolves the planned install.wim entry and its
+// verification hash into a split request reading straight from the ISO.
+func plannedSplitRequest(plan *BuildPlan, source io.ReaderAt) (SplitRequest, error) {
+	entry, ok := plannedBySource(plan, "sources/install.wim")
+	if !ok {
+		return SplitRequest{}, fmt.Errorf("%w: planned WIM is missing", ErrVerification)
+	}
+	expected := verificationHash(plan, entry.destination, entry.source.Size)
+	if expected == "" {
+		return SplitRequest{}, fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
+	}
+	return SplitRequest{
+		Source:         newExtentReader(source, entry.source.Extents, entry.source.Size),
+		SourceSize:     entry.source.Size,
+		ExpectedSHA256: expected,
+		PartSize:       plan.splitSize,
+	}, nil
+}
+
+func finalizeSplitGeometry(plan *BuildPlan, prepared WIMSplitter) (*BuildPlan, error) {
+	geometry, ok := prepared.(interface{ PreparedPartSizes() []uint64 })
+	if !ok {
+		return nil, fmt.Errorf("%w: prepared split geometry is unavailable", ErrVerification)
+	}
+	return plan.withPreparedSplitGeometry(geometry.PreparedPartSizes())
+}
+
+func (s *NativeWIMSplitter) Split(ctx context.Context, request SplitRequest, emit func(SplitPart) error) (err error) {
+	prepared, cleanup, err := s.Prepare(ctx, request)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, cleanup.Close()) }()
-	return prepared.Split(ctx, nil, sourceSize, expectedSHA256, partSize, emit)
+	return prepared.Split(ctx, request, emit)
 }
 
 // Prepare performs every source-dependent WIM operation and retains the
 // validated parts until Close. Callers run it before opening the target.
-func (s *NativeWIMSplitter) Prepare(ctx context.Context, source io.Reader, sourceSize uint64, expectedSHA256 string, partSize uint64) (_ WIMSplitter, cleanup io.Closer, err error) {
-	return s.PrepareWithProgress(ctx, source, sourceSize, expectedSHA256, partSize, nil)
+func (s *NativeWIMSplitter) Prepare(ctx context.Context, request SplitRequest) (WIMSplitter, io.Closer, error) {
+	return s.PrepareWithProgress(ctx, request, nil)
 }
 
-func (s *NativeWIMSplitter) PrepareWithProgress(ctx context.Context, source io.Reader, sourceSize uint64, expectedSHA256 string, partSize uint64, onSplitting func() error) (_ WIMSplitter, cleanup io.Closer, err error) {
-	if s == nil || s.split == nil || source == nil || sourceSize == 0 || expectedSHA256 == "" || partSize == 0 || partSize >= maxFATFileSize {
+func (s *NativeWIMSplitter) PrepareWithProgress(ctx context.Context, request SplitRequest, onSplitting func() error) (_ WIMSplitter, cleanup io.Closer, err error) {
+	if s == nil || s.split == nil || !request.valid() {
 		return nil, nil, fmt.Errorf("%w: invalid native split input", ErrVerification)
 	}
-	temporary, err := os.MkdirTemp("", "goflasher-wim-*")
+	temporary, err := newSplitWorkspace()
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := os.Chmod(temporary, 0700); err != nil {
-		_ = os.RemoveAll(temporary)
-		return nil, nil, err
+	parts, err := s.stageAndSplit(ctx, temporary, request, onSplitting)
+	if err != nil {
+		return nil, nil, errors.Join(err, os.RemoveAll(temporary))
 	}
-	success := false
-	defer func() {
-		if !success {
-			err = errors.Join(err, os.RemoveAll(temporary))
-		}
-	}()
+	prepared := &preparedNativeWIM{temporary: temporary, parts: parts, request: request}
+	return prepared, prepared, nil
+}
+
+// newSplitWorkspace creates a private temporary directory for staging.
+func newSplitWorkspace() (string, error) {
+	temporary, err := os.MkdirTemp("", "goflasher-wim-*")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(temporary, 0700); err != nil {
+		return "", errors.Join(err, os.RemoveAll(temporary))
+	}
+	return temporary, nil
+}
+
+// stageAndSplit copies the verified source into the workspace, runs the
+// backend, and returns a private copy of the validated part list.
+func (s *NativeWIMSplitter) stageAndSplit(ctx context.Context, temporary string, request SplitRequest, onSplitting func() error) ([]wim.Part, error) {
 	sourcePath := filepath.Join(temporary, "install.wim")
-	if err := stageWIM(ctx, sourcePath, source, sourceSize, expectedSHA256); err != nil {
-		return nil, nil, err
+	if err := stageWIM(ctx, sourcePath, request); err != nil {
+		return nil, err
 	}
 	if onSplitting != nil {
 		if err := onSplitting(); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	output := filepath.Join(temporary, "split")
 	if err := os.Mkdir(output, 0700); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	parts, err := s.split(ctx, sourcePath, output, partSize, nil)
+	parts, err := s.split(ctx, wim.Request{SourcePath: sourcePath, OutputDir: output, PartSize: request.PartSize})
 	if err != nil { // A native call may return only after cancellation; never emit afterwards.
-		return nil, nil, err
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	if err := validateSplitParts(parts, output, sourceSize, partSize); err != nil {
-		return nil, nil, err
+	if err := validateSplitParts(parts, output, request.SourceSize, request.PartSize); err != nil {
+		return nil, err
 	}
-	prepared := &preparedNativeWIM{temporary: temporary, parts: append([]wim.Part(nil), parts...), sourceSize: sourceSize, expectedHash: expectedSHA256, partSize: partSize}
-	success = true
-	return prepared, prepared, nil
+	return append([]wim.Part(nil), parts...), nil
 }
 
-func (p *preparedNativeWIM) Split(ctx context.Context, _ io.Reader, sourceSize uint64, expectedSHA256 string, partSize uint64, emit func(SplitPart) error) error {
+func (p *preparedNativeWIM) Split(ctx context.Context, request SplitRequest, emit func(SplitPart) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed || p.emitted || emit == nil || sourceSize != p.sourceSize || expectedSHA256 != p.expectedHash || partSize != p.partSize {
+	if !p.replayable(request, emit) {
 		return fmt.Errorf("%w: invalid prepared split use", ErrVerification)
 	}
 	p.emitted = true
@@ -168,21 +238,34 @@ func (p *preparedNativeWIM) Split(ctx context.Context, _ io.Reader, sourceSize u
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		file, err := os.Open(part.Path)
-		if err != nil {
+		if err := emitRetainedPart(index, part, emit); err != nil {
 			return err
-		}
-		name := "install.swm"
-		if index > 0 {
-			name = fmt.Sprintf("install%d.swm", index+1)
-		}
-		emitErr := emit(SplitPart{Name: name, Size: part.Size, Data: file})
-		closeErr := file.Close()
-		if emitErr != nil || closeErr != nil {
-			return errors.Join(emitErr, closeErr)
 		}
 	}
 	return nil
+}
+
+// replayable reports whether the retained parts may be emitted exactly once
+// for the job they were prepared for. Callers hold p.mu.
+func (p *preparedNativeWIM) replayable(request SplitRequest, emit func(SplitPart) error) bool {
+	return !p.closed && !p.emitted && emit != nil && p.request.matches(request)
+}
+
+func emitRetainedPart(index int, part wim.Part, emit func(SplitPart) error) error {
+	file, err := os.Open(part.Path)
+	if err != nil {
+		return err
+	}
+	emitErr := emit(SplitPart{Name: swmPartName(index), Size: part.Size, Data: file})
+	return errors.Join(emitErr, file.Close())
+}
+
+// swmPartName returns the Windows Setup name for the zero-based part index.
+func swmPartName(index int) string {
+	if index == 0 {
+		return "install.swm"
+	}
+	return fmt.Sprintf("install%d.swm", index+1)
 }
 
 func (p *preparedNativeWIM) PreparedPartSizes() []uint64 {
@@ -205,18 +288,18 @@ func (p *preparedNativeWIM) Close() error {
 	return os.RemoveAll(p.temporary)
 }
 
-func stageWIM(ctx context.Context, path string, source io.Reader, size uint64, expectedHash string) (err error) {
+func stageWIM(ctx context.Context, path string, request SplitRequest) (err error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
 	hash := sha256.New()
-	written, err := copyContext(ctx, io.MultiWriter(file, hash), io.LimitReader(source, int64(size)+1))
+	written, err := copyContext(ctx, io.MultiWriter(file, hash), io.LimitReader(request.Source, int64(request.SourceSize)+1))
 	if err != nil {
 		return err
 	}
-	if uint64(written) != size || hex.EncodeToString(hash.Sum(nil)) != expectedHash {
+	if uint64(written) != request.SourceSize || hex.EncodeToString(hash.Sum(nil)) != request.ExpectedSHA256 {
 		return fmt.Errorf("%w: staged install.wim differs from preflight", ErrVerification)
 	}
 	return file.Sync()
@@ -232,31 +315,48 @@ func validateSplitParts(parts []wim.Part, output string, sourceSize, policy uint
 	}
 	var total uint64
 	for index, part := range parts {
-		want := "install.swm"
-		if index > 0 {
-			want = fmt.Sprintf("install%d.swm", index+1)
-		}
-		canonical, err := filepath.EvalSymlinks(part.Path)
-		if err != nil || filepath.Dir(canonical) != canonicalOutput || filepath.Base(canonical) != want || part.Size == 0 || part.Size > policy || part.Size >= maxFATFileSize {
-			return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Path)
-		}
-		info, err := os.Stat(canonical)
-		if err != nil || info.IsDir() || uint64(info.Size()) != part.Size {
-			return fmt.Errorf("%w: split part size differs for %q", ErrVerification, part.Path)
+		if err := validateSplitPartFile(part, index, canonicalOutput, policy); err != nil {
+			return err
 		}
 		if total > math.MaxUint64-part.Size {
 			return fmt.Errorf("%w: split size overflow", ErrVerification)
 		}
 		total += part.Size
 	}
-	// Split WIMs repeat small metadata. Permit substantial encoding variance,
-	// while rejecting obviously truncated or explosively large output sets.
+	return validateSplitTotal(total, len(parts), sourceSize)
+}
+
+// validateSplitPartFile checks that one reported part is a regular file of
+// the expected name and size inside the split output directory.
+func validateSplitPartFile(part wim.Part, index int, canonicalOutput string, policy uint64) error {
+	canonical, err := filepath.EvalSymlinks(part.Path)
+	if err != nil || !splitPartLocated(canonical, canonicalOutput, index) || !splitPartSized(part.Size, policy) {
+		return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Path)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || info.IsDir() || uint64(info.Size()) != part.Size {
+		return fmt.Errorf("%w: split part size differs for %q", ErrVerification, part.Path)
+	}
+	return nil
+}
+
+func splitPartLocated(canonical, canonicalOutput string, index int) bool {
+	return filepath.Dir(canonical) == canonicalOutput && filepath.Base(canonical) == swmPartName(index)
+}
+
+func splitPartSized(size, policy uint64) bool {
+	return size != 0 && size <= policy && size < maxFATFileSize
+}
+
+// validateSplitTotal rejects obviously truncated or explosively large output
+// sets. Split WIMs repeat small metadata, so substantial variance is allowed.
+func validateSplitTotal(total uint64, partCount int, sourceSize uint64) error {
 	minimum := sourceSize - sourceSize/4
 	maximum := sourceSize + sourceSize/4
-	if uint64(len(parts)) > (math.MaxUint64-maximum)/(1<<20) {
+	if uint64(partCount) > (math.MaxUint64-maximum)/(1<<20) {
 		return fmt.Errorf("%w: split overhead overflow", ErrVerification)
 	}
-	maximum += uint64(len(parts)) * (1 << 20)
+	maximum += uint64(partCount) * (1 << 20)
 	if total < minimum || total > maximum {
 		return fmt.Errorf("%w: unreasonable split size %d for source %d", ErrVerification, total, sourceSize)
 	}

@@ -181,7 +181,7 @@ func TestWindowsInstallerRejectsMissingBundledLibraryBeforeUnmount(t *testing.T)
 type availabilityFailingSplitter struct{ err error }
 
 func (s *availabilityFailingSplitter) Preflight(context.Context) error { return s.err }
-func (*availabilityFailingSplitter) Split(context.Context, io.Reader, uint64, string, uint64, func(installer.SplitPart) error) error {
+func (*availabilityFailingSplitter) Split(context.Context, installer.SplitRequest, func(installer.SplitPart) error) error {
 	return errors.New("unexpected split")
 }
 
