@@ -369,7 +369,7 @@ func TestNativeOperationsHonorPreCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	a := &winAPI{}
-	if _, err := a.list(ctx); !errors.Is(err, context.Canceled) {
+	if _, _, err := a.list(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("list error=%v", err)
 	}
 	if _, err := a.lockVolumes(ctx, 1); !errors.Is(err, context.Canceled) {
@@ -387,7 +387,7 @@ func TestSystemDiskExtentQueryFailureIsWrapped(t *testing.T) {
 	querySystemDisks = func() (map[uint32]bool, error) {
 		return nil, fmt.Errorf("system volume IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: %w", sentinel)
 	}
-	_, err := (&winAPI{}).list(context.Background())
+	_, _, err := (&winAPI{}).list(context.Background())
 	requireErrorIs(t, err, sentinel)
 	requireErrorContains(t, err, "identify Windows system disk")
 	requireErrorContains(t, err, "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS")
@@ -629,7 +629,7 @@ func TestPnPEnumerationFailureFailsClosed(t *testing.T) {
 	querySystemDisks = func() (map[uint32]bool, error) { return map[uint32]bool{0: true}, nil }
 	sentinel := errors.New("setupapi failed")
 	enumeratePnPDisks = func() (map[uint32]pnpDisk, error) { return map[uint32]pnpDisk{1: {}}, sentinel }
-	_, err := (&winAPI{}).list(context.Background())
+	_, _, err := (&winAPI{}).list(context.Background())
 	if !errors.Is(err, sentinel) || !errors.Is(err, ErrSystemTopologyUnavailable) {
 		t.Fatalf("error=%v", err)
 	}
@@ -642,7 +642,7 @@ func TestListFailsClosedWhenVolumeTopologyUnavailable(t *testing.T) {
 	enumeratePnPDisks = func() (map[uint32]pnpDisk, error) { return map[uint32]pnpDisk{}, nil }
 	sentinel := errors.New("FindFirstVolumeW failed")
 	enumerateVolumes = func() ([]string, error) { return nil, sentinel }
-	_, err := (&winAPI{}).list(context.Background())
+	_, _, err := (&winAPI{}).list(context.Background())
 	if !errors.Is(err, sentinel) || !errors.Is(err, ErrVolumeTopologyUnavailable) {
 		t.Fatalf("error=%v", err)
 	}

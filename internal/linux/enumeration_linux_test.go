@@ -4,6 +4,7 @@ package linux
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 func TestEnumerationFiltersAndMounts(t *testing.T) {
 	t.Run("returns only supported removable devices", func(t *testing.T) {
 		b := newBackendFixture(t)
-		devices, err := b.ListAllowedDevices(context.Background())
+		devices, _, err := b.ListAllowedDevices(context.Background())
 		requireNoError(t, err)
 		requireDevicePaths(t, devices, "sdb", "sdc")
 	})
@@ -41,7 +42,7 @@ func TestEnumerationFiltersAndMounts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBackendFixture(t)
-			all, err := b.list(context.Background())
+			all, _, err := b.list(context.Background())
 			requireNoError(t, err)
 			got := requireIndexedDevice(t, indexDevicesByName(all), tc.disk)
 			if tc.system {
@@ -139,7 +140,40 @@ func assertRejected(t *testing.T, d device.Device, description string) {
 func TestEnumerationFailsClosedWithoutSwapMetadata(t *testing.T) {
 	b := newBackendFixture(t)
 	b.removeSwapMetadata()
-	if _, err := b.ListAllowedDevices(context.Background()); err == nil {
+	if _, _, err := b.ListAllowedDevices(context.Background()); err == nil {
 		t.Fatal("enumeration succeeded without swap metadata")
+	}
+}
+
+// Linux fails the whole scan closed when any block entry is unreadable
+// (readBlockTopology), so the skipped path is reachable only if an entry
+// disappears between that snapshot and its own inspection. The count must
+// therefore stay zero on a healthy tree: partitions must never inflate it.
+func TestEnumerationReportsNoSkipsOnHealthyTree(t *testing.T) {
+	b := newBackendFixture(t)
+	_, skipped, err := b.list(context.Background())
+	requireNoError(t, err)
+	if skipped != 0 {
+		t.Fatalf("skipped = %d, want 0; partitions must not be counted", skipped)
+	}
+	_, report, err := b.ListAllowedDevices(context.Background())
+	requireNoError(t, err)
+	if report.Skipped != 0 {
+		t.Fatalf("report.Skipped = %d, want 0", report.Skipped)
+	}
+}
+
+// An entry that vanishes after the topology snapshot is taken must be counted,
+// not silently dropped.
+func TestEnumerationCountsEntryThatVanishesMidScan(t *testing.T) {
+	b := newBackendFixture(t)
+	dir := t.TempDir()
+	requireNoError(t, os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "sdz")))
+	entries, err := os.ReadDir(dir)
+	requireNoError(t, err)
+	d, outcome, err := b.deviceFromEntry(entries[0], enumerationSnapshot{})
+	requireNoError(t, err)
+	if outcome != entrySkipped {
+		t.Fatalf("outcome = %v, want entrySkipped (device %+v)", outcome, d)
 	}
 }

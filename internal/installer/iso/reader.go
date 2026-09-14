@@ -155,35 +155,40 @@ func (r *Reader) readISO9660() ([]Entry, bool, error) {
 	return all, found, nil
 }
 
-func (r *Reader) readISODescriptor(sector uint64) (entries []Entry, joliet, usable, stop bool, err error) {
+// readISODescriptor returns the descriptor's entries and whether it is Joliet,
+// usable, and the set terminator, in that order.
+func (r *Reader) readISODescriptor(sector uint64) ([]Entry, bool, bool, bool, error) {
 	b, err := r.sector(sector)
 	if err != nil {
 		return nil, false, false, false, err
 	}
-	joliet, usable, stop = classifyVolumeDescriptor(b)
+	joliet, usable, stop := classifyVolumeDescriptor(b)
 	if !usable {
 		return nil, joliet, false, stop, nil
 	}
-	entries, err = r.walkVolumeDescriptor(b, joliet)
+	entries, err := r.walkVolumeDescriptor(b, joliet)
 	return entries, joliet, true, false, err
 }
 
-func classifyVolumeDescriptor(b []byte) (joliet, usable, stop bool) {
+// classifyVolumeDescriptor reports whether b is Joliet, usable, and the set
+// terminator, in that order.
+func classifyVolumeDescriptor(b []byte) (bool, bool, bool) {
 	if !isVolumeDescriptor(b) {
 		return false, false, false
 	}
 	if b[0] == 255 {
 		return false, false, true
 	}
-	joliet, usable = usableVolumeDescriptor(b)
+	joliet, usable := usableVolumeDescriptor(b)
 	return joliet, usable, false
 }
 
 func isVolumeDescriptor(b []byte) bool { return string(b[1:6]) == "CD001" }
 
 // usableVolumeDescriptor reports whether b is a primary descriptor or a
-// Joliet supplementary descriptor (UCS-2 escape sequence), and which.
-func usableVolumeDescriptor(b []byte) (joliet, usable bool) {
+// Joliet supplementary descriptor (UCS-2 escape sequence), and which. The
+// results are joliet then usable.
+func usableVolumeDescriptor(b []byte) (bool, bool) {
 	if b[0] == 1 {
 		return false, true
 	}
@@ -422,14 +427,15 @@ type udfFID struct {
 // dropping deleted entries and parent links (flag bits 2 and 3).
 func parseUDFFileIdentifiers(data []byte) ([]udfFID, error) {
 	var out []udfFID
-	for pos := 0; pos+38 <= len(data); {
+	pos := 0
+	for pos+38 <= len(data) {
 		if binary.LittleEndian.Uint16(data[pos:pos+2]) != 257 {
 			return nil, invalid("malformed file identifier")
 		}
 		flags := data[pos+18]
 		nameLen := int(data[pos+19])
 		implLen := int(binary.LittleEndian.Uint16(data[pos+36 : pos+38]))
-		n := (38 + implLen + nameLen + 3) &^ 3
+		n := (38 + implLen + nameLen + 3) / 4 * 4
 		if n <= 0 || pos+n > len(data) {
 			return nil, invalid("truncated file identifier")
 		}
@@ -622,7 +628,8 @@ func (w *isoWalker) addRecords(records [][]byte, prefix string, depth int) error
 // marks sector padding; the next record begins at the following sector.
 func isoDirectoryRecords(b []byte) ([][]byte, error) {
 	var out [][]byte
-	for pos := 0; pos < len(b); {
+	pos := 0
+	for pos < len(b) {
 		n := int(b[pos])
 		if n == 0 {
 			pos = ((pos / int(sectorSize)) + 1) * int(sectorSize)

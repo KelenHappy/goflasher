@@ -16,6 +16,7 @@ import (
 
 type fakeManager struct {
 	current          disk.Disk
+	skipped          int
 	unmounts, ejects int
 }
 
@@ -71,11 +72,11 @@ func TestRawOpenBindsFDToAuthorizedDarwinDisk(t *testing.T) {
 	}
 }
 
-func (f *fakeManager) List(context.Context) ([]disk.Disk, error) {
+func (f *fakeManager) List(context.Context) ([]disk.Disk, int, error) {
 	if f.current.ID == "" {
-		return nil, nil
+		return nil, f.skipped, nil
 	}
-	return []disk.Disk{f.current}, nil
+	return []disk.Disk{f.current}, f.skipped, nil
 }
 func (f *fakeManager) Refresh(_ context.Context, id string) (disk.Disk, error) {
 	if id != f.current.ID || id == "" {
@@ -100,7 +101,7 @@ func safeDisk() disk.Disk {
 func TestBackendDelegatesPolicyToManager(t *testing.T) {
 	m := &fakeManager{current: safeDisk()}
 	b := NewBackendWithManager(m)
-	list, err := b.ListAllowedDevices(context.Background())
+	list, _, err := b.ListAllowedDevices(context.Background())
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list=%+v err=%v", list, err)
 	}
@@ -198,5 +199,19 @@ func requireAccessModes(t *testing.T, flags []int, expected ...int) {
 		if flag&syscall.O_ACCMODE != expected[index] {
 			t.Fatalf("open flags=%#v, want access modes %#v", flags, expected)
 		}
+	}
+}
+
+// A disk whose registry identity cannot be read is never exposed, so the
+// skipped count must survive the hop from disk.Manager to device.ScanReport.
+func TestSkippedDisksReachScanReport(t *testing.T) {
+	m := &fakeManager{current: safeDisk(), skipped: 3}
+	b := NewBackendWithManager(m)
+	_, report, err := b.ListAllowedDevices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Skipped != 3 {
+		t.Fatalf("report.Skipped = %d, want 3", report.Skipped)
 	}
 }

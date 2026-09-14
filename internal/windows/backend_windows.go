@@ -43,7 +43,7 @@ type diskRecord struct {
 }
 
 type nativeAPI interface {
-	list(context.Context) ([]diskRecord, error)
+	list(context.Context) ([]diskRecord, int, error)
 	lockVolumes(context.Context, uint32) (volumeLocks, error)
 	openDisk(context.Context, diskRecord, bool) (nativeFile, error)
 	eject(context.Context, diskRecord) error
@@ -123,23 +123,23 @@ func isPhysicalTransport(transport string) bool {
 		!strings.EqualFold(transport, "filebackedvirtual")
 }
 
-func (b *Backend) records(ctx context.Context) ([]diskRecord, error) {
+func (b *Backend) records(ctx context.Context) ([]diskRecord, int, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rs, err := b.native().list(ctx)
+	rs, skipped, err := b.native().list(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("enumerate Windows disks: %w", err)
+		return nil, 0, fmt.Errorf("enumerate Windows disks: %w", err)
 	}
 	for i := range rs {
 		classify(&rs[i])
 	}
-	return rs, nil
+	return rs, skipped, nil
 }
-func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
-	rs, err := b.records(ctx)
+func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, device.ScanReport, error) {
+	rs, skipped, err := b.records(ctx)
 	if err != nil {
-		return nil, err
+		return nil, device.ScanReport{}, err
 	}
 	var out []device.Device
 	for _, r := range rs {
@@ -147,10 +147,10 @@ func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, erro
 			out = append(out, r.Device)
 		}
 	}
-	return out, nil
+	return out, device.ScanReport{Skipped: skipped}, nil
 }
 func (b *Backend) record(ctx context.Context, id string) (diskRecord, error) {
-	rs, err := b.records(ctx)
+	rs, _, err := b.records(ctx)
 	if err != nil {
 		return diskRecord{}, err
 	}

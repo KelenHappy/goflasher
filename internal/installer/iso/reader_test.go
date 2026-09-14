@@ -141,7 +141,7 @@ func oneFileUDF() []byte {
 	fsd := tag(270, 256)
 	binary.LittleEndian.PutUint32(fsd[404:], 1)
 	name := append([]byte{8}, []byte("BOOTMGR")...)
-	fidLen := (38 + len(name) + 3) &^ 3
+	fidLen := (38 + len(name) + 3) / 4 * 4
 	root := tag(271, 261)
 	root[27] = 4
 	binary.LittleEndian.PutUint64(root[56:], uint64(fidLen))

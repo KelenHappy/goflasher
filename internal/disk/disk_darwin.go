@@ -16,7 +16,7 @@ import (
 const darwinOperationTimeout = 2 * time.Minute
 
 type darwinProbe interface {
-	List(context.Context) ([]darwinapi.ProbeResult, error)
+	List(context.Context) ([]darwinapi.ProbeResult, int, error)
 	Unmount(context.Context, string) error
 	Eject(context.Context, string) error
 }
@@ -69,13 +69,15 @@ func firstNonempty(values ...string) string {
 	return ""
 }
 
-func (m *darwinManager) List(ctx context.Context) ([]Disk, error) {
+// List reports disks skipped for an unreadable identity. Probes dropped by
+// probeDisk are excluded by policy, not by failure, and are not counted.
+func (m *darwinManager) List(ctx context.Context) ([]Disk, int, error) {
 	if m.openErr != nil || m.probe == nil {
-		return nil, fmt.Errorf("open native Darwin disk manager: %w", errors.Join(ErrUnsupported, m.openErr))
+		return nil, 0, fmt.Errorf("open native Darwin disk manager: %w", errors.Join(ErrUnsupported, m.openErr))
 	}
-	probes, err := m.probe.List(ctx)
+	probes, skipped, err := m.probe.List(ctx)
 	if err != nil {
-		return nil, mapDarwinError(err)
+		return nil, 0, mapDarwinError(err)
 	}
 	out := make([]Disk, 0, len(probes))
 	for _, p := range probes {
@@ -83,11 +85,11 @@ func (m *darwinManager) List(ctx context.Context) ([]Disk, error) {
 			out = append(out, d)
 		}
 	}
-	return out, nil
+	return out, skipped, nil
 }
 
 func (m *darwinManager) Refresh(ctx context.Context, id string) (Disk, error) {
-	all, err := m.List(ctx)
+	all, _, err := m.List(ctx)
 	if err != nil {
 		return Disk{}, err
 	}

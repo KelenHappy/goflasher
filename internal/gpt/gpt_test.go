@@ -30,40 +30,63 @@ func TestBuildAndWriteGPT(t *testing.T) {
 	if err := l.WriteTo(sliceWriterAt(b)); err != nil {
 		t.Fatal(err)
 	}
-	mbr := b[:512]
+	primary, backup := b[512:1024], b[(total-1)*512:]
+	t.Run("mbr", func(t *testing.T) { checkProtectiveMBR(t, b[:512]) })
+	t.Run("primary", func(t *testing.T) { checkHeader(t, primary, 1, total-1) })
+	t.Run("backup", func(t *testing.T) { checkHeader(t, backup, total-1, 1) })
+	t.Run("entries", func(t *testing.T) { checkEntryArrays(t, b, l, primary, backup) })
+}
+
+func checkProtectiveMBR(t *testing.T, mbr []byte) {
+	t.Helper()
 	if mbr[446] != 0 || mbr[450] != 0xee || binary.LittleEndian.Uint32(mbr[454:458]) != 1 || mbr[510] != 0x55 || mbr[511] != 0xaa {
 		t.Fatalf("protective MBR=%x", mbr[446:462])
 	}
-	for _, v := range mbr[:446] {
-		if v != 0 {
-			t.Fatal("legacy bootstrap code present")
-		}
-	}
-	primary := b[512:1024]
-	backup := b[(total-1)*512 : total*512]
-	checkHeader(t, primary, 1, total-1)
-	checkHeader(t, backup, total-1, 1)
-	pa := b[l.PrimaryEntriesLBA*512 : l.PrimaryEntriesLBA*512+uint64(EntryCount*EntrySize)]
-	ba := b[l.BackupEntriesLBA*512 : l.BackupEntriesLBA*512+uint64(EntryCount*EntrySize)]
+	assertZero(t, mbr[:446], "legacy bootstrap code present")
+}
+
+func checkEntryArrays(t *testing.T, b []byte, l *Layout, primary, backup []byte) {
+	t.Helper()
+	const arrayLen = uint64(EntryCount * EntrySize)
+	pa := b[l.PrimaryEntriesLBA*512:][:arrayLen]
+	ba := b[l.BackupEntriesLBA*512:][:arrayLen]
 	if !bytes.Equal(pa, ba) {
 		t.Fatal("entry arrays differ")
 	}
-	if binary.LittleEndian.Uint32(primary[88:92]) != crc32.ChecksumIEEE(pa) || binary.LittleEndian.Uint32(backup[88:92]) != crc32.ChecksumIEEE(ba) {
+	if crc := crc32.ChecksumIEEE(pa); binary.LittleEndian.Uint32(primary[88:92]) != crc || binary.LittleEndian.Uint32(backup[88:92]) != crc {
 		t.Fatal("entry CRC mismatch")
 	}
 	if !bytes.Equal(pa[:16], EFITypeGUID.MarshalBinary()) {
 		t.Fatalf("partition type=%x", pa[:16])
 	}
-	for _, v := range pa[EntrySize:] {
-		if v != 0 {
-			t.Fatal("unused entry nonzero")
-		}
+	assertZero(t, pa[EntrySize:], "unused entry nonzero")
+}
+
+func assertZero(t *testing.T, b []byte, msg string) {
+	t.Helper()
+	if bytes.ContainsFunc(b, func(r rune) bool { return r != 0 }) {
+		t.Fatal(msg)
 	}
 }
+
 func checkHeader(t *testing.T, h []byte, current, alternate uint64) {
 	t.Helper()
-	if string(h[:8]) != "EFI PART" || binary.LittleEndian.Uint64(h[24:32]) != current || binary.LittleEndian.Uint64(h[32:40]) != alternate || binary.LittleEndian.Uint32(h[80:84]) != EntryCount || binary.LittleEndian.Uint32(h[84:88]) != EntrySize {
-		t.Fatal("header fields invalid")
+	if string(h[:8]) != "EFI PART" {
+		t.Fatalf("signature=%q", h[:8])
+	}
+	fields := []struct {
+		name      string
+		got, want uint64
+	}{
+		{"current", binary.LittleEndian.Uint64(h[24:32]), current},
+		{"alternate", binary.LittleEndian.Uint64(h[32:40]), alternate},
+		{"entry count", uint64(binary.LittleEndian.Uint32(h[80:84])), uint64(EntryCount)},
+		{"entry size", uint64(binary.LittleEndian.Uint32(h[84:88])), uint64(EntrySize)},
+	}
+	for _, f := range fields {
+		if f.got != f.want {
+			t.Fatalf("header %s=%d want %d", f.name, f.got, f.want)
+		}
 	}
 	n := binary.LittleEndian.Uint32(h[12:16])
 	c := append([]byte(nil), h[:n]...)
@@ -110,22 +133,31 @@ func TestPartitionWriterAtIsBoundedAndAtomicOnRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, x := range []struct {
-		off int64
-		n   int
-	}{{-1, 1}, {0, 2048*512 + 1}, {2048 * 512, 1}, {math.MaxInt64, 1}} {
-		if n, err := w.WriteAt(make([]byte, x.n), x.off); err == nil || n != 0 {
-			t.Fatalf("write=(%d,%v)", n, err)
+	t.Run("rejects", func(t *testing.T) {
+		for _, x := range []struct {
+			off int64
+			n   int
+		}{{-1, 1}, {0, 2048*512 + 1}, {2048 * 512, 1}, {math.MaxInt64, 1}} {
+			assertWriteRejected(t, w, x.off, x.n)
 		}
-	}
-	if s.calls != 0 {
-		t.Fatalf("calls=%d", s.calls)
-	}
-	if n, err := w.WriteAt([]byte("ok"), 7); err != nil || n != 2 {
-		t.Fatalf("valid=(%d,%v)", n, err)
-	}
-	if s.off != 2048*512+7 {
-		t.Fatalf("offset=%d", s.off)
+		if s.calls != 0 {
+			t.Fatalf("calls=%d", s.calls)
+		}
+	})
+	t.Run("translates", func(t *testing.T) {
+		if n, err := w.WriteAt([]byte("ok"), 7); err != nil || n != 2 {
+			t.Fatalf("valid=(%d,%v)", n, err)
+		}
+		if s.off != 2048*512+7 {
+			t.Fatalf("offset=%d", s.off)
+		}
+	})
+}
+
+func assertWriteRejected(t *testing.T, w io.WriterAt, off int64, n int) {
+	t.Helper()
+	if got, err := w.WriteAt(make([]byte, n), off); err == nil || got != 0 {
+		t.Fatalf("WriteAt(len=%d, off=%d)=(%d,%v) want rejection", n, off, got, err)
 	}
 }
 

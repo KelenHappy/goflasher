@@ -143,14 +143,14 @@ type orderedScanBackend struct {
 	next    int
 }
 
-func (b *orderedScanBackend) ListAllowedDevices(context.Context) ([]device.Device, error) {
+func (b *orderedScanBackend) ListAllowedDevices(context.Context) ([]device.Device, device.ScanReport, error) {
 	b.mu.Lock()
 	r := b.results[b.next]
 	b.next++
 	b.mu.Unlock()
 	close(r.started)
 	<-r.release
-	return r.devices, nil
+	return r.devices, device.ScanReport{}, nil
 }
 
 func TestRefreshKeepsNewestResult(t *testing.T) {

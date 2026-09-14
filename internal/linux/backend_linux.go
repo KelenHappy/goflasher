@@ -49,10 +49,10 @@ func NewBackend() *Backend {
 	return &Backend{SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev", UdevDataRoot: "/run/udev/data", helper: newCommandHelper(), udisks: udisks.New()}
 }
 
-func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
-	all, err := b.list(ctx)
+func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, device.ScanReport, error) {
+	all, skipped, err := b.list(ctx)
 	if err != nil {
-		return nil, err
+		return nil, device.ScanReport{}, err
 	}
 	allowed := make([]device.Device, 0, len(all))
 	for _, d := range all {
@@ -60,28 +60,34 @@ func (b *Backend) ListAllowedDevices(ctx context.Context) ([]device.Device, erro
 			allowed = append(allowed, d)
 		}
 	}
-	return allowed, nil
+	return allowed, device.ScanReport{Skipped: skipped}, nil
 }
 
-func (b *Backend) list(ctx context.Context) ([]device.Device, error) {
+// list returns every enumerated device plus the number of whole disks that
+// were present but could not be inspected.
+func (b *Backend) list(ctx context.Context) ([]device.Device, int, error) {
 	snapshot, err := b.enumerationSnapshot()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	result := make([]device.Device, 0, len(snapshot.entries))
+	skipped := 0
 	for _, entry := range snapshot.entries {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		d, ok, err := b.deviceFromEntry(entry, snapshot)
+		d, outcome, err := b.deviceFromEntry(entry, snapshot)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		if ok {
+		switch outcome {
+		case entryDevice:
 			result = append(result, d)
+		case entrySkipped:
+			skipped++
 		}
 	}
-	return result, nil
+	return result, skipped, nil
 }
 
 type enumerationSnapshot struct {
@@ -111,30 +117,47 @@ func (b *Backend) enumerationSnapshot() (enumerationSnapshot, error) {
 	return enumerationSnapshot{entries: entries, mounts: mounts, swaps: swaps, topology: topology}, nil
 }
 
-func (b *Backend) deviceFromEntry(entry os.DirEntry, snapshot enumerationSnapshot) (device.Device, bool, error) {
+// entryOutcome distinguishes a block entry that was never a candidate from one
+// that was, but could not be inspected. Only the latter is worth reporting to
+// the user: partitions are filtered structurally on every healthy system.
+type entryOutcome int
+
+const (
+	// entryDevice means the entry yielded a usable device.
+	entryDevice entryOutcome = iota
+	// entryNotADisk means the entry is a partition, never a whole-disk target.
+	entryNotADisk
+	// entrySkipped means the entry is a whole disk whose sysfs identity could
+	// not be read, so it was omitted from the listing. readBlockTopology
+	// already fails the whole scan for an unreadable entry, so this is reached
+	// only when a device disappears between that snapshot and this inspection.
+	entrySkipped
+)
+
+func (b *Backend) deviceFromEntry(entry os.DirEntry, snapshot enumerationSnapshot) (device.Device, entryOutcome, error) {
 	name := entry.Name()
 	link := filepath.Join(b.SysClassBlock, name)
 	if exists(filepath.Join(link, "partition")) {
-		return device.Device{}, false, nil
+		return device.Device{}, entryNotADisk, nil
 	}
 	real, err := filepath.EvalSymlinks(link)
 	if err != nil {
-		return device.Device{}, false, nil
+		return device.Device{}, entrySkipped, nil
 	}
 	major, minor, err := readDeviceNumber(filepath.Join(link, "dev"))
 	if err != nil {
-		return device.Device{}, false, nil
+		return device.Device{}, entrySkipped, nil
 	}
 	properties := b.udev(major, minor)
 	candidate := sysfsDevice{name: name, link: link, real: real, major: major, minor: minor, properties: properties}
 	d := b.basicDevice(candidate)
 	d.PartitionCount = countPartitions(snapshot.entries, name, b.SysClassBlock)
 	if err := b.populateSafetyMetadata(&d, candidate, snapshot); err != nil {
-		return device.Device{}, false, err
+		return device.Device{}, entrySkipped, err
 	}
 	b.classifyDevice(&d, link, real, properties)
 	d.ID = first(d.Serial, d.WWN, fmt.Sprintf("%d:%d@%s", major, minor, real))
-	return d, true, nil
+	return d, entryDevice, nil
 }
 
 type sysfsDevice struct {
@@ -290,7 +313,7 @@ func positivelyIdentified(flash, cardReader, smallUSBStorage bool) bool {
 }
 
 func (b *Backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {
-	all, err := b.list(ctx)
+	all, _, err := b.list(ctx)
 	if err != nil {
 		return device.Device{}, err
 	}

@@ -83,14 +83,7 @@ func TestPhase1CoreFoundationConversions(t *testing.T) {
 }
 
 func TestPhase1DiskArbitrationCallback(t *testing.T) {
-	f, err := OpenFrameworks()
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := f.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, s := openTestSession(t)
 	defer s.Close()
 	s.diagnostic = func(d descriptionDiagnostics) {
 		t.Logf("DADiskRef=%#x DADiskGetBSDName=%q description=%#x description CFTypeID=%d CFDictionary type ID=%d dictionary count=%d", d.Disk, d.BSDName, d.Description, d.DescriptionTypeID, d.DictionaryTypeID, d.DictionaryCount)
@@ -111,37 +104,23 @@ func TestPhase1DiskArbitrationCallback(t *testing.T) {
 }
 
 func TestPhase1CallbackCancellation(t *testing.T) {
-	f, err := OpenFrameworks()
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := f.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = s.WaitForDisk(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error=%v", err)
-	}
+	assertWaitForDiskError(t, ctx, context.Canceled)
 }
 
 func TestPhase1CallbackExpiredDeadline(t *testing.T) {
-	f, err := OpenFrameworks()
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := f.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	_, err = s.WaitForDisk(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error=%v", err)
+	assertWaitForDiskError(t, ctx, context.DeadlineExceeded)
+}
+
+// assertWaitForDiskError opens a session and checks that WaitForDisk fails with want.
+func assertWaitForDiskError(t *testing.T, ctx context.Context, want error) {
+	t.Helper()
+	_, s := openTestSession(t)
+	defer s.Close()
+	if _, err := s.WaitForDisk(ctx); !errors.Is(err, want) {
+		t.Fatalf("error=%v, want %v", err, want)
 	}
 }

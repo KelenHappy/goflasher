@@ -27,8 +27,8 @@ type fileBackend struct {
 	unmounted, flushed, ejected bool
 }
 
-func (f *fileBackend) ListAllowedDevices(context.Context) ([]device.Device, error) {
-	return []device.Device{f.d}, nil
+func (f *fileBackend) ListAllowedDevices(context.Context) ([]device.Device, device.ScanReport, error) {
+	return []device.Device{f.d}, device.ScanReport{}, nil
 }
 func (f *fileBackend) RefreshDevice(context.Context, string) (device.Device, error) { return f.d, nil }
 func (f *fileBackend) Unmount(context.Context, device.Device) error                 { f.unmounted = true; return nil }
@@ -296,8 +296,8 @@ type failureBackend struct {
 	writer, reader                    *recordingWriteCloser
 }
 
-func (b *failureBackend) ListAllowedDevices(context.Context) ([]device.Device, error) {
-	return nil, nil
+func (b *failureBackend) ListAllowedDevices(context.Context) ([]device.Device, device.ScanReport, error) {
+	return nil, device.ScanReport{}, nil
 }
 func (b *failureBackend) RefreshDevice(context.Context, string) (device.Device, error) {
 	return device.Device{}, nil

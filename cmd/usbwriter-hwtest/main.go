@@ -77,9 +77,9 @@ func main() {
 	approved := readAllowlist(options.allowlistPath)
 	backend := newBackend()
 	ctx := context.Background()
-	devices, err := backend.ListAllowedDevices(ctx)
+	devices, report, err := backend.ListAllowedDevices(ctx)
 	fatal(err)
-	printInventory(devices, approved)
+	printInventory(devices, report, approved)
 	if options.testCase == "inventory" {
 		return
 	}
@@ -250,10 +250,15 @@ func matchesAllowedDevice(d device.Device, allowed allowedDevice) bool {
 func matchesOptionalSerial(actual, allowed string) bool {
 	return allowed == "" || actual == allowed
 }
-func printInventory(devices []device.Device, a allowlist) {
+func printInventory(devices []device.Device, report device.ScanReport, a allowlist) {
 	for _, d := range devices {
 		_, ok := exactDevice(devices, approvedOrEmpty(a, d.ID))
 		fmt.Printf("allowed=%v id=%q path=%q number=%d:%d model=%q serial=%q capacity=%d mounted=%v\n", ok, d.ID, d.Path, d.Major, d.Minor, d.Model, d.Serial, d.Size, d.Mounted)
+	}
+	// An uninspectable device is invisible in the listing above; report the
+	// count so a missing target is distinguishable from an absent one.
+	if report.Skipped > 0 {
+		fmt.Printf("skipped=%d devices present but not inspectable\n", report.Skipped)
 	}
 }
 func approvedOrEmpty(a allowlist, id string) allowedDevice {

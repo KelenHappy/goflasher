@@ -43,7 +43,8 @@ func (f *imageFileFilter) Matches(uri fyne.URI) bool {
 
 // openImage uses only Fyne's bundled chooser on Linux. Image selection does not
 // call XDG Desktop Portal, D-Bus, kdialog, Zenity, Dolphin, or Nautilus.
-func openImage(parent fyne.Window, title, acceptLabel, dismissLabel, filterName string, done func(string, error)) {
+// labels.Filter is unused because Fyne's file filter has no display name.
+func openImage(parent fyne.Window, labels imagePickerLabels, done func(string, error)) {
 	chooser := dialog.NewFileOpen(func(file fyne.URIReadCloser, err error) {
 		if err != nil || file == nil {
 			done("", err)
@@ -58,16 +59,15 @@ func openImage(parent fyne.Window, title, acceptLabel, dismissLabel, filterName 
 		done(path, nil)
 	}, parent)
 	chooser.SetFilter(&imageFileFilter{suffixes: supportedImageSuffixes})
-	chooser.SetTitleText(title)
-	chooser.SetConfirmText(acceptLabel)
-	chooser.SetDismissText(dismissLabel)
+	chooser.SetTitleText(labels.Title)
+	chooser.SetConfirmText(labels.Accept)
+	chooser.SetDismissText(labels.Dismiss)
 	desiredSize := fyne.NewSize(760, 520)
 	// Fyne 2.8 initializes FileDialog's internal widget tree in Show. Calling
 	// Resize first dereferences an uninitialized dialog in FileDialog.MinSize.
 	chooser.Show()
 	chooser.Resize(desiredSize)
 	keepFileDialogSized(chooser, parent, desiredSize)
-	_ = filterName // Fyne's extension filter does not expose a display name.
 }
 
 // keepFileDialogSized works around Fyne 2.8's modal overlay retaining the

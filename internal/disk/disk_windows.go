@@ -47,16 +47,16 @@ func physicalNumber(path string) (uint32, error) {
 	}
 	return uint32(n), nil
 }
-func (m *windowsManager) List(ctx context.Context) ([]Disk, error) {
-	ds, err := m.backend.ListAllowedDevices(ctx)
+func (m *windowsManager) List(ctx context.Context) ([]Disk, int, error) {
+	ds, report, err := m.backend.ListAllowedDevices(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := make([]Disk, len(ds))
 	for i, d := range ds {
 		out[i] = fromDevice(d)
 	}
-	return out, nil
+	return out, report.Skipped, nil
 }
 func (m *windowsManager) Refresh(ctx context.Context, id string) (Disk, error) {
 	d, err := m.backend.RefreshDevice(ctx, id)

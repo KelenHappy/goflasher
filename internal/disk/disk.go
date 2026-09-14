@@ -83,7 +83,10 @@ func identityOf(d Disk) diskIdentity {
 // operation accepts only common types; native objects remain private to the
 // file selected by the platform build tag.
 type Manager interface {
-	List(context.Context) ([]Disk, error)
+	// List returns the managed disks plus the number of disks that were
+	// present but could not be identified, so callers can tell an unreadable
+	// disk from an absent one.
+	List(context.Context) ([]Disk, int, error)
 	Refresh(context.Context, string) (Disk, error)
 	Unmount(context.Context, Disk) error
 	Eject(context.Context, Disk) error

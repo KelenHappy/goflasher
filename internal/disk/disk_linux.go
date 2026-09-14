@@ -39,46 +39,60 @@ func NewManager() Manager {
 	}
 }
 
-func (m *linuxManager) List(ctx context.Context) ([]Disk, error) {
+// entryOutcome separates entries that were never disks from disks that could
+// not be read. Only the latter is reported: partitions are filtered on every
+// healthy system and would drown the count in noise.
+type entryOutcome int
+
+const (
+	entryDisk entryOutcome = iota
+	entryNotADisk
+	entrySkipped
+)
+
+func (m *linuxManager) List(ctx context.Context) ([]Disk, int, error) {
 	entries, err := os.ReadDir(m.sysClassBlock)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	mounts, err := linuxMounts(m.mountInfo)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	swaps, err := linuxSwaps(m.swaps)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	state := linuxDiskState{mounts: mounts, swaps: swaps}
 	result := make([]Disk, 0, len(entries))
+	skipped := 0
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		disk, ok := m.diskFromEntry(entry.Name(), state)
-		if !ok {
-			continue
+		disk, outcome := m.diskFromEntry(entry.Name(), state)
+		switch outcome {
+		case entryDisk:
+			result = append(result, disk)
+		case entrySkipped:
+			skipped++
 		}
-		result = append(result, disk)
 	}
-	return result, nil
+	return result, skipped, nil
 }
 
-func (m *linuxManager) diskFromEntry(name string, state linuxDiskState) (Disk, bool) {
+func (m *linuxManager) diskFromEntry(name string, state linuxDiskState) (Disk, entryOutcome) {
 	class := filepath.Join(m.sysClassBlock, name)
 	if pathExists(filepath.Join(class, "partition")) {
-		return Disk{}, false
+		return Disk{}, entryNotADisk
 	}
 	real, err := filepath.EvalSymlinks(class)
 	if err != nil {
-		return Disk{}, false
+		return Disk{}, entrySkipped
 	}
 	major, minor, ok := linuxDeviceNumber(readText(filepath.Join(class, "dev")))
 	if !ok {
-		return Disk{}, false
+		return Disk{}, entrySkipped
 	}
 	disk := m.readDisk(class, name, real)
 	disk.MountPoints = m.diskMountPoints(name, [2]uint64{major, minor}, state.mounts)
@@ -87,7 +101,7 @@ func (m *linuxManager) diskFromEntry(name string, state linuxDiskState) (Disk, b
 	if disk.ID == "" {
 		disk.ID = fmt.Sprintf("%d:%d@%s", major, minor, real)
 	}
-	return disk, true
+	return disk, entryDisk
 }
 
 func (m *linuxManager) readDisk(class, name, real string) Disk {
@@ -132,7 +146,7 @@ func (m *linuxManager) diskUsedForSwap(name string, swaps map[string]bool) bool 
 }
 
 func (m *linuxManager) Refresh(ctx context.Context, id string) (Disk, error) {
-	disks, err := m.List(ctx)
+	disks, _, err := m.List(ctx)
 	if err != nil {
 		return Disk{}, err
 	}
@@ -329,8 +343,7 @@ func linuxParent(root string, number [2]uint64) string {
 	}
 	for _, entry := range entries {
 		class := filepath.Join(root, entry.Name())
-		major, minor, ok := linuxDeviceNumber(readText(filepath.Join(class, "dev")))
-		if !ok || major != number[0] || minor != number[1] {
+		if !linuxClassHasNumber(class, number) {
 			continue
 		}
 		if !pathExists(filepath.Join(class, "partition")) {
@@ -342,6 +355,13 @@ func linuxParent(root string, number [2]uint64) string {
 		}
 	}
 	return ""
+}
+
+// linuxClassHasNumber reports whether the sysfs block class entry's dev file
+// holds the given major:minor pair.
+func linuxClassHasNumber(class string, number [2]uint64) bool {
+	major, minor, ok := linuxDeviceNumber(readText(filepath.Join(class, "dev")))
+	return ok && [2]uint64{major, minor} == number
 }
 
 func linuxWholeName(root, name string) string {

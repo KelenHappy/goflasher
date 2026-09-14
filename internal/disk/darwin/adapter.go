@@ -29,23 +29,28 @@ type Adapter interface {
 	Eject(context.Context, string) error
 }
 
-func (a *NativeAdapter) List(ctx context.Context) ([]ProbeResult, error) {
+// List returns one ProbeResult per whole disk, plus the number of whole disks
+// whose registry identity could not be read. Those are never exposed, so the
+// count is the only evidence the caller has that they existed.
+func (a *NativeAdapter) List(ctx context.Context) ([]ProbeResult, int, error) {
 	s, e := a.frameworks.NewSession()
 	if e != nil {
-		return nil, e
+		return nil, 0, e
 	}
 	defer s.Close()
 	disks, e := s.ListDisks(ctx)
 	if e != nil {
-		return nil, e
+		return nil, 0, e
 	}
 	out := make([]ProbeResult, 0, len(disks))
+	skipped := 0
 	for _, d := range disks {
 		if !d.Whole {
 			continue
 		}
 		i, err := a.frameworks.RegistryIdentity(d.BSDName)
 		if err != nil {
+			skipped++
 			continue
 		} // incomplete identity is never exposed.
 		r := result(d, i)
@@ -56,7 +61,7 @@ func (a *NativeAdapter) List(ctx context.Context) ([]ProbeResult, error) {
 		}
 		out = append(out, r)
 	}
-	return out, nil
+	return out, skipped, nil
 }
 
 type NativeAdapter struct{ frameworks *native.Frameworks }
@@ -72,7 +77,7 @@ func result(d native.DiskDescription, i native.RegistryIdentity) ProbeResult {
 	return ProbeResult{BSDName: d.BSDName, MediaName: d.MediaName, Size: d.Size, Whole: d.Whole, Internal: d.Internal, Ejectable: d.Ejectable, Removable: d.Removable, RegistryID: i.EntryID, RegistryPath: i.Path, Vendor: i.Vendor, Product: i.Product, MediaID: i.MediaID, TransportSerial: i.TransportSerial, USBAncestor: i.USBAncestor}
 }
 func (a *NativeAdapter) Describe(ctx context.Context, bsd string) (ProbeResult, error) {
-	all, e := a.List(ctx)
+	all, _, e := a.List(ctx)
 	if e != nil {
 		return ProbeResult{}, e
 	}

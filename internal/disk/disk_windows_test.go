@@ -54,7 +54,9 @@ func TestWindowsAdapterRoundTripPreservesIdentityEvidence(t *testing.T) {
 
 type locatorBackend struct{ called bool }
 
-func (*locatorBackend) ListAllowedDevices(context.Context) ([]device.Device, error) { return nil, nil }
+func (*locatorBackend) ListAllowedDevices(context.Context) ([]device.Device, device.ScanReport, error) {
+	return nil, device.ScanReport{}, nil
+}
 func (*locatorBackend) RefreshDevice(context.Context, string) (device.Device, error) {
 	return device.Device{}, nil
 }

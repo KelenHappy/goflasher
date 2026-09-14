@@ -142,7 +142,7 @@ func TestMalformedOrCyclicTopologyFailsClosed(t *testing.T) {
 		} else {
 			addFixtureDependency(t, f.Backend, "sdb2", "dm-root")
 		}
-		if _, err := f.ListAllowedDevices(context.Background()); err == nil {
+		if _, _, err := f.ListAllowedDevices(context.Background()); err == nil {
 			t.Fatal("backend accepted unsafe topology")
 		}
 		_, err := mountedOrSystem("sdb", 8, 16, helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot})

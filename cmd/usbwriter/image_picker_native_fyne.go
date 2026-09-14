@@ -8,10 +8,11 @@ import (
 	"github.com/goflasher/goflasher/internal/filepicker"
 )
 
-func openImage(_ fyne.Window, title, acceptLabel, dismissLabel, filterName string, done func(string, error)) {
-	_ = dismissLabel // The operating system owns the native cancel label.
+// openImage ignores labels.Dismiss because the operating system owns the
+// native cancel label.
+func openImage(_ fyne.Window, labels imagePickerLabels, done func(string, error)) {
 	go func() {
-		path, err := filepicker.OpenImage(title, acceptLabel, filterName)
+		path, err := filepicker.OpenImage(labels.Title, labels.Accept, labels.Filter)
 		fyne.Do(func() { done(path, err) })
 	}()
 }

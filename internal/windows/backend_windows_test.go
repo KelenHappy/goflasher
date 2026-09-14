@@ -28,6 +28,7 @@ func (f *fakeFile) Flush() error { f.flushes++; return nil }
 
 type fakeAPI struct {
 	records          []diskRecord
+	skipped          int
 	listErr          error
 	lockErr          error
 	locks            *fakeLocks
@@ -36,8 +37,8 @@ type fakeAPI struct {
 	openWrites       []bool
 }
 
-func (f *fakeAPI) list(context.Context) ([]diskRecord, error) {
-	return append([]diskRecord(nil), f.records...), f.listErr
+func (f *fakeAPI) list(context.Context) ([]diskRecord, int, error) {
+	return append([]diskRecord(nil), f.records...), f.skipped, f.listErr
 }
 func (f *fakeAPI) lockVolumes(context.Context, uint32) (volumeLocks, error) {
 	f.lockCalls++
@@ -74,7 +75,7 @@ func requireNoError(t *testing.T, err error) {
 
 func listedDevice(t *testing.T, b *Backend) device.Device {
 	t.Helper()
-	devices, err := b.ListAllowedDevices(context.Background())
+	devices, _, err := b.ListAllowedDevices(context.Background())
 	requireNoError(t, err)
 	if len(devices) != 1 {
 		t.Fatalf("devices=%v, want one device", devices)
@@ -119,7 +120,7 @@ func TestUSBSystemDiskIsRejected(t *testing.T) {
 func TestSystemDiskQueryErrorFailsEnumeration(t *testing.T) {
 	want := errors.New("system disk query failed")
 	b := &Backend{api: &fakeAPI{listErr: want}, locks: map[string]volumeLocks{}}
-	_, err := b.ListAllowedDevices(context.Background())
+	_, _, err := b.ListAllowedDevices(context.Background())
 	if !errors.Is(err, want) {
 		t.Fatalf("error = %v, want wrapped %v", err, want)
 	}
@@ -180,12 +181,12 @@ func TestCandidateWithoutPersistentIdentityIsHiddenWithDiagnostic(t *testing.T) 
 	r := candidate()
 	r.identity, r.ID, r.Serial, r.WWN = windowsIdentityEvidence{}, "", "", ""
 	b := &Backend{api: &fakeAPI{records: []diskRecord{r}}, locks: map[string]volumeLocks{}}
-	got, err := b.ListAllowedDevices(context.Background())
+	got, _, err := b.ListAllowedDevices(context.Background())
 	requireNoError(t, err)
 	if len(got) != 0 {
 		t.Fatalf("devices=%v, want none", got)
 	}
-	rs, err := b.records(context.Background())
+	rs, _, err := b.records(context.Background())
 	requireNoError(t, err)
 	assertIdentityDiagnostic(t, rs)
 }
@@ -299,5 +300,29 @@ func TestFormatLocksAndRevalidates(t *testing.T) {
 	}
 	if api.lockCalls != 1 || api.locks.closes != 1 {
 		t.Fatalf("lock calls=%d closes=%d", api.lockCalls, api.locks.closes)
+	}
+}
+
+// A disk that fails inspection never becomes a diskRecord, so it carries no
+// RejectReason. The skipped count is the only evidence it was attached.
+func TestSkippedDisksReachScanReport(t *testing.T) {
+	api := &fakeAPI{records: []diskRecord{candidate()}, skipped: 2}
+	b := &Backend{api: api, locks: map[string]volumeLocks{}}
+	devices, report, err := b.ListAllowedDevices(context.Background())
+	requireNoError(t, err)
+	if len(devices) != 1 {
+		t.Fatalf("devices=%v, want one", devices)
+	}
+	if report.Skipped != 2 {
+		t.Fatalf("report.Skipped = %d, want 2", report.Skipped)
+	}
+}
+
+func TestScanReportIsEmptyWhenNothingIsSkipped(t *testing.T) {
+	b := &Backend{api: &fakeAPI{records: []diskRecord{candidate()}}, locks: map[string]volumeLocks{}}
+	_, report, err := b.ListAllowedDevices(context.Background())
+	requireNoError(t, err)
+	if report != (device.ScanReport{}) {
+		t.Fatalf("report = %+v, want zero", report)
 	}
 }

@@ -29,97 +29,160 @@ func (f *fakeUDisks) PowerOff(_ context.Context, device string) error {
 	return f.err
 }
 
-func TestLinuxManagerListsWholeDiskFromSysfs(t *testing.T) {
+// sysfsFixture builds a fake sysfs tree for a single removable USB disk
+// named sdb and returns the class/block directory plus the physical path.
+type sysfsFixture struct {
+	root      string
+	class     string
+	physical  string
+	mountInfo string
+}
+
+func newSysfsFixture(t *testing.T) sysfsFixture {
+	t.Helper()
 	root := t.TempDir()
-	class := filepath.Join(root, "sys", "class", "block")
-	physical := filepath.Join(root, "sys", "devices", "pci", "usb1", "block", "sdb")
-	if err := os.MkdirAll(filepath.Join(physical, "device"), 0755); err != nil {
-		t.Fatal(err)
+	f := sysfsFixture{
+		root:      root,
+		class:     filepath.Join(root, "sys", "class", "block"),
+		physical:  filepath.Join(root, "sys", "devices", "pci", "usb1", "block", "sdb"),
+		mountInfo: filepath.Join(root, "mountinfo"),
 	}
-	for path, value := range map[string]string{
+	mustMkdirAll(t, f.class, filepath.Join(f.physical, "device"))
+	mustWriteFiles(t, f.physical, map[string]string{
 		"dev": "8:16\n", "size": "2048\n", "removable": "1\n",
 		"device/vendor": "Example\n", "device/model": "Flash\n", "device/serial": "SERIAL\n",
-	} {
-		if err := os.WriteFile(filepath.Join(physical, path), []byte(value), 0600); err != nil {
+	})
+	mustSymlink(t, f.physical, filepath.Join(f.class, "sdb"))
+	f.setMountInfo(t, "")
+	return f
+}
+
+// addPartition registers sdb1 with the given device number under the disk.
+func (f sysfsFixture) addPartition(t *testing.T, number string) {
+	t.Helper()
+	partition := filepath.Join(f.physical, "sdb1")
+	mustMkdirAll(t, partition)
+	mustWriteFiles(t, partition, map[string]string{"dev": number + "\n", "partition": "1\n"})
+	mustSymlink(t, partition, filepath.Join(f.class, "sdb1"))
+}
+
+func (f sysfsFixture) setMountInfo(t *testing.T, content string) {
+	t.Helper()
+	if err := os.WriteFile(f.mountInfo, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f sysfsFixture) manager(udisks *fakeUDisks) *linuxManager {
+	m := &linuxManager{sysClassBlock: f.class, mountInfo: f.mountInfo, devRoot: "/dev"}
+	if udisks != nil {
+		m.udisks = udisks
+	}
+	return m
+}
+
+func mustMkdirAll(t *testing.T, directories ...string) {
+	t.Helper()
+	for _, directory := range directories {
+		if err := os.MkdirAll(directory, 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(class, 0755); err != nil {
+}
+
+func mustWriteFiles(t *testing.T, base string, files map[string]string) {
+	t.Helper()
+	for path, value := range files {
+		if err := os.WriteFile(filepath.Join(base, path), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(physical, filepath.Join(class, "sdb")); err != nil {
-		t.Fatal(err)
-	}
-	mountInfo := filepath.Join(root, "mountinfo")
-	if err := os.WriteFile(mountInfo, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	m := &linuxManager{sysClassBlock: class, mountInfo: mountInfo, devRoot: "/dev"}
-	disks, err := m.List(context.Background())
+}
+
+func listSingleDisk(t *testing.T, m *linuxManager) Disk {
+	t.Helper()
+	disks, _, err := m.List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(disks) != 1 {
 		t.Fatalf("disk count = %d, want 1", len(disks))
 	}
-	got := disks[0]
-	if got.ID != "SERIAL" || got.Device != "/dev/sdb" || got.Size != 2048*512 || !got.Removable || !got.External || got.Bus != "usb" {
-		t.Fatalf("unexpected disk: %+v", got)
+	return disks[0]
+}
+
+func TestLinuxManagerListsWholeDiskFromSysfs(t *testing.T) {
+	fixture := newSysfsFixture(t)
+	got := listSingleDisk(t, fixture.manager(nil))
+
+	want := Disk{ID: "SERIAL", Device: "/dev/sdb", Size: 2048 * 512, Removable: true, External: true, Bus: "usb"}
+	checks := []struct {
+		field     string
+		got, want any
+	}{
+		{"ID", got.ID, want.ID},
+		{"Device", got.Device, want.Device},
+		{"Size", got.Size, want.Size},
+		{"Removable", got.Removable, want.Removable},
+		{"External", got.External, want.External},
+		{"Bus", got.Bus, want.Bus},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.field, c.got, c.want)
+		}
 	}
 }
 
 func TestLinuxManagerUnmountsPartitionAndRechecksState(t *testing.T) {
-	root := t.TempDir()
-	class := filepath.Join(root, "class")
-	physical := filepath.Join(root, "devices", "usb1", "block", "sdb")
-	partition := filepath.Join(physical, "sdb1")
-	for _, directory := range []string{filepath.Join(physical, "device"), partition, class} {
-		if err := os.MkdirAll(directory, 0755); err != nil {
-			t.Fatal(err)
-		}
+	fixture := newSysfsFixture(t)
+	fixture.addPartition(t, "8:17")
+	fixture.setMountInfo(t, "36 25 8:17 / /media/usb rw - vfat /dev/sdb1 rw\n")
+	service := &fakeUDisks{mountInfo: fixture.mountInfo}
+	m := fixture.manager(service)
+
+	disk := listSingleDisk(t, m)
+	if !disk.Mounted {
+		t.Fatalf("disk not reported as mounted: %+v", disk)
 	}
-	for path, value := range map[string]string{
-		filepath.Join(physical, "dev"): "8:16\n", filepath.Join(physical, "size"): "2048\n",
-		filepath.Join(physical, "removable"): "1\n", filepath.Join(physical, "device/serial"): "SERIAL\n",
-		filepath.Join(partition, "dev"): "8:17\n", filepath.Join(partition, "partition"): "1\n",
-	} {
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink(physical, filepath.Join(class, "sdb")); err != nil {
+	if err := m.Unmount(context.Background(), disk); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(partition, filepath.Join(class, "sdb1")); err != nil {
-		t.Fatal(err)
+	if len(service.unmounted) != 1 {
+		t.Fatalf("unmounted devices = %q, want exactly one", service.unmounted)
 	}
-	mountInfo := filepath.Join(root, "mountinfo")
-	if err := os.WriteFile(mountInfo, []byte("36 25 8:17 / /media/usb rw - vfat /dev/sdb1 rw\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	service := &fakeUDisks{mountInfo: mountInfo}
-	m := &linuxManager{
-		sysClassBlock: class, mountInfo: mountInfo, devRoot: "/dev",
-		udisks: service,
-	}
-	disks, err := m.List(context.Background())
-	if err != nil || len(disks) != 1 || !disks[0].Mounted {
-		t.Fatalf("List() = %+v, %v", disks, err)
-	}
-	if err := m.Unmount(context.Background(), disks[0]); err != nil {
-		t.Fatal(err)
-	}
-	if len(service.unmounted) != 1 || service.unmounted[0] != "/dev/sdb1" {
-		t.Fatalf("unmounted devices = %q, want /dev/sdb1", service.unmounted)
+	if service.unmounted[0] != "/dev/sdb1" {
+		t.Fatalf("unmounted device = %q, want /dev/sdb1", service.unmounted[0])
 	}
 }
 
 func TestLinuxDeviceNumber(t *testing.T) {
-	major, minor, ok := linuxDeviceNumber("259:12\n")
-	if !ok || major != 259 || minor != 12 {
-		t.Fatalf("linuxDeviceNumber = %d:%d, %v", major, minor, ok)
+	tests := []struct {
+		input        string
+		major, minor uint64
+		ok           bool
+	}{
+		{input: "259:12\n", major: 259, minor: 12, ok: true},
+		{input: "invalid"},
 	}
-	if _, _, ok := linuxDeviceNumber("invalid"); ok {
-		t.Fatal("invalid device number accepted")
+	for _, tc := range tests {
+		major, minor, ok := linuxDeviceNumber(tc.input)
+		if ok != tc.ok {
+			t.Errorf("linuxDeviceNumber(%q) ok = %v, want %v", tc.input, ok, tc.ok)
+			continue
+		}
+		if major != tc.major {
+			t.Errorf("linuxDeviceNumber(%q) major = %d, want %d", tc.input, major, tc.major)
+		}
+		if minor != tc.minor {
+			t.Errorf("linuxDeviceNumber(%q) minor = %d, want %d", tc.input, minor, tc.minor)
+		}
 	}
 }

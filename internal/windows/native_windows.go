@@ -504,43 +504,48 @@ func physicalDrivePath(number uint32) string {
 	return `\\.\PhysicalDrive` + strconv.FormatUint(uint64(number), 10)
 }
 
-// list returns one diskRecord per present PnP disk.
+// list returns one diskRecord per present PnP disk, plus the number of disks
+// that were present but could not be inspected.
 // Enumeration fails closed when safety-related topology is unavailable rather
 // than returning disks whose eligibility could be misclassified. The PnP tree
 // is part of that topology: without it USB attachment would rest on bus type
 // alone, and the disk set itself comes from the PnP disk-interface class.
-func (a *winAPI) list(ctx context.Context) ([]diskRecord, error) {
+func (a *winAPI) list(ctx context.Context) ([]diskRecord, int, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	systems, err := querySystemDisks()
 	if err != nil {
-		return nil, fmt.Errorf("%w: identify Windows system disk: %w", ErrSystemTopologyUnavailable, err)
+		return nil, 0, fmt.Errorf("%w: identify Windows system disk: %w", ErrSystemTopologyUnavailable, err)
 	}
 	pnp, err := enumeratePnPDisks()
 	if err != nil {
-		return nil, fmt.Errorf("%w: enumerate PnP disks: %w", ErrSystemTopologyUnavailable, err)
+		return nil, 0, fmt.Errorf("%w: enumerate PnP disks: %w", ErrSystemTopologyUnavailable, err)
 	}
 	volumes, err := diskVolumeIndex()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	return enumerateDiskRecords(ctx, systems, pnp, volumes)
 }
 
-func enumerateDiskRecords(ctx context.Context, systems map[uint32]bool, pnp map[uint32]pnpDisk, volumes map[uint32][]string) ([]diskRecord, error) {
+// enumerateDiskRecords reports skipped disks separately from listed ones so a
+// disk omitted by inspectDiskNumber stays visible to the user as a count.
+func enumerateDiskRecords(ctx context.Context, systems map[uint32]bool, pnp map[uint32]pnpDisk, volumes map[uint32][]string) ([]diskRecord, int, error) {
 	var out []diskRecord
+	skipped := 0
 	for _, n := range slices.Sorted(maps.Keys(pnp)) {
 		r, found, err := inspectDiskNumber(ctx, n)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if !found {
+			skipped++
 			continue
 		}
 		out = append(out, completeDiskRecord(r, systems[n], pnp[n], len(volumes[n]) > 0))
 	}
-	return out, nil
+	return out, skipped, nil
 }
 
 func completeDiskRecord(r diskRecord, system bool, pnp pnpDisk, mounted bool) diskRecord {

@@ -79,10 +79,10 @@ func deviceFromDisk(d disk.Disk) device.Device {
 	n, _ := wholeDiskNumber(strings.TrimPrefix(d.Device, "/dev/r"))
 	return device.Device{ID: d.ID, Path: d.Device, Vendor: d.Vendor, Model: d.Model, Serial: d.Serial, Transport: d.Bus, SysfsPath: d.RegistryPath, Major: n, Size: d.Size, IsCardReader: d.Ejectable, Mounted: d.Mounted, IsSystemDisk: d.System, IsAllowed: d.Removable && d.External && !d.System && d.Bus == "usb" && d.Size > 0 && d.RegistryID != "", MountPoints: append([]string(nil), d.MountPoints...), PartitionCount: len(d.MountPoints)}
 }
-func (b *backend) ListAllowedDevices(ctx context.Context) ([]device.Device, error) {
-	all, err := b.manager.List(ctx)
+func (b *backend) ListAllowedDevices(ctx context.Context) ([]device.Device, device.ScanReport, error) {
+	all, skipped, err := b.manager.List(ctx)
 	if err != nil {
-		return nil, err
+		return nil, device.ScanReport{}, err
 	}
 	out := make([]device.Device, 0, len(all))
 	for _, d := range all {
@@ -91,7 +91,7 @@ func (b *backend) ListAllowedDevices(ctx context.Context) ([]device.Device, erro
 			out = append(out, v)
 		}
 	}
-	return out, nil
+	return out, device.ScanReport{Skipped: skipped}, nil
 }
 func (b *backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {
 	d, err := b.manager.Refresh(ctx, id)

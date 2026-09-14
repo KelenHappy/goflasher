@@ -12,11 +12,12 @@ import (
 
 type fakeDarwinProbe struct {
 	probes               []darwinapi.ProbeResult
+	skipped              int
 	unmountErr, ejectErr error
 }
 
-func (f *fakeDarwinProbe) List(context.Context) ([]darwinapi.ProbeResult, error) {
-	return append([]darwinapi.ProbeResult(nil), f.probes...), nil
+func (f *fakeDarwinProbe) List(context.Context) ([]darwinapi.ProbeResult, int, error) {
+	return append([]darwinapi.ProbeResult(nil), f.probes...), f.skipped, nil
 }
 func (f *fakeDarwinProbe) Unmount(context.Context, string) error {
 	if f.unmountErr == nil {
@@ -37,7 +38,7 @@ func safeProbe() darwinapi.ProbeResult {
 func TestDarwinManagerNativeLifecycle(t *testing.T) {
 	f := &fakeDarwinProbe{probes: []darwinapi.ProbeResult{safeProbe()}}
 	m := &darwinManager{probe: f}
-	disks, err := m.List(context.Background())
+	disks, _, err := m.List(context.Background())
 	if err != nil || len(disks) != 1 {
 		t.Fatalf("List=%+v,%v", disks, err)
 	}

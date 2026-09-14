@@ -20,8 +20,8 @@ import (
 
 type noRawWriteBackend struct{ openWriter, writes, unmounts int }
 
-func (*noRawWriteBackend) ListAllowedDevices(context.Context) ([]device.Device, error) {
-	return nil, nil
+func (*noRawWriteBackend) ListAllowedDevices(context.Context) ([]device.Device, device.ScanReport, error) {
+	return nil, device.ScanReport{}, nil
 }
 
 func TestWindowsParserFailureNeverUsesRawWriter(t *testing.T) {

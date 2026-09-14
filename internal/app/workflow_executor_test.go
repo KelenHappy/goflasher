@@ -23,8 +23,8 @@ type availableInstallerSplitter struct{ installer.WIMSplitter }
 
 func (availableInstallerSplitter) Preflight(context.Context) error { return nil }
 
-func (b *installerWorkflowBackend) ListAllowedDevices(context.Context) ([]device.Device, error) {
-	return []device.Device{b.target}, nil
+func (b *installerWorkflowBackend) ListAllowedDevices(context.Context) ([]device.Device, device.ScanReport, error) {
+	return []device.Device{b.target}, device.ScanReport{}, nil
 }
 func (b *installerWorkflowBackend) RefreshDevice(context.Context, string) (device.Device, error) {
 	return b.target, nil

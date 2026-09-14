@@ -13,10 +13,12 @@ import (
 )
 
 const (
-	EntryCount     uint32 = 128
-	EntrySize      uint32 = 128
-	HeaderSize     uint32 = 92
-	alignmentBytes uint64 = 1 << 20
+	EntryCount      uint32 = 128
+	EntrySize       uint32 = 128
+	HeaderSize      uint32 = 92
+	alignmentBytes  uint64 = 1 << 20
+	entryArrayBytes        = uint64(EntryCount) * uint64(EntrySize)
+	espName                = "EFI System Partition"
 )
 
 var ErrInvalidLayout = errors.New("invalid GPT layout")
@@ -45,66 +47,96 @@ type Layout struct {
 	entries                     []byte
 }
 
+// geometry is the LBA placement of the GPT metadata and the single partition.
+type geometry struct {
+	last, firstUsable, lastUsable, backupEntries, start uint64
+}
+
 // Build creates one EFI System Partition. random may be nil to use crypto/rand.
 func Build(totalLBAs, logicalSectorSize uint64, random io.Reader) (*Layout, error) {
-	if logicalSectorSize < 512 || logicalSectorSize&(logicalSectorSize-1) != 0 {
-		return nil, ErrInvalidLayout
-	}
-	totalBytes, ok := mul(totalLBAs, logicalSectorSize)
-	if !ok || totalBytes > math.MaxInt64 {
-		return nil, ErrInvalidLayout
+	g, err := planGeometry(totalLBAs, logicalSectorSize)
+	if err != nil {
+		return nil, err
 	}
 	if random == nil {
 		random = rand.Reader
 	}
-	entryBytes := uint64(EntryCount) * uint64(EntrySize)
-	entrySectors, ok := ceilDiv(entryBytes, logicalSectorSize)
-	if !ok {
-		return nil, ErrInvalidLayout
-	}
-	if totalLBAs < 4 || entrySectors > totalLBAs-3 {
-		return nil, ErrInvalidLayout
-	}
-	last := totalLBAs - 1
-	backupEntries := last - entrySectors
-	firstUsable := uint64(2) + entrySectors
-	if backupEntries == 0 {
-		return nil, ErrInvalidLayout
-	}
-	lastUsable := backupEntries - 1
-	alignLBAs, ok := ceilDiv(alignmentBytes, logicalSectorSize)
-	if !ok || alignLBAs == 0 {
-		return nil, ErrInvalidLayout
-	}
-	start, ok := alignUp(firstUsable, alignLBAs)
-	if !ok || start > lastUsable {
-		return nil, ErrInvalidLayout
-	}
-	l := &Layout{LogicalSectorSize: logicalSectorSize, TotalLBAs: totalLBAs, FirstUsableLBA: firstUsable, LastUsableLBA: lastUsable, PartitionStartLBA: start, PartitionEndLBA: lastUsable, PrimaryEntriesLBA: 2, BackupEntriesLBA: backupEntries, entries: make([]byte, entryBytes)}
-	if err := fillGUID(random, &l.DiskGUID); err != nil {
+	l := &Layout{LogicalSectorSize: logicalSectorSize, TotalLBAs: totalLBAs, FirstUsableLBA: g.firstUsable, LastUsableLBA: g.lastUsable, PartitionStartLBA: g.start, PartitionEndLBA: g.lastUsable, PrimaryEntriesLBA: 2, BackupEntriesLBA: g.backupEntries, entries: make([]byte, entryArrayBytes)}
+	if err := l.assignGUIDs(random); err != nil {
 		return nil, err
 	}
-	if err := fillGUID(random, &l.PartitionGUID); err != nil {
-		return nil, err
-	}
-	if l.DiskGUID == l.PartitionGUID {
-		return nil, ErrInvalidLayout
-	}
-	copy(l.entries[0:16], EFITypeGUID.MarshalBinary())
-	copy(l.entries[16:32], l.PartitionGUID.MarshalBinary())
-	binary.LittleEndian.PutUint64(l.entries[32:40], start)
-	binary.LittleEndian.PutUint64(l.entries[40:48], lastUsable)
-	name := utf16.Encode([]rune("EFI System Partition"))
-	for i, v := range name {
-		binary.LittleEndian.PutUint16(l.entries[56+i*2:], v)
-	}
+	l.encodePartitionEntry()
 	entriesCRC := crc32.ChecksumIEEE(l.entries)
-	l.primaryHeader = l.header(1, last, 2, entriesCRC)
-	l.backupHeader = l.header(last, 1, backupEntries, entriesCRC)
+	l.primaryHeader = l.header(1, g.last, l.PrimaryEntriesLBA, entriesCRC)
+	l.backupHeader = l.header(g.last, 1, g.backupEntries, entriesCRC)
 	if err := l.Validate(); err != nil {
 		return nil, err
 	}
 	return l, nil
+}
+
+// planGeometry places the primary and backup metadata around a usable region
+// and aligns the partition start to 1 MiB.
+func planGeometry(totalLBAs, sectorSize uint64) (geometry, error) {
+	if !validSectorSize(sectorSize) {
+		return geometry{}, ErrInvalidLayout
+	}
+	if _, ok := mulInt64(totalLBAs, sectorSize); !ok {
+		return geometry{}, ErrInvalidLayout
+	}
+	entrySectors, ok := ceilDiv(entryArrayBytes, sectorSize)
+	if !ok || !metadataFits(totalLBAs, entrySectors) {
+		return geometry{}, ErrInvalidLayout
+	}
+	g := geometry{last: totalLBAs - 1, firstUsable: 2 + entrySectors}
+	g.backupEntries = g.last - entrySectors
+	g.lastUsable = g.backupEntries - 1
+	g.start, ok = alignedStart(g.firstUsable, sectorSize)
+	if !ok || g.start > g.lastUsable {
+		return geometry{}, ErrInvalidLayout
+	}
+	return g, nil
+}
+func validSectorSize(size uint64) bool {
+	return size >= 512 && size&(size-1) == 0
+}
+
+// metadataFits reports whether the protective MBR, both headers and both entry
+// arrays fit on the disk with at least one LBA left between the arrays.
+func metadataFits(totalLBAs, entrySectors uint64) bool {
+	if totalLBAs < 4 {
+		return false
+	}
+	return entrySectors <= totalLBAs-3
+}
+func alignedStart(firstUsable, sectorSize uint64) (uint64, bool) {
+	alignLBAs, ok := ceilDiv(alignmentBytes, sectorSize)
+	if !ok {
+		return 0, false
+	}
+	return alignUp(firstUsable, alignLBAs)
+}
+func (l *Layout) assignGUIDs(random io.Reader) error {
+	if err := fillGUID(random, &l.DiskGUID); err != nil {
+		return err
+	}
+	if err := fillGUID(random, &l.PartitionGUID); err != nil {
+		return err
+	}
+	if l.DiskGUID == l.PartitionGUID {
+		return ErrInvalidLayout
+	}
+	return nil
+}
+func (l *Layout) encodePartitionEntry() {
+	e := l.entries[:EntrySize]
+	copy(e[0:16], EFITypeGUID.MarshalBinary())
+	copy(e[16:32], l.PartitionGUID.MarshalBinary())
+	binary.LittleEndian.PutUint64(e[32:40], l.PartitionStartLBA)
+	binary.LittleEndian.PutUint64(e[40:48], l.PartitionEndLBA)
+	for i, v := range utf16.Encode([]rune(espName)) {
+		binary.LittleEndian.PutUint16(e[56+i*2:], v)
+	}
 }
 func fillGUID(r io.Reader, g *GUID) error {
 	if _, err := io.ReadFull(r, g[:]); err != nil {
@@ -133,34 +165,48 @@ func (l *Layout) header(current, alternate, entriesLBA uint64, entriesCRC uint32
 }
 
 func (l *Layout) Validate() error {
-	if l == nil || l.LogicalSectorSize < 512 || l.TotalLBAs < 2 || len(l.entries) != int(EntryCount*EntrySize) {
+	if l == nil || !l.validMetadataLBAs() {
 		return ErrInvalidLayout
 	}
-	last := l.TotalLBAs - 1
-	entrySectors, ok := ceilDiv(uint64(len(l.entries)), l.LogicalSectorSize)
-	if !ok {
-		return ErrInvalidLayout
-	}
-	if l.PrimaryEntriesLBA != 2 || l.BackupEntriesLBA+entrySectors != last || l.FirstUsableLBA != 2+entrySectors || l.LastUsableLBA+1 != l.BackupEntriesLBA {
-		return ErrInvalidLayout
-	}
-	if l.PartitionStartLBA < l.FirstUsableLBA || l.PartitionEndLBA > l.LastUsableLBA || l.PartitionStartLBA > l.PartitionEndLBA {
-		return ErrInvalidLayout
-	}
-	if binary.LittleEndian.Uint64(l.primaryHeader[24:32]) != 1 || binary.LittleEndian.Uint64(l.primaryHeader[32:40]) != last || binary.LittleEndian.Uint64(l.backupHeader[24:32]) != last || binary.LittleEndian.Uint64(l.backupHeader[32:40]) != 1 {
-		return ErrInvalidLayout
-	}
-	if binary.LittleEndian.Uint64(l.primaryHeader[72:80]) != l.PrimaryEntriesLBA || binary.LittleEndian.Uint64(l.backupHeader[72:80]) != l.BackupEntriesLBA {
-		return ErrInvalidLayout
-	}
-	if !validHeaderCRC(l.primaryHeader) || !validHeaderCRC(l.backupHeader) {
-		return ErrInvalidLayout
-	}
-	crc := crc32.ChecksumIEEE(l.entries)
-	if binary.LittleEndian.Uint32(l.primaryHeader[88:92]) != crc || binary.LittleEndian.Uint32(l.backupHeader[88:92]) != crc {
+	if !l.validPartitionBounds() || !l.validHeaders() {
 		return ErrInvalidLayout
 	}
 	return nil
+}
+
+// validMetadataLBAs checks that the entry arrays and usable region sit exactly
+// where Build places them for this disk and sector size.
+func (l *Layout) validMetadataLBAs() bool {
+	if l.LogicalSectorSize < 512 || l.TotalLBAs < 2 {
+		return false
+	}
+	if uint64(len(l.entries)) != entryArrayBytes {
+		return false
+	}
+	entrySectors, ok := ceilDiv(entryArrayBytes, l.LogicalSectorSize)
+	backupEntries := l.TotalLBAs - 1 - entrySectors
+	want := [4]uint64{2, backupEntries, 2 + entrySectors, backupEntries - 1}
+	got := [4]uint64{l.PrimaryEntriesLBA, l.BackupEntriesLBA, l.FirstUsableLBA, l.LastUsableLBA}
+	return ok && got == want
+}
+func (l *Layout) validPartitionBounds() bool {
+	if l.PartitionStartLBA > l.PartitionEndLBA {
+		return false
+	}
+	return l.PartitionStartLBA >= l.FirstUsableLBA && l.PartitionEndLBA <= l.LastUsableLBA
+}
+func (l *Layout) validHeaders() bool {
+	last := l.TotalLBAs - 1
+	entriesCRC := crc32.ChecksumIEEE(l.entries)
+	return validHeader(l.primaryHeader, 1, last, l.PrimaryEntriesLBA, entriesCRC) &&
+		validHeader(l.backupHeader, last, 1, l.BackupEntriesLBA, entriesCRC)
+}
+func validHeader(header []byte, current, alternate, entriesLBA uint64, entriesCRC uint32) bool {
+	if !validHeaderCRC(header) {
+		return false
+	}
+	got := [3]uint64{binary.LittleEndian.Uint64(header[24:32]), binary.LittleEndian.Uint64(header[32:40]), binary.LittleEndian.Uint64(header[72:80])}
+	return got == [3]uint64{current, alternate, entriesLBA} && binary.LittleEndian.Uint32(header[88:92]) == entriesCRC
 }
 func validHeaderCRC(header []byte) bool {
 	if len(header) < int(HeaderSize) || binary.LittleEndian.Uint32(header[12:16]) != HeaderSize {
@@ -193,11 +239,11 @@ func (l *Layout) WriteTo(w io.WriterAt) error {
 		lba uint64
 		b   []byte
 	}{{0, mbr}, {1, l.primaryHeader}, {l.PrimaryEntriesLBA, l.entries}, {l.BackupEntriesLBA, l.entries}, {l.TotalLBAs - 1, l.backupHeader}} {
-		off, ok := mul(x.lba, l.LogicalSectorSize)
-		if !ok || off > math.MaxInt64 {
+		off, ok := mulInt64(x.lba, l.LogicalSectorSize)
+		if !ok {
 			return ErrInvalidLayout
 		}
-		if err := writeFullAt(w, x.b, int64(off)); err != nil {
+		if err := writeFullAt(w, x.b, off); err != nil {
 			return err
 		}
 	}
@@ -251,6 +297,22 @@ func mul(a, b uint64) (uint64, bool) {
 	return a * b, true
 }
 
+// mulInt64 multiplies a and b, failing when the product is not a valid int64
+// byte offset.
+func mulInt64(a, b uint64) (int64, bool) {
+	p, ok := mul(a, b)
+	if !ok || p > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(p), true
+}
+
+// rangeFits reports whether [off, off+n) lies within [0, limit] without
+// overflowing.
+func rangeFits(off, n, limit uint64) bool {
+	return off <= limit && n <= limit-off
+}
+
 // PartitionWriterAt translates partition-relative offsets and rejects an
 // invalid request in full before making any underlying write.
 type PartitionWriterAt struct {
@@ -259,30 +321,43 @@ type PartitionWriterAt struct {
 }
 
 func NewPartitionWriterAt(w io.WriterAt, startLBA, endLBA, sectorSize uint64) (*PartitionWriterAt, error) {
-	if w == nil || sectorSize == 0 || startLBA > endLBA {
+	if w == nil {
 		return nil, ErrInvalidLayout
 	}
-	base, ok := mul(startLBA, sectorSize)
+	base, size, ok := partitionExtent(startLBA, endLBA, sectorSize)
 	if !ok {
 		return nil, ErrInvalidLayout
 	}
+	return &PartitionWriterAt{w, base, size}, nil
+}
+
+// partitionExtent converts the inclusive LBA range to a byte base and size
+// whose end is still addressable as an int64 offset. The results are base,
+// size, then ok.
+func partitionExtent(startLBA, endLBA, sectorSize uint64) (uint64, uint64, bool) {
+	if sectorSize == 0 || startLBA > endLBA {
+		return 0, 0, false
+	}
 	span := endLBA - startLBA
 	if span == math.MaxUint64 {
-		return nil, ErrInvalidLayout
+		return 0, 0, false
 	}
-	count := span + 1
-	size, ok := mul(count, sectorSize)
-	if !ok || base > math.MaxInt64 || size > uint64(math.MaxInt64)-base {
-		return nil, ErrInvalidLayout
+	base, ok := mul(startLBA, sectorSize)
+	if !ok {
+		return 0, 0, false
 	}
-	return &PartitionWriterAt{w, base, size}, nil
+	size, ok := mul(span+1, sectorSize)
+	if !ok {
+		return 0, 0, false
+	}
+	return base, size, rangeFits(base, size, math.MaxInt64)
 }
 func (p *PartitionWriterAt) WriteAt(b []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, ErrInvalidLayout
 	}
 	u := uint64(off)
-	if u > p.size || uint64(len(b)) > p.size-u || u > math.MaxInt64 || p.base > uint64(math.MaxInt64)-u {
+	if !rangeFits(u, uint64(len(b)), p.size) || !rangeFits(u, p.base, math.MaxInt64) {
 		return 0, ErrInvalidLayout
 	}
 	return p.w.WriteAt(b, int64(p.base+u))

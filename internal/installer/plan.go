@@ -331,7 +331,7 @@ func (b *planBuilder) assemble(planned []plannedEntry, strategy InstallStrategy,
 	}
 	espSize := b.options.TargetSize - partitionStart - 33*logicalSectorSize
 	clusterSize := fatClusterSize(espSize)
-	inspection, err := b.inspectFiles(clusterSize, strategy, installSize, splitParts)
+	inspection, err := b.inspectFiles(clusterSize, installLayout{strategy, installSize, splitParts})
 	if err != nil {
 		return nil, err
 	}
@@ -426,13 +426,25 @@ func approveDestination(entry installeriso.Entry) (string, error) {
 }
 
 func unsafeDestination(destination, clean string) bool {
-	if destination == "" || path.IsAbs(destination) || clean != destination {
-		return true
-	}
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+	if nonCanonicalDestination(destination, clean) || escapesRoot(clean) {
 		return true
 	}
 	return strings.ContainsRune(destination, 0)
+}
+
+// nonCanonicalDestination reports empty, absolute, or not already cleaned paths.
+func nonCanonicalDestination(destination, clean string) bool {
+	if destination == "" || path.IsAbs(destination) {
+		return true
+	}
+	return clean != destination
+}
+
+func escapesRoot(clean string) bool {
+	if clean == "." || clean == ".." {
+		return true
+	}
+	return strings.HasPrefix(clean, "../")
 }
 
 func selectInstallStrategy(files map[string]installeriso.Entry, splitSize uint64) (InstallStrategy, uint64, int, error) {
@@ -513,7 +525,14 @@ func swmSequence(name string) (int, bool) {
 	return n, err == nil && n >= 2 && name == "sources/install"+strconv.Itoa(n)+".swm"
 }
 
-func (b *planBuilder) inspectFiles(cluster uint64, strategy InstallStrategy, installSize uint64, splitParts int) (fileInspection, error) {
+// installLayout describes how the install image will be written to the ESP.
+type installLayout struct {
+	strategy    InstallStrategy
+	installSize uint64
+	splitParts  int
+}
+
+func (b *planBuilder) inspectFiles(cluster uint64, layout installLayout) (fileInspection, error) {
 	var result fileInspection
 	dirBytes := map[string]uint64{"": 96}
 	for _, entry := range b.entries {
@@ -524,14 +543,14 @@ func (b *planBuilder) inspectFiles(cluster uint64, strategy InstallStrategy, ins
 		if entry.Type != installeriso.File {
 			continue
 		}
-		if err := validateFATFileSize(entry, strategy); err != nil {
+		if err := validateFATFileSize(entry, layout.strategy); err != nil {
 			return fileInspection{}, err
 		}
 		lower := strings.ToLower(entry.Path)
 		if !isInstallImage(lower) {
 			result.regular += entry.Size
 		}
-		result.fileClusters += b.entryClusters(entry, lower, cluster, strategy, installSize, splitParts)
+		result.fileClusters += b.entryClusters(entry, lower, cluster, layout)
 		dirBytes[parentKey(lower)] += fatDirectoryEntryBytes(path.Base(entry.Path))
 		hash, err := b.hashExtents(entry)
 		if err != nil {
@@ -553,7 +572,10 @@ func accountDirectoryEntry(dirBytes map[string]uint64, entry installeriso.Entry)
 }
 
 func validateFATFileSize(entry installeriso.Entry, strategy InstallStrategy) error {
-	if entry.Size <= maxFATFileSize || strategy == SplitWIM && strings.EqualFold(entry.Path, "sources/install.wim") {
+	if entry.Size <= maxFATFileSize {
+		return nil
+	}
+	if strategy == SplitWIM && strings.EqualFold(entry.Path, "sources/install.wim") {
 		return nil
 	}
 	return fmt.Errorf("%w: %s exceeds FAT32 file limit", ErrUnsupported, entry.Path)
@@ -563,11 +585,11 @@ func isInstallImage(lower string) bool {
 	return lower == "sources/install.wim" || lower == "sources/install.esd" || strings.HasPrefix(lower, "sources/install") && strings.HasSuffix(lower, ".swm")
 }
 
-func (b *planBuilder) entryClusters(entry installeriso.Entry, lower string, cluster uint64, strategy InstallStrategy, installSize uint64, splitParts int) uint64 {
-	if strategy != SplitWIM || lower != "sources/install.wim" {
+func (b *planBuilder) entryClusters(entry installeriso.Entry, lower string, cluster uint64, layout installLayout) uint64 {
+	if layout.strategy != SplitWIM || lower != "sources/install.wim" {
 		return ceilDiv(entry.Size, cluster)
 	}
-	return estimatedSplitFileClusters(installSize, b.splitSize, splitParts, cluster)
+	return estimatedSplitFileClusters(layout.installSize, b.splitSize, layout.splitParts, cluster)
 }
 
 func verificationDestination(entry installeriso.Entry) string {
@@ -607,7 +629,8 @@ func (h *extentHasher) add(offset, size uint64) error {
 	if offset > h.builder.sourceSize || size > h.builder.sourceSize-offset {
 		return fmt.Errorf("%w: extent out of bounds", ErrUnsupported)
 	}
-	for done := uint64(0); done < size; {
+	done := uint64(0)
+	for done < size {
 		if err := h.builder.ctx.Err(); err != nil {
 			return err
 		}
@@ -624,7 +647,8 @@ func (h *extentHasher) add(offset, size uint64) error {
 func hashRange(ctx context.Context, source io.ReaderAt, off, size uint64) (string, error) {
 	h := sha256.New()
 	buf := make([]byte, 1<<20)
-	for done := uint64(0); done < size; {
+	done := uint64(0)
+	for done < size {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}

@@ -19,9 +19,21 @@ type Device struct {
 	RejectReason                                               string
 }
 
+// ScanReport accounts for devices an enumeration pass could not offer as
+// targets. Devices excluded by policy are not counted here: those are returned
+// with IsAllowed false and a RejectReason explaining the decision. ScanReport
+// covers the layer below that, where a device was present but could not be
+// inspected at all, so neither a Device nor a RejectReason could be built for
+// it. Without this count an unreadable device and an absent one look identical
+// to the user.
+type ScanReport struct {
+	// Skipped counts present devices that failed inspection and were omitted.
+	Skipped int
+}
+
 // Backend isolates privileged, platform-specific device operations.
 type Backend interface {
-	ListAllowedDevices(context.Context) ([]Device, error)
+	ListAllowedDevices(context.Context) ([]Device, ScanReport, error)
 	RefreshDevice(context.Context, string) (Device, error)
 	Unmount(context.Context, Device) error
 	OpenWriter(context.Context, Device) (io.WriteCloser, error)

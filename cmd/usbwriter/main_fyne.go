@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -168,6 +169,19 @@ func (c *guiController) closeNow() {
 	}
 }
 
+// sourceCodeURL is shown in settings so users can obtain the corresponding
+// source code as required by the GPLv3.
+const sourceCodeURL = "https://github.com/KelenHappy/goflasher"
+
+// sourceCodeLink falls back to plain text if the URL cannot be parsed.
+func sourceCodeLink() fyne.CanvasObject {
+	u, err := url.Parse(sourceCodeURL)
+	if err != nil {
+		return widget.NewLabel(sourceCodeURL)
+	}
+	return widget.NewHyperlink(sourceCodeURL, u)
+}
+
 func (c *guiController) showSettings() {
 	languages := []settingChoice[i18n.Locale]{{"English", i18n.English}, {"繁體中文", i18n.TraditionalChinese}, {"简体中文", i18n.SimplifiedChinese}, {"日本語", i18n.Japanese}}
 	language := newSettingSelect(languages, c.tr.Locale(), func(locale i18n.Locale) {
@@ -185,6 +199,7 @@ func (c *guiController) showSettings() {
 		widget.NewLabel(c.tr.T("settings.language")), language,
 		widget.NewLabel(c.tr.T("settings.theme")), themeSelect,
 		widget.NewLabel(c.tr.T("settings.scale")), scaleSelect,
+		widget.NewLabel(c.tr.T("settings.source")), sourceCodeLink(),
 	)
 	dialog.NewCustom(c.tr.T("settings.title"), c.tr.T("settings.close"), content, c.view.window).Show()
 }
@@ -339,7 +354,7 @@ func (c *guiController) refresh() {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.refreshCancel = cancel
 	go func() {
-		list, err := c.backend.ListAllowedDevices(ctx)
+		list, report, err := c.backend.ListAllowedDevices(ctx)
 		if err != nil {
 			fyne.Do(func() {
 				if generation == c.refreshGeneration {
@@ -363,6 +378,12 @@ func (c *guiController) refresh() {
 			c.view.deviceSelect.Options = options
 			c.view.deviceSelect.Refresh()
 			c.appendLog(c.tr.T("log.devices", len(list)))
+			// A device that failed inspection never reaches the list, so
+			// without this line an unreadable device and an absent one look
+			// identical to the user.
+			if report.Skipped > 0 {
+				c.appendLog(c.tr.T("log.devices.skipped", report.Skipped))
+			}
 			c.refreshCancel = nil
 		})
 	}()
@@ -388,9 +409,23 @@ func (c *guiController) updateDeviceDetail() {
 	c.view.deviceDetail.SetText(c.tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(c.tr, d.IsCardReader), localBool(c.tr, d.Mounted), d.PartitionCount))
 }
 
+// imagePickerLabels holds the localized text shown by the image chooser.
+type imagePickerLabels struct {
+	Title   string
+	Accept  string
+	Dismiss string
+	Filter  string
+}
+
 func (c *guiController) chooseImage() {
 	c.view.choose.Disable()
-	openImage(c.view.window, c.tr.T("picker.image.title"), c.tr.T("picker.image.accept"), c.tr.T("action.cancel"), c.tr.T("filter.images"), func(path string, err error) {
+	labels := imagePickerLabels{
+		Title:   c.tr.T("picker.image.title"),
+		Accept:  c.tr.T("picker.image.accept"),
+		Dismiss: c.tr.T("action.cancel"),
+		Filter:  c.tr.T("filter.images"),
+	}
+	openImage(c.view.window, labels, func(path string, err error) {
 		c.view.choose.Enable()
 		if err != nil {
 			dialog.ShowError(err, c.view.window)

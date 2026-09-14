@@ -477,15 +477,20 @@ func cleanParts(p string) ([]string, error) {
 
 func hasTraversal(p string) bool {
 	for _, component := range strings.Split(p, "/") {
-		if component == "." || component == ".." {
+		if isDotName(component) {
 			return true
 		}
 	}
 	return false
 }
 
+// isDotName reports whether s is one of the reserved "." or ".." entries.
+func isDotName(s string) bool {
+	return s == "." || s == ".."
+}
+
 func validComponent(s string) bool {
-	if s == "" || s == "." || s == ".." {
+	if s == "" || isDotName(s) {
 		return false
 	}
 	if strings.ContainsRune(s, 0) {
@@ -531,23 +536,32 @@ func setTimes(e []byte, t time.Time) {
 // It returns "" when every numbered form is exhausted.
 func makeAlias(name string, used map[string]bool) string {
 	base, ext := splitAliasParts(name)
-	if len(base) <= 8 {
-		if a := packAlias(base, ext); !used[fold(a)] {
-			return a
-		}
+	if a, ok := freeAlias(base, ext, used); ok {
+		return a
 	}
 	for n := 1; n <= maxAliasTail; n++ {
-		if a := packAlias(numberedBase(base, n), ext); !used[fold(a)] {
+		if a, ok := freeAlias(numberedBase(base, n), ext, used); ok {
 			return a
 		}
 	}
 	return ""
 }
 
+// freeAlias packs base and ext into an 8.3 alias and reports whether that
+// alias fits the short-name format and is still unused in the directory.
+func freeAlias(base, ext string, used map[string]bool) (string, bool) {
+	if len(base) > 8 {
+		return "", false
+	}
+	a := packAlias(base, ext)
+	return a, !used[fold(a)]
+}
+
 // splitAliasParts reduces name to the characters FAT permits in a short name,
 // with the extension truncated to three and an empty base replaced by FILE.
-func splitAliasParts(name string) (base, ext string) {
-	base = name
+// The results are base then ext.
+func splitAliasParts(name string) (string, string) {
+	base, ext := name, ""
 	if dot := strings.LastIndex(name, "."); dot > 0 {
 		base, ext = name[:dot], name[dot+1:]
 	}
@@ -571,11 +585,11 @@ func aliasChars(s string) string {
 	return z.String()
 }
 
+// aliasRunes is the set of characters FAT permits in an 8.3 short name.
+const aliasRunes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$%'-_@~`!(){}^#&"
+
 func isAliasRune(r rune) bool {
-	if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
-		return true
-	}
-	return strings.ContainsRune("$%'-_@~`!(){}^#&", r)
+	return strings.ContainsRune(aliasRunes, r)
 }
 
 func numberedBase(base string, n int) string {
