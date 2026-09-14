@@ -69,17 +69,19 @@ func OpenFrameworks() (*Frameworks, error) {
 	if e != nil {
 		return nil, e
 	}
-	f := &Frameworks{libs: l}
-	if f.cf, e = bindCF(l.cf); e != nil {
+	cf, e := bindCF(l.cf)
+	if e != nil {
 		return nil, e
 	}
-	if f.da, e = bindDA(l.da); e != nil {
+	da, e := bindDA(l.da)
+	if e != nil {
 		return nil, e
 	}
-	if f.io, e = bindIOKit(l.io, f.cf); e != nil {
+	iokit, e := bindIOKit(l.io, cf)
+	if e != nil {
 		return nil, e
 	}
-	return f, nil
+	return &Frameworks{libs: l, cf: cf, da: da, io: iokit}, nil
 }
 func (f *Frameworks) NewSession() (*Session, error) {
 	r := f.da.api.sessionCreate(0)
@@ -166,18 +168,31 @@ func (s *Session) describe(d uintptr) (DiskDescription, error) {
 	if name, ok := s.f.cf.goString(get("kDADiskDescriptionMediaBSDNameKey")); ok {
 		out.BSDName = name
 	}
-	out.MediaName, _ = s.f.cf.goString(get("kDADiskDescriptionMediaNameKey"))
-	out.Size, _ = s.f.cf.goUint64(get("kDADiskDescriptionMediaSizeKey"))
-	out.Whole, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaWholeKey"))
-	out.Internal, _ = s.f.cf.goBool(get("kDADiskDescriptionDeviceInternalKey"))
-	out.Ejectable, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaEjectableKey"))
-	out.Removable, _ = s.f.cf.goBool(get("kDADiskDescriptionMediaRemovableKey"))
-	out.VolumePath, _ = s.f.cf.goPath(get("kDADiskDescriptionVolumePathKey"))
+	optionalDescription(s.f.cf, get, &out)
 	s.emitDiagnostic(diagnostic)
 	if out.BSDName == "" {
 		return DiskDescription{}, errDiskWithoutBSDName
 	}
 	return out, nil
+}
+
+// optionalDescription copies the description values a disk may omit; a missing
+// value leaves the field at its zero value.
+func optionalDescription(cf cfBindings, get func(string) uintptr, out *DiskDescription) {
+	mediaName, _ := cf.goString(get("kDADiskDescriptionMediaNameKey"))
+	out.MediaName = mediaName
+	size, _ := cf.goUint64(get("kDADiskDescriptionMediaSizeKey"))
+	out.Size = size
+	whole, _ := cf.goBool(get("kDADiskDescriptionMediaWholeKey"))
+	out.Whole = whole
+	internal, _ := cf.goBool(get("kDADiskDescriptionDeviceInternalKey"))
+	out.Internal = internal
+	ejectable, _ := cf.goBool(get("kDADiskDescriptionMediaEjectableKey"))
+	out.Ejectable = ejectable
+	removable, _ := cf.goBool(get("kDADiskDescriptionMediaRemovableKey"))
+	out.Removable = removable
+	volumePath, _ := cf.goPath(get("kDADiskDescriptionVolumePathKey"))
+	out.VolumePath = volumePath
 }
 
 func (s *Session) emitDiagnostic(d descriptionDiagnostics) {

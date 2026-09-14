@@ -16,14 +16,33 @@ import (
 type installerDisk []byte
 
 func (d installerDisk) WriteAt(p []byte, off int64) (int, error) {
-	if off < 0 || int(off) > len(d) || len(p) > len(d)-int(off) {
+	if !d.fits(len(p), off) {
 		return 0, fmt.Errorf("bounds")
 	}
 	return copy(d[int(off):], p), nil
 }
+
+func (d installerDisk) fits(n int, off int64) bool {
+	return off >= 0 && int(off) <= len(d) && n <= len(d)-int(off)
+}
 func (installerDisk) Sync() error { return nil }
 
 func buildInstallerDisk(t *testing.T, split bool) (installerDisk, []installer.VerificationEntry) {
+	t.Helper()
+	d, b := newInstallerBuilder(t)
+	var manifest []installer.VerificationEntry
+	for name, data := range installerFiles(split) {
+		manifest = append(manifest, writeInstallerFile(t, b, name, data))
+	}
+	if err := b.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	return d, manifest
+}
+
+// newInstallerBuilder writes a GPT layout to a fresh disk and opens a FAT32
+// builder over its single partition.
+func newInstallerBuilder(t *testing.T) (installerDisk, *fat32.Builder) {
 	t.Helper()
 	const diskSize = 80 << 20
 	d := make(installerDisk, diskSize)
@@ -44,33 +63,36 @@ func buildInstallerDisk(t *testing.T, split bool) (installerDisk, []installer.Ve
 	if err != nil {
 		t.Fatal(err)
 	}
+	return d, b
+}
+
+func installerFiles(split bool) map[string][]byte {
 	files := map[string][]byte{"efi/boot/bootx64.efi": bytes.Repeat([]byte("EFI-LOADER!"), 73), "sources/boot.wim": bytes.Repeat([]byte("BOOT-WIM!"), 97)}
 	if split {
 		files["sources/install.swm"] = bytes.Repeat([]byte("SWM-ONE!"), 89)
 		files["sources/install2.swm"] = bytes.Repeat([]byte("SWM-TWO!"), 67)
 	}
-	var manifest []installer.VerificationEntry
-	for name, data := range files {
-		if err = b.MkdirAll(directory(name)); err != nil {
-			t.Fatal(err)
-		}
-		f, err := b.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = f.Write(data); err != nil {
-			t.Fatal(err)
-		}
-		if err = f.Close(); err != nil {
-			t.Fatal(err)
-		}
-		sum := sha256.Sum256(data)
-		manifest = append(manifest, installer.VerificationEntry{Path: name, Size: uint64(len(data)), SHA256: fmt.Sprintf("%x", sum)})
-	}
-	if err = b.Sync(); err != nil {
+	return files
+}
+
+// writeInstallerFile stores data at name and returns its manifest entry.
+func writeInstallerFile(t *testing.T, b *fat32.Builder, name string, data []byte) installer.VerificationEntry {
+	t.Helper()
+	if err := b.MkdirAll(directory(name)); err != nil {
 		t.Fatal(err)
 	}
-	return d, manifest
+	f, err := b.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return installer.VerificationEntry{Path: name, Size: uint64(len(data)), SHA256: fmt.Sprintf("%x", sum)}
 }
 func directory(name string) string {
 	for i := len(name) - 1; i >= 0; i-- {
@@ -87,7 +109,10 @@ func TestVerifyInstallerReadsRawGPTFATAndManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.FilesVerified != 4 || result.WIMParts != 2 || result.ManifestSHA256 == "" {
+	if result.ManifestSHA256 == "" {
+		t.Fatalf("manifest hash missing: result=%+v", result)
+	}
+	if result.FilesVerified != 4 || result.WIMParts != 2 {
 		t.Fatalf("result=%+v", result)
 	}
 }

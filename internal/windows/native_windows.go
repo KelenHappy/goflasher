@@ -51,7 +51,7 @@ const (
 	// STORAGE_HOTPLUG_INFO: Size followed by MediaRemovable, MediaHotplug,
 	// DeviceHotplug, and WriteCacheEnableOverride BOOLEAN fields.
 	storageHotplugInfoSize = 8
-	// STORAGE_HOTPLUG_INFO 欄位位移；b[4] 是 MediaRemovable，admission 不採用。
+	// STORAGE_HOTPLUG_INFO field offsets; b[4] is MediaRemovable, which admission ignores.
 	hotplugMediaOffset       = 5
 	hotplugDeviceOffset      = 6
 	maxStorageDescriptorSize = 1 << 20
@@ -403,21 +403,23 @@ func inspectHandle(h windows.Handle, number uint32) (diskRecord, error) {
 }
 
 func gatherDiskEvidence(h windows.Handle, number uint32) (diskEvidence, error) {
-	ev := diskEvidence{number: number}
-	var err error
-	if ev.length, err = diskLength(h); err != nil {
+	length, err := diskLength(h)
+	if err != nil {
 		return diskEvidence{}, err
 	}
-	if ev.descriptor, err = storageDescriptor(h); err != nil {
+	descriptor, err := storageDescriptor(h)
+	if err != nil {
 		return diskEvidence{}, err
 	}
-	if ev.hotplug, err = hotplugInfo(h); err != nil {
+	hotplug, err := hotplugInfo(h)
+	if err != nil {
 		return diskEvidence{}, err
 	}
-	if ev.wwn, err = storageWWN(h); err != nil {
+	wwn, err := storageWWN(h)
+	if err != nil {
 		return diskEvidence{}, err
 	}
-	return ev, nil
+	return diskEvidence{number: number, length: length, descriptor: descriptor, hotplug: hotplug, wwn: wwn}, nil
 }
 
 func verifyDeviceNumber(h windows.Handle, expected uint32) error {
@@ -494,7 +496,8 @@ func diskRecordFromEvidence(ev diskEvidence) (diskRecord, error) {
 	id := identity.canonicalID()
 	path := physicalDrivePath(ev.number)
 	r := diskRecord{Device: device.Device{ID: id, Path: path, Vendor: vendor, Model: model, Serial: identity.Serial, WWN: identity.WWN, Transport: busName(bus), Major: ev.number, Size: ev.length}, identity: identity, deviceNumber: ev.number, usbAncestor: bus == busTypeUSB}
-	r.mediaHotplug, r.deviceHotplug = ev.hotplug.mediaHotplug, ev.hotplug.deviceHotplug
+	r.mediaHotplug = ev.hotplug.mediaHotplug
+	r.deviceHotplug = ev.hotplug.deviceHotplug
 	return r, nil
 }
 
@@ -548,7 +551,8 @@ func enumerateDiskRecords(ctx context.Context, systems map[uint32]bool, pnp map[
 
 func completeDiskRecord(r diskRecord, system bool, pnp pnpDisk, mounted bool) diskRecord {
 	r.IsSystemDisk = system
-	r.SysfsPath, r.devInst = pnp.instance, pnp.devInst
+	r.SysfsPath = pnp.instance
+	r.devInst = pnp.devInst
 	r.usbAncestor = r.usbAncestor || pnp.usb
 	r.Mounted = mounted
 	return r
@@ -646,6 +650,7 @@ func lockVolume(ctx context.Context, volume string) (windows.Handle, error) {
 	return h, nil
 }
 
+// lockWithRetry locks and dismounts the volume, retrying transient denials.
 // FSCTL_LOCK_VOLUME fails with ERROR_ACCESS_DENIED while any other handle to
 // the volume is open, which is routine right after insertion (shell
 // thumbnails, search indexing, antivirus scans). Those handles close within
@@ -653,7 +658,9 @@ func lockVolume(ctx context.Context, volume string) (windows.Handle, error) {
 // without masking a genuine denial.
 func lockWithRetry(ctx context.Context, h windows.Handle) error {
 	delay := lockRetryDelay
-	for attempt := 1; ; attempt++ {
+	attempt := 0
+	for {
+		attempt++
 		err := lockAndDismount(h)
 		if err == nil {
 			return nil
@@ -813,7 +820,8 @@ var enumeratePnPDisks = func() (map[uint32]pnpDisk, error) {
 	}
 	defer setupDestroy.Call(h)
 	out := map[uint32]pnpDisk{}
-	for index := uint32(0); ; index++ {
+	var index uint32
+	for {
 		n, disk, found, done, err := setupDiskAtIndex(h, index)
 		if err != nil {
 			return nil, fmt.Errorf("SetupDiEnumDeviceInterfaces index %d: %w", index, err)
@@ -824,6 +832,7 @@ var enumeratePnPDisks = func() (map[uint32]pnpDisk, error) {
 		if found {
 			out[n] = disk
 		}
+		index++
 	}
 	return out, nil
 }
@@ -1148,13 +1157,9 @@ func systemDiskNumbers() (map[uint32]bool, error) {
 }
 
 func validSystemRoot(root string) bool {
-	return len(root) >= 3 && isDriveLetter(root[0]) && root[1] == ':' && isPathSeparator(root[2])
+	return len(root) >= 3 && isDriveLetter(root[0]) && root[1] == ':' && os.IsPathSeparator(root[2])
 }
 
 func isDriveLetter(value byte) bool {
 	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
-}
-
-func isPathSeparator(value byte) bool {
-	return value == '\\' || value == '/'
 }

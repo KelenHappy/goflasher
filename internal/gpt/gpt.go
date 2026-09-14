@@ -91,7 +91,8 @@ func planGeometry(totalLBAs, sectorSize uint64) (geometry, error) {
 	g := geometry{last: totalLBAs - 1, firstUsable: 2 + entrySectors}
 	g.backupEntries = g.last - entrySectors
 	g.lastUsable = g.backupEntries - 1
-	g.start, ok = alignedStart(g.firstUsable, sectorSize)
+	start, ok := alignedStart(g.firstUsable, sectorSize)
+	g.start = start
 	if !ok || g.start > g.lastUsable {
 		return geometry{}, ErrInvalidLayout
 	}
@@ -234,7 +235,8 @@ func (l *Layout) WriteTo(w io.WriterAt) error {
 		n = math.MaxUint32
 	}
 	binary.LittleEndian.PutUint32(p[12:16], uint32(n))
-	mbr[510], mbr[511] = 0x55, 0xaa
+	mbr[510] = 0x55
+	mbr[511] = 0xaa
 	for _, x := range []struct {
 		lba uint64
 		b   []byte

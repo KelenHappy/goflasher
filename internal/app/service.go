@@ -64,7 +64,8 @@ func (s *Service) Run(ctx context.Context, request RunRequest) (RunResult, error
 		s.InstallerSplitter = installer.NewNativeWIMSplitter()
 	}
 	if s.TemporarySpace == 0 {
-		s.TemporarySpace, _ = availableTemporarySpace()
+		space, _ := availableTemporarySpace()
+		s.TemporarySpace = space
 	}
 	out, err := s.runWorkflow(ctx, request)
 	s.finishRun(&out, err, time.Since(start))
@@ -92,7 +93,8 @@ func (s *Service) Preview(ctx context.Context, info image.Info, target device.De
 		s.InstallerSplitter = installer.NewNativeWIMSplitter()
 	}
 	if s.TemporarySpace == 0 {
-		s.TemporarySpace, _ = availableTemporarySpace()
+		space, _ := availableTemporarySpace()
+		s.TemporarySpace = space
 	}
 	info, err = inspectImage(ctx, info)
 	if err != nil {
@@ -405,7 +407,8 @@ func (w workflowOperation) verifyImage(enabled bool) error {
 	if err != nil {
 		return err
 	}
-	w.out.TargetSHA256, err = verify.ReadBack(w.ctx, reader, w.out.BytesWritten, w.out.SourceSHA256, w.updates)
+	targetSHA256, err := verify.ReadBack(w.ctx, reader, w.out.BytesWritten, w.out.SourceSHA256, w.updates)
+	w.out.TargetSHA256 = targetSHA256
 	closeErr := reader.Close()
 	if err = errors.Join(err, closeErr); err != nil {
 		return err

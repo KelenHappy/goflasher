@@ -7,7 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -19,9 +19,7 @@ func windowsSplitPaths(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	source := filepath.Join(root, "source image.wim")
-	if err := os.WriteFile(source, []byte("wim"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	mustWriteFile(t, source, "wim")
 	return source, output
 }
 
@@ -52,9 +50,7 @@ func TestTrustedDISMPathDoesNotSearchPATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	pathDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(pathDir, "dism.exe"), []byte("fake"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	mustWriteFile(t, filepath.Join(pathDir, "dism.exe"), "fake")
 	t.Setenv("SystemRoot", root)
 	t.Setenv("WINDIR", "")
 	t.Setenv("PATH", pathDir)
@@ -62,24 +58,12 @@ func TestTrustedDISMPathDoesNotSearchPATH(t *testing.T) {
 		t.Fatalf("PATH executable accepted: %v", err)
 	}
 	trusted := filepath.Join(root, "System32", "dism.exe")
-	if err := os.WriteFile(trusted, []byte("trusted"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	mustWriteFile(t, trusted, "trusted")
 	got, err := trustedDISMPath()
 	if err != nil {
 		t.Fatalf("path=%q error=%v", got, err)
 	}
-	gotInfo, err := os.Stat(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	trustedInfo, err := os.Stat(trusted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(gotInfo, trustedInfo) {
-		t.Fatalf("resolved DISM %q is not trusted file %q", got, trusted)
-	}
+	assertSameFile(t, got, trusted)
 }
 
 func TestDISMArgumentsAreSeparateExactAndSizeRoundsDown(t *testing.T) {
@@ -95,24 +79,10 @@ func TestDISMArgumentsAreSeparateExactAndSizeRoundsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonicalSource, err := canonicalAbsolute(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonicalOutput, err := canonicalAbsolute(output)
-	if err != nil {
-		t.Fatal(err)
-	}
+	canonicalSource, canonicalOutput := mustCanonical(t, source), mustCanonical(t, output)
 	want := []string{"/English", "/Split-Image", "/ImageFile:" + canonicalSource, "/SWMFile:" + filepath.Join(canonicalOutput, "install.swm"), "/FileSize:5"}
-	if gotExecutable != `C:\Windows\System32\dism.exe` || !reflect.DeepEqual(gotArgs, want) {
-		t.Fatalf("executable=%q args=%q", gotExecutable, gotArgs)
-	}
-	if reflect.DeepEqual(gotArgs[0], "cmd.exe") || reflect.DeepEqual(gotArgs[0], "powershell.exe") {
-		t.Fatal("shell used")
-	}
-	if !reflect.DeepEqual(progress, [][2]uint64{{0, 1}, {1, 1}}) {
-		t.Fatalf("progress=%v", progress)
-	}
+	assertDISMInvocation(t, gotExecutable, gotArgs, want)
+	assertProgress(t, progress, [2]uint64{0, 1}, [2]uint64{1, 1})
 }
 
 func TestDISMRejectsSubMiBPartSizeWithoutExecution(t *testing.T) {
@@ -142,15 +112,11 @@ func TestDISMFailureAndCancellationCleanPartialOutput(t *testing.T) {
 			})
 			var progress [][2]uint64
 			_, err := Split(ctx, Request{SourcePath: source, OutputDir: output, PartSize: 2 * 1024 * 1024, Progress: func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) }})
-			if err == nil || (cancel && !errors.Is(err, context.Canceled)) {
-				t.Fatalf("error=%v", err)
-			}
+			assertSplitFailed(t, err, cancel)
 			if _, statErr := os.Stat(filepath.Join(output, "install.swm")); !os.IsNotExist(statErr) {
 				t.Fatalf("partial remains: %v", statErr)
 			}
-			if !reflect.DeepEqual(progress, [][2]uint64{{0, 1}}) {
-				t.Fatalf("progress=%v", progress)
-			}
+			assertProgress(t, progress, [2]uint64{0, 1})
 		})
 	}
 }
@@ -165,5 +131,70 @@ func TestDISMSuccessStillValidatesAndCleansOutput(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(output, "install2.swm")); !os.IsNotExist(err) {
 		t.Fatalf("invalid output remains: %v", err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustCanonical(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := canonicalAbsolute(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+// assertSameFile checks that got and want name the same file on disk.
+func assertSameFile(t *testing.T, got, want string) {
+	t.Helper()
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("resolved DISM %q is not trusted file %q", got, want)
+	}
+}
+
+// assertDISMInvocation checks that the trusted DISM binary ran directly, not
+// through a shell, with exactly the wanted arguments.
+func assertDISMInvocation(t *testing.T, executable string, args, want []string) {
+	t.Helper()
+	if executable != `C:\Windows\System32\dism.exe` || !slices.Equal(args, want) {
+		t.Fatalf("executable=%q args=%q", executable, args)
+	}
+	if args[0] == "cmd.exe" || args[0] == "powershell.exe" {
+		t.Fatal("shell used")
+	}
+}
+
+// assertSplitFailed checks that Split reported an error and that a canceled run
+// surfaces context.Canceled.
+func assertSplitFailed(t *testing.T, err error, canceled bool) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("Split succeeded, want an error")
+	}
+	if canceled && !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v, want context.Canceled", err)
+	}
+}
+
+// assertProgress checks that the callback fired synchronously with exactly the
+// wanted done/total pairs, in order.
+func assertProgress(t *testing.T, got [][2]uint64, want ...[2]uint64) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Fatalf("progress=%v, want %v", got, want)
 	}
 }

@@ -381,7 +381,9 @@ type remoteInstallerSession struct {
 }
 
 func (h *commandHelper) OpenInstallerSession(ctx context.Context, r privilegedRequest) (*remoteInstallerSession, error) {
-	r.Mode, r.Version, r.LogicalSectorSize = modeInstallerSession, privilege.ProtocolVersion, 512
+	r.Mode = modeInstallerSession
+	r.Version = privilege.ProtocolVersion
+	r.LogicalSectorSize = 512
 	cmd, in, out, _, err := h.start(ctx, r, nil)
 	if err != nil {
 		return nil, err

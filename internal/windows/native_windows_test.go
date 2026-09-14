@@ -79,8 +79,10 @@ func TestWindowsIdentityEvidence(t *testing.T) {
 	}
 }
 
-// The descriptor is laid out by hand with the ntddstor.h offsets so the parser
-// and the storageIdentifier helper cannot drift together.
+// TestParseStorageDeviceWWN ensures parseStorageDeviceIDs reads the WWN and
+// rejects an incomplete identifier list. The descriptor is laid out by hand
+// with the ntddstor.h offsets so the parser and the storageIdentifier helper
+// cannot drift together.
 func TestParseStorageDeviceWWN(t *testing.T) {
 	b := make([]byte, 12+16+8)
 	binary.LittleEndian.PutUint32(b[4:8], uint32(len(b)))
@@ -143,21 +145,9 @@ func TestParseStorageIdentifierRejectsInvalidEntryBounds(t *testing.T) {
 	}{
 		{name: "truncated header", data: make([]byte, storageIdentifierHeaderSize-1)},
 		{name: "empty identifier", data: storageIdentifier(1, 3, 0, nil)},
-		{name: "truncated identifier", data: func() []byte {
-			entry := storageIdentifier(1, 3, 0, []byte{1})
-			binary.LittleEndian.PutUint16(entry[8:10], 2)
-			return entry
-		}()},
-		{name: "next overlaps identifier", data: func() []byte {
-			entry := storageIdentifier(1, 3, 0, []byte{1, 2})
-			binary.LittleEndian.PutUint16(entry[10:12], storageIdentifierHeaderSize+1)
-			return entry
-		}()},
-		{name: "next exceeds buffer", data: func() []byte {
-			entry := storageIdentifier(1, 3, 0, []byte{1})
-			binary.LittleEndian.PutUint16(entry[10:12], uint16(len(entry)+1))
-			return entry
-		}()},
+		{name: "truncated identifier", data: storageIdentifierWithField([]byte{1}, 8, 2)},
+		{name: "next overlaps identifier", data: storageIdentifierWithField([]byte{1, 2}, 10, storageIdentifierHeaderSize+1)},
+		{name: "next exceeds buffer", data: storageIdentifierWithField([]byte{1}, 10, storageIdentifierHeaderSize+2)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -230,6 +220,14 @@ func storageIdentifier(codeSet, identifierType, association uint32, value []byte
 	binary.LittleEndian.PutUint16(entry[8:10], uint16(len(value)))
 	binary.LittleEndian.PutUint32(entry[12:16], association)
 	copy(entry[storageIdentifierHeaderSize:], value)
+	return entry
+}
+
+// storageIdentifierWithField builds a binary NAA identifier and overwrites the
+// USHORT header field at offset (8: IdentifierSize, 10: NextOffset) with v.
+func storageIdentifierWithField(value []byte, offset int, v uint16) []byte {
+	entry := storageIdentifier(1, 3, 0, value)
+	binary.LittleEndian.PutUint16(entry[offset:offset+2], v)
 	return entry
 }
 
@@ -387,7 +385,8 @@ func TestSystemDiskExtentQueryFailureIsWrapped(t *testing.T) {
 	querySystemDisks = func() (map[uint32]bool, error) {
 		return nil, fmt.Errorf("system volume IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: %w", sentinel)
 	}
-	_, _, err := (&winAPI{}).list(context.Background())
+	api := &winAPI{}
+	_, _, err := api.list(context.Background())
 	requireErrorIs(t, err, sentinel)
 	requireErrorContains(t, err, "identify Windows system disk")
 	requireErrorContains(t, err, "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS")
@@ -631,7 +630,8 @@ func TestPnPEnumerationFailureFailsClosed(t *testing.T) {
 	querySystemDisks = func() (map[uint32]bool, error) { return map[uint32]bool{0: true}, nil }
 	sentinel := errors.New("setupapi failed")
 	enumeratePnPDisks = func() (map[uint32]pnpDisk, error) { return map[uint32]pnpDisk{1: {}}, sentinel }
-	_, _, err := (&winAPI{}).list(context.Background())
+	api := &winAPI{}
+	_, _, err := api.list(context.Background())
 	if !errors.Is(err, sentinel) || !errors.Is(err, ErrSystemTopologyUnavailable) {
 		t.Fatalf("error=%v", err)
 	}
@@ -644,7 +644,8 @@ func TestListFailsClosedWhenVolumeTopologyUnavailable(t *testing.T) {
 	enumeratePnPDisks = func() (map[uint32]pnpDisk, error) { return map[uint32]pnpDisk{}, nil }
 	sentinel := errors.New("FindFirstVolumeW failed")
 	enumerateVolumes = func() ([]string, error) { return nil, sentinel }
-	_, _, err := (&winAPI{}).list(context.Background())
+	api := &winAPI{}
+	_, _, err := api.list(context.Background())
 	if !errors.Is(err, sentinel) || !errors.Is(err, ErrVolumeTopologyUnavailable) {
 		t.Fatalf("error=%v", err)
 	}

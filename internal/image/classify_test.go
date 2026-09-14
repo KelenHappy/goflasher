@@ -11,17 +11,7 @@ import (
 )
 
 func TestClassifyWindowsInstallerByManifest(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "definitely-not-windows.iso")
-	if err := os.WriteFile(path, installerISO(true, false), 0600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionNone})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer info.CloseSource()
-	got, err := Classify(info)
-	if err != nil || got != WindowsInstallerISO {
+	if got, err := classifyISO(t, "definitely-not-windows.iso", installerISO(true, false)); err != nil || got != WindowsInstallerISO {
 		t.Fatalf("Classify() = %q, %v", got, err)
 	}
 }
@@ -49,31 +39,13 @@ func TestCanonicalPreSplitWindowsInstallSet(t *testing.T) {
 }
 
 func TestClassifyISOFailClosedWithoutCompleteManifest(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "windows-installer.iso")
-	if err := os.WriteFile(path, installerISO(false, false), 0600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionNone})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer info.CloseSource()
-	if got, err := Classify(info); got != UnknownImage || !errors.Is(err, ErrUnsafeClassification) {
+	if got, err := classifyISO(t, "windows-installer.iso", installerISO(false, false)); got != UnknownImage || !errors.Is(err, ErrUnsafeClassification) {
 		t.Fatalf("Classify() = %q, %v", got, err)
 	}
 }
 
 func TestClassifyLinuxHybridISOByFilesystemAndPartitionTable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "distribution.iso")
-	if err := os.WriteFile(path, installerISO(false, true), 0600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionNone})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer info.CloseSource()
-	if got, err := Classify(info); err != nil || got != LinuxHybridISO {
+	if got, err := classifyISO(t, "distribution.iso", installerISO(false, true)); err != nil || got != LinuxHybridISO {
 		t.Fatalf("Classify() = %q, %v", got, err)
 	}
 }
@@ -90,16 +62,7 @@ func TestClassifyLinuxHybridISOWithWholeImageAndEmbeddedPartitions(t *testing.T)
 	binary.LittleEndian.PutUint32(b[462+8:], 4)
 	binary.LittleEndian.PutUint32(b[462+12:], 8)
 
-	path := filepath.Join(t.TempDir(), "distribution.iso")
-	if err := os.WriteFile(path, b, 0600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionNone})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer info.CloseSource()
-	if got, err := Classify(info); err != nil || got != LinuxHybridISO {
+	if got, err := classifyISO(t, "distribution.iso", b); err != nil || got != LinuxHybridISO {
 		t.Fatalf("Classify() = %q, %v", got, err)
 	}
 }
@@ -108,25 +71,8 @@ func TestClassifyDecodedRemovesTemporaryFile(t *testing.T) {
 	temp := t.TempDir()
 	t.Setenv("TMPDIR", temp)
 	path := filepath.Join(t.TempDir(), "distribution.iso.gz")
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	zw := gzip.NewWriter(f)
-	if _, err := zw.Write(installerISO(false, true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionGzip})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer info.CloseSource()
+	writeGzipFile(t, path, installerISO(false, true))
+	info := inspectISO(t, path, CompressionGzip)
 	if got, err := Classify(info); err != nil || got != LinuxHybridISO {
 		t.Fatalf("Classify() = %q, %v", got, err)
 	}
@@ -162,16 +108,7 @@ func TestHybridClassificationRejectsInvalidPartitionAndIncompleteWindows(t *test
 		t.Run(tt.name, func(t *testing.T) {
 			b := installerISO(false, true)
 			tt.mutate(b)
-			path := filepath.Join(t.TempDir(), "linux.iso")
-			if err := os.WriteFile(path, b, 0600); err != nil {
-				t.Fatal(err)
-			}
-			info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: CompressionNone})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer info.CloseSource()
-			if got, err := Classify(info); got != UnknownImage || !errors.Is(err, ErrUnsafeClassification) {
+			if got, err := classifyISO(t, "linux.iso", b); got != UnknownImage || !errors.Is(err, ErrUnsafeClassification) {
 				t.Fatalf("Classify() = (%s, %v)", got, err)
 			}
 		})
@@ -190,6 +127,45 @@ func TestContextReaderHonorsCancellationBeforeReading(t *testing.T) {
 	}
 	if underlying.calls != 0 {
 		t.Fatalf("underlying reads = %d", underlying.calls)
+	}
+}
+
+// classifyISO writes b to a temporary ISO file and classifies it.
+func classifyISO(t *testing.T, name string, b []byte) (Kind, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return Classify(inspectISO(t, path, CompressionNone))
+}
+
+// inspectISO inspects path as an ISO and closes its source when the test ends.
+func inspectISO(t *testing.T, path string, compression Compression) Info {
+	t.Helper()
+	info, err := Inspect(Info{Path: path, Format: FormatISO, Compression: compression})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = info.CloseSource() })
+	return info
+}
+
+func writeGzipFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	if _, err := zw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

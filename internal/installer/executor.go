@@ -142,7 +142,8 @@ func (r *execution) createFilesystem() error {
 	if err != nil {
 		return err
 	}
-	r.builder, err = fat32.NewBuilder(r.ctx, esp, plan.esp.Size, "GOFLASHER")
+	builder, err := fat32.NewBuilder(r.ctx, esp, plan.esp.Size, "GOFLASHER")
+	r.builder = builder
 	return err
 }
 

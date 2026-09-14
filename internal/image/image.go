@@ -306,7 +306,9 @@ func InspectContext(ctx context.Context, info Info) (Info, error) {
 		return Info{}, closeCreatedSource(info, created, err)
 	}
 	defer r.Close()
-	info.UncompressedSize, info.SHA256, err = decodedDigest(ctx, r)
+	uncompressedSize, digest, err := decodedDigest(ctx, r)
+	info.UncompressedSize = uncompressedSize
+	info.SHA256 = digest
 	if err != nil {
 		return Info{}, closeCreatedSource(info, created, err)
 	}

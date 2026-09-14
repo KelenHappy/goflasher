@@ -30,13 +30,17 @@ func loadLibraries() (libraries, error) {
 			}
 			return h, nil
 		}
-		if loaded.cf, loadErr = open(coreFoundationPath); loadErr != nil {
+		var h uintptr
+		if h, loadErr = open(coreFoundationPath); loadErr != nil {
 			return
 		}
-		if loaded.da, loadErr = open(diskArbitrationPath); loadErr != nil {
+		loaded.cf = h
+		if h, loadErr = open(diskArbitrationPath); loadErr != nil {
 			return
 		}
-		loaded.io, loadErr = open(iokitPath)
+		loaded.da = h
+		h, loadErr = open(iokitPath)
+		loaded.io = h
 	})
 	return loaded, loadErr
 }

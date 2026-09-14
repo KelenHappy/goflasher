@@ -247,11 +247,12 @@ func (p mbrPartition) coversImage(totalSectors uint64) bool {
 	return p.start == 0 && p.count == totalSectors
 }
 
+// defined reports whether the entry has a type, a nonzero start, and a
+// nonzero length.
+func (p mbrPartition) defined() bool { return p.kind != 0 && p.start != 0 && p.count != 0 }
+
 func (p mbrPartition) inBounds(totalSectors uint64) bool {
-	if p.kind == 0 || p.start == 0 || p.count == 0 {
-		return false
-	}
-	return p.start < totalSectors && p.count <= totalSectors-p.start
+	return p.defined() && p.start < totalSectors && p.count <= totalSectors-p.start
 }
 
 func (p mbrPartition) end() uint64 { return p.start + p.count }
@@ -278,25 +279,42 @@ func hasValidHybridMBR(r io.ReaderAt, sourceSize uint64) bool {
 	if !ok {
 		return false
 	}
-	totalSectors := imageSectors(sourceSize)
-	var previousEnd uint64
-	var coversWholeImage bool
+	scan := hybridMBRScan{totalSectors: imageSectors(sourceSize)}
 	for i := 446; i < 510; i += 16 {
-		p := parseMBRPartition(b[i : i+16])
-		if p.empty() {
-			continue
-		}
-		if !p.validBootFlag() {
+		if !scan.accept(parseMBRPartition(b[i : i+16])) {
 			return false
 		}
-		if p.coversImage(totalSectors) {
-			coversWholeImage = true
-			continue
-		}
-		if !p.inBounds(totalSectors) || p.start < previousEnd {
-			return false
-		}
-		previousEnd = p.end()
 	}
-	return coversWholeImage || previousEnd == totalSectors
+	return scan.complete()
+}
+
+// hybridMBRScan tracks the partition entries seen so far while validating a
+// hybrid MBR.
+type hybridMBRScan struct {
+	totalSectors     uint64
+	previousEnd      uint64
+	coversWholeImage bool
+}
+
+// accept records one partition entry and reports whether it is consistent
+// with the entries before it.
+func (s *hybridMBRScan) accept(p mbrPartition) bool {
+	switch {
+	case p.empty():
+		return true
+	case !p.validBootFlag():
+		return false
+	case p.coversImage(s.totalSectors):
+		s.coversWholeImage = true
+		return true
+	case !p.inBounds(s.totalSectors) || p.start < s.previousEnd:
+		return false
+	}
+	s.previousEnd = p.end()
+	return true
+}
+
+// complete reports whether the accepted entries describe the image payload.
+func (s *hybridMBRScan) complete() bool {
+	return s.coversWholeImage || s.previousEnd == s.totalSectors
 }

@@ -209,11 +209,13 @@ func bootSector(total, fatSectors uint32, spc byte, label string) []byte {
 	binary.LittleEndian.PutUint32(b[44:48], 2)
 	binary.LittleEndian.PutUint16(b[48:50], 1)
 	binary.LittleEndian.PutUint16(b[50:52], 6)
-	b[64], b[66] = 0x80, 0x29
+	b[64] = 0x80
+	b[66] = 0x29
 	binary.LittleEndian.PutUint32(b[67:71], 0x47464c53)
 	copy(b[71:82], fatLabel(label))
 	copy(b[82:90], "FAT32   ")
-	b[510], b[511] = 0x55, 0xaa
+	b[510] = 0x55
+	b[511] = 0xaa
 	return b
 }
 func fsInfo(clusters uint32) []byte {

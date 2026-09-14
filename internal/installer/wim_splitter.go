@@ -45,6 +45,10 @@ type SplitPreparation struct {
 	OnSplitting func() error
 }
 
+func (in SplitPreparation) valid() bool {
+	return in.Plan != nil && in.Source != nil && in.Plan.strategy == SplitWIM
+}
+
 // PreparedSplitWIM is the result of PrepareSplitWIM. Splitter only replays
 // the retained validated parts and Cleanup removes all staged data.
 type PreparedSplitWIM struct {
@@ -90,7 +94,7 @@ func (s *NativeWIMSplitter) Preflight(ctx context.Context) error {
 // PrepareSplitWIM stages, parses, splits, and validates install.wim without a
 // target handle.
 func PrepareSplitWIM(ctx context.Context, in SplitPreparation) (*PreparedSplitWIM, error) {
-	if in.Plan == nil || in.Source == nil || in.Plan.strategy != SplitWIM {
+	if !in.valid() {
 		return nil, fmt.Errorf("%w: invalid split preparation input", ErrVerification)
 	}
 	preparer, ok := in.Splitter.(wimPreparer)
@@ -171,7 +175,7 @@ func (s *NativeWIMSplitter) Prepare(ctx context.Context, request SplitRequest) (
 }
 
 func (s *NativeWIMSplitter) PrepareWithProgress(ctx context.Context, request SplitRequest, onSplitting func() error) (_ WIMSplitter, cleanup io.Closer, err error) {
-	if s == nil || s.split == nil || !request.valid() {
+	if !s.accepts(request) {
 		return nil, nil, fmt.Errorf("%w: invalid native split input", ErrVerification)
 	}
 	temporary, err := newSplitWorkspace()
@@ -184,6 +188,12 @@ func (s *NativeWIMSplitter) PrepareWithProgress(ctx context.Context, request Spl
 	}
 	prepared := &preparedNativeWIM{temporary: temporary, parts: parts, request: request}
 	return prepared, prepared, nil
+}
+
+// accepts reports whether the splitter has a backend and the request is
+// complete enough to stage and split.
+func (s *NativeWIMSplitter) accepts(request SplitRequest) bool {
+	return s != nil && s.split != nil && request.valid()
 }
 
 // newSplitWorkspace creates a private temporary directory for staging.
@@ -330,14 +340,22 @@ func validateSplitParts(parts []wim.Part, output string, sourceSize, policy uint
 // the expected name and size inside the split output directory.
 func validateSplitPartFile(part wim.Part, index int, canonicalOutput string, policy uint64) error {
 	canonical, err := filepath.EvalSymlinks(part.Path)
-	if err != nil || !splitPartLocated(canonical, canonicalOutput, index) || !splitPartSized(part.Size, policy) {
+	if err != nil || !splitPartAccepted(part, canonical, canonicalOutput, index, policy) {
 		return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Path)
 	}
 	info, err := os.Stat(canonical)
-	if err != nil || info.IsDir() || uint64(info.Size()) != part.Size {
+	if err != nil || !splitPartFileMatches(info, part.Size) {
 		return fmt.Errorf("%w: split part size differs for %q", ErrVerification, part.Path)
 	}
 	return nil
+}
+
+func splitPartAccepted(part wim.Part, canonical, canonicalOutput string, index int, policy uint64) bool {
+	return splitPartLocated(canonical, canonicalOutput, index) && splitPartSized(part.Size, policy)
+}
+
+func splitPartFileMatches(info os.FileInfo, size uint64) bool {
+	return !info.IsDir() && uint64(info.Size()) == size
 }
 
 func splitPartLocated(canonical, canonicalOutput string, index int) bool {

@@ -64,8 +64,8 @@ func bindCF(lib uintptr) (cfBindings, error) {
 	purego.RegisterLibFunc(&b.api.urlGetFSRep, lib, "CFURLGetFileSystemRepresentation")
 	purego.RegisterLibFunc(&b.api.runLoopGetCurrent, lib, "CFRunLoopGetCurrent")
 	purego.RegisterLibFunc(&b.api.runLoopRunInMode, lib, "CFRunLoopRunInMode")
-	var err error
-	b.defaultRunLoopMode, err = symbolValue(lib, "kCFRunLoopDefaultMode")
+	mode, err := symbolValue(lib, "kCFRunLoopDefaultMode")
+	b.defaultRunLoopMode = mode
 	return b, err
 }
 func (c cfBindings) goPath(v uintptr) (string, bool) {

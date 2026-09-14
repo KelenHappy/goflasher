@@ -74,13 +74,17 @@ func VerifyInstaller(ctx context.Context, target RawTarget, manifest []installer
 	if err != nil {
 		return result, err
 	}
-	if result.FilesVerified, err = v.verifyManifest(ctx, expected); err != nil {
+	filesVerified, err := v.verifyManifest(ctx, expected)
+	result.FilesVerified = filesVerified
+	if err != nil {
 		return result, err
 	}
 	if err = verifyInstallerLayout(v.files, options); err != nil {
 		return result, err
 	}
-	if result.WIMParts, err = verifySWM(v.files, options); err != nil {
+	wimParts, err := verifySWM(v.files, options)
+	result.WIMParts = wimParts
+	if err != nil {
 		return result, err
 	}
 	result.ManifestSHA256 = manifestHash(manifest)
@@ -625,16 +629,23 @@ func longName(es [][]byte) string {
 	var u []uint16
 	for _, e := range es {
 		for _, field := range lfnNameFields {
-			for i := field.start; i < field.end; i += 2 {
-				c := binary.LittleEndian.Uint16(e[i : i+2])
-				if c == 0 || c == 0xffff {
-					break
-				}
-				u = append(u, c)
-			}
+			u = appendLFNField(u, e, field.start, field.end)
 		}
 	}
 	return string(utf16.Decode(u))
+}
+
+// appendLFNField appends the UTF-16 characters stored in e[start:end],
+// stopping at the NUL terminator or 0xffff padding.
+func appendLFNField(u []uint16, e []byte, start, end int) []uint16 {
+	for i := start; i < end; i += 2 {
+		c := binary.LittleEndian.Uint16(e[i : i+2])
+		if c == 0 || c == 0xffff {
+			return u
+		}
+		u = append(u, c)
+	}
+	return u
 }
 
 func (v *fatVolume) hashFile(ctx context.Context, f fatFile) (string, error) {

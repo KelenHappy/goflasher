@@ -19,14 +19,22 @@ import (
 const maxCStringResultSize = 4096
 
 type functions struct {
-	globalInit       func(int32) int32                           // int wimlib_global_init(int)
-	getVersion       func() uint32                               // uint32_t wimlib_get_version(void)
-	getVersionString func() uintptr                              // const tchar *wimlib_get_version_string(void)
-	openWIM          func(uintptr, int32, *uintptr) int32        // int wimlib_open_wim(const tchar *, int, WIMStruct **)
-	split            func(uintptr, uintptr, uint64, int32) int32 // int wimlib_split(WIMStruct *, const tchar *, uint64_t, int)
-	free             func(uintptr)                               // void wimlib_free(WIMStruct *)
-	globalCleanup    func()                                      // void wimlib_global_cleanup(void)
-	errorString      func(int32) uintptr                         // const tchar *wimlib_get_error_string(enum wimlib_error_code)
+	// int wimlib_global_init(int)
+	globalInit func(int32) int32
+	// uint32_t wimlib_get_version(void)
+	getVersion func() uint32
+	// const tchar *wimlib_get_version_string(void)
+	getVersionString func() uintptr
+	// int wimlib_open_wim(const tchar *, int, WIMStruct **)
+	openWIM func(uintptr, int32, *uintptr) int32
+	// int wimlib_split(WIMStruct *, const tchar *, uint64_t, int)
+	split func(uintptr, uintptr, uint64, int32) int32
+	// void wimlib_free(WIMStruct *)
+	free func(uintptr)
+	// void wimlib_global_cleanup(void)
+	globalCleanup func()
+	// const tchar *wimlib_get_error_string(enum wimlib_error_code)
+	errorString func(int32) uintptr
 }
 
 type Library struct {

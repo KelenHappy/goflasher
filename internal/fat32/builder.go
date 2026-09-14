@@ -74,7 +74,9 @@ func NewBuilder(ctx context.Context, device Device, size uint64, label string) (
 	}
 	b := &Builder{ctx: ctx, dev: device, l: l, fat: make([]uint32, l.clusters+2), next: firstDataCl,
 		free: uint32(l.clusters - 1), dirs: make(map[string]*directory)}
-	b.fat[0], b.fat[1], b.fat[2] = 0x0ffffff8, endOfChain, endOfChain
+	b.fat[0] = 0x0ffffff8
+	b.fat[1] = endOfChain
+	b.fat[2] = endOfChain
 	root := b.newDirectory(2, 2)
 	copy(root.data[:11], fatLabel(label))
 	root.data[11] = attrLabel

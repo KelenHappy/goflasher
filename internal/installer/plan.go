@@ -356,7 +356,8 @@ func (b *planBuilder) assemble(planned []plannedEntry, strategy InstallStrategy,
 		esp:          ESPLayout{logicalSectorSize, partitionStart, espSize, gptBytes},
 		fat:          FATLayoutEstimate{clusterSize, inspection.fileClusters, inspection.directoryClusters, fatBytes, inspection.directoryBytes, allocation},
 		regularBytes: inspection.regular, strategy: strategy, splitSize: b.splitSize, splitParts: splitParts, temporaryBytes: temporary, verification: inspection.verification, planned: planned}
-	p.sourceSHA256, err = hashRange(b.ctx, b.source, 0, b.sourceSize)
+	sourceSHA256, err := hashRange(b.ctx, b.source, 0, b.sourceSize)
+	p.sourceSHA256 = sourceSHA256
 	if err != nil {
 		return nil, err
 	}

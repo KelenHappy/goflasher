@@ -33,13 +33,16 @@ func Split(ctx context.Context, req Request) ([]Part, error) {
 	if req.PartSize == 0 {
 		return nil, fmt.Errorf("%w: invalid part size", ErrUnsupported)
 	}
-	var err error
-	if req.SourcePath, err = canonicalAbsolute(req.SourcePath); err != nil {
+	sourcePath, err := canonicalAbsolute(req.SourcePath)
+	if err != nil {
 		return nil, err
 	}
-	if req.OutputDir, err = canonicalAbsolute(req.OutputDir); err != nil {
+	outputDir, err := canonicalAbsolute(req.OutputDir)
+	if err != nil {
 		return nil, err
 	}
+	req.SourcePath = sourcePath
+	req.OutputDir = outputDir
 	if err := rejectExistingParts(req.OutputDir); err != nil {
 		return nil, err
 	}
@@ -101,9 +104,11 @@ func discoverParts(dir string) ([]Part, error) {
 		if _, duplicate := indexed[n]; duplicate {
 			return nil, fmt.Errorf("%w: duplicate split output %d", ErrUnsupported, n)
 		}
-		if indexed[n], err = measurePart(dir, entry); err != nil {
+		part, err := measurePart(dir, entry)
+		if err != nil {
 			return nil, err
 		}
+		indexed[n] = part
 	}
 	return orderedParts(indexed)
 }
