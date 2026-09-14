@@ -355,38 +355,39 @@ func (c *guiController) refresh() {
 	c.refreshCancel = cancel
 	go func() {
 		list, report, err := c.backend.ListAllowedDevices(ctx)
-		if err != nil {
-			fyne.Do(func() {
-				if generation == c.refreshGeneration {
-					c.refreshCancel = nil
-				}
-				if generation == c.refreshGeneration && !errors.Is(err, context.Canceled) {
-					c.view.status.SetText(c.tr.T("error.devices", err))
-				}
-			})
-			return
-		}
-		fyne.Do(func() {
-			if generation != c.refreshGeneration {
-				return
-			}
-			c.devices = list
-			options := make([]string, len(list))
-			for i, d := range list {
-				options[i] = deviceDisplay(d)
-			}
-			c.view.deviceSelect.Options = options
-			c.view.deviceSelect.Refresh()
-			c.appendLog(c.tr.T("log.devices", len(list)))
-			// A device that failed inspection never reaches the list, so
-			// without this line an unreadable device and an absent one look
-			// identical to the user.
-			if report.Skipped > 0 {
-				c.appendLog(c.tr.T("log.devices.skipped", report.Skipped))
-			}
-			c.refreshCancel = nil
-		})
+		fyne.Do(func() { c.finishRefresh(generation, list, report, err) })
 	}()
+}
+
+// finishRefresh runs on the Fyne thread and drops results from a superseded scan.
+func (c *guiController) finishRefresh(generation uint64, list []device.Device, report device.ScanReport, err error) {
+	if generation != c.refreshGeneration {
+		return
+	}
+	c.refreshCancel = nil
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			c.view.status.SetText(c.tr.T("error.devices", err))
+		}
+		return
+	}
+	c.showDevices(list, report)
+}
+
+func (c *guiController) showDevices(list []device.Device, report device.ScanReport) {
+	c.devices = list
+	options := make([]string, len(list))
+	for i, d := range list {
+		options[i] = deviceDisplay(d)
+	}
+	c.view.deviceSelect.Options = options
+	c.view.deviceSelect.Refresh()
+	c.appendLog(c.tr.T("log.devices", len(list)))
+	// A device that failed inspection never reaches the list, so without this
+	// line an unreadable device and an absent one look identical to the user.
+	if report.Skipped > 0 {
+		c.appendLog(c.tr.T("log.devices.skipped", report.Skipped))
+	}
 }
 
 func (c *guiController) selectDevice(value string) {

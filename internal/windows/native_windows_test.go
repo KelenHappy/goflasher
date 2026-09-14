@@ -211,11 +211,11 @@ func TestVolumeGUIDValidation(t *testing.T) {
 		})
 	}
 
-	volume := `\\?\Volume{` + guid + `}\`
-	if got := volumeGUID(volume); got != strings.TrimSuffix(volume, `\`) {
+	volume := "\\\\?\\Volume{" + guid + "}\\"
+	if got := volumeGUID(volume); got != strings.TrimSuffix(volume, "\\") {
 		t.Fatalf("volumeGUID(%q) = %q", volume, got)
 	}
-	if got := volumeGUID(`\\?\Volume{not-a-guid}\`); got != "<unknown-volume>" {
+	if got := volumeGUID("\\\\?\\Volume{not-a-guid}\\"); got != "<unknown-volume>" {
 		t.Fatalf("invalid volume GUID exposed as %q", got)
 	}
 }
@@ -305,7 +305,7 @@ func TestQueryVolumeExtentsGrowthIsBounded(t *testing.T) {
 func TestVolumesForDiskFailsOnPartialEnumeration(t *testing.T) {
 	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
 	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
-	enumerateVolumes = func() ([]string, error) { return []string{`\\?\Volume{one}\`, `\\?\Volume{two}\`}, nil }
+	enumerateVolumes = func() ([]string, error) { return []string{"\\\\?\\Volume{one}\\", "\\\\?\\Volume{two}\\"}, nil }
 	sentinel := errors.New("extent query failed")
 	queryVolumeDisks = func(v string) ([]uint32, error) {
 		if strings.Contains(v, "two") {
@@ -358,10 +358,10 @@ func TestVolumeExtentQueryErrorNamesGUIDAndOperation(t *testing.T) {
 	t.Cleanup(func() { openVolumeHandle, callVolumeExtentIOCTL = oldOpen, oldCall })
 	openVolumeHandle = func(string, uint32) (windows.Handle, error) { return windows.InvalidHandle, nil }
 	callVolumeExtentIOCTL = func(windows.Handle, []byte) (uint32, error) { return 0, windows.ERROR_ACCESS_DENIED }
-	guid := `\\?\Volume{12345678-1234-1234-1234-123456789abc}\`
+	guid := "\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\"
 	_, err := volumeDisks(guid)
 	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
-	requireErrorContains(t, err, strings.TrimSuffix(guid, `\`))
+	requireErrorContains(t, err, strings.TrimSuffix(guid, "\\"))
 	requireErrorContains(t, err, "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS")
 }
 
@@ -537,7 +537,9 @@ func TestDiskRecordFromEvidence(t *testing.T) {
 func TestDiskVolumeIndexDedupesExtentsOnSameDisk(t *testing.T) {
 	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
 	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
-	enumerateVolumes = func() ([]string, error) { return []string{`\\?\Volume{a}\`, `\\?\Volume{b}\`, `\\?\Volume{a}\`}, nil }
+	enumerateVolumes = func() ([]string, error) {
+		return []string{"\\\\?\\Volume{a}\\", "\\\\?\\Volume{b}\\", "\\\\?\\Volume{a}\\"}, nil
+	}
 	queries := 0
 	queryVolumeDisks = func(v string) ([]uint32, error) {
 		queries++
@@ -550,7 +552,7 @@ func TestDiskVolumeIndexDedupesExtentsOnSameDisk(t *testing.T) {
 	if err != nil || queries != 2 {
 		t.Fatalf("queries=%d error=%v", queries, err)
 	}
-	if got := index[3]; len(got) != 1 || got[0] != `\\?\Volume{a}\` {
+	if got := index[3]; len(got) != 1 || got[0] != "\\\\?\\Volume{a}\\" {
 		t.Fatalf("disk 3 volumes=%v", got)
 	}
 	if got := index[5]; len(got) != 2 {
@@ -578,7 +580,7 @@ func stubLock(t *testing.T, attempts *int, errs ...error) {
 func TestLockVolumeRetriesTransientDenial(t *testing.T) {
 	attempts := 0
 	stubLock(t, &attempts, windows.ERROR_ACCESS_DENIED, windows.ERROR_SHARING_VIOLATION)
-	if _, err := lockVolume(context.Background(), `\\?\Volume{a}\`); err != nil || attempts != 3 {
+	if _, err := lockVolume(context.Background(), "\\\\?\\Volume{a}\\"); err != nil || attempts != 3 {
 		t.Fatalf("attempts=%d error=%v", attempts, err)
 	}
 }
@@ -590,7 +592,7 @@ func TestLockVolumeGivesUpAfterBoundedAttempts(t *testing.T) {
 		denials[i] = windows.ERROR_ACCESS_DENIED
 	}
 	stubLock(t, &attempts, denials...)
-	_, err := lockVolume(context.Background(), `\\?\Volume{a}\`)
+	_, err := lockVolume(context.Background(), "\\\\?\\Volume{a}\\")
 	requireErrorIs(t, err, ErrVolumeLockDenied)
 	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
 	requireEqual(t, "attempts", attempts, lockVolumeAttempts)
@@ -599,7 +601,7 @@ func TestLockVolumeGivesUpAfterBoundedAttempts(t *testing.T) {
 func TestLockVolumeDoesNotRetryPermanentFailure(t *testing.T) {
 	attempts := 0
 	stubLock(t, &attempts, windows.ERROR_NOT_SUPPORTED)
-	_, err := lockVolume(context.Background(), `\\?\Volume{a}\`)
+	_, err := lockVolume(context.Background(), "\\\\?\\Volume{a}\\")
 	if !errors.Is(err, windows.ERROR_NOT_SUPPORTED) || attempts != 1 {
 		t.Fatalf("attempts=%d error=%v", attempts, err)
 	}
@@ -617,7 +619,7 @@ func TestLockVolumeRetryHonorsCancellation(t *testing.T) {
 		cancel()
 		return windows.ERROR_ACCESS_DENIED
 	}
-	_, err := lockVolume(ctx, `\\?\Volume{a}\`)
+	_, err := lockVolume(ctx, "\\\\?\\Volume{a}\\")
 	if !errors.Is(err, context.Canceled) || attempts != 1 {
 		t.Fatalf("attempts=%d error=%v", attempts, err)
 	}

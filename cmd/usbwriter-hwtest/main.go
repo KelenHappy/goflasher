@@ -125,6 +125,24 @@ func runEnumerationCase(options commandOptions, devices []device.Device, approve
 }
 
 func runDestructiveCase(ctx context.Context, backend device.Backend, options commandOptions, selection deviceSelection) {
+	request := authorizeDestructiveWrite(backend, options, selection)
+	switch options.testCase {
+	case "write-verify-eject":
+		runWriteVerifyEject(ctx, request)
+	case "write-cancel":
+		runWriteCancel(ctx, request, options.cancelAfter)
+	case "write-remove":
+		runWriteRemove(ctx, request)
+	case "corruption-detect":
+		runCorruptionDetect(ctx, request)
+	default:
+		fatal(fmt.Errorf("unknown --case %q", options.testCase))
+	}
+}
+
+// authorizeDestructiveWrite consumes the one-time challenge and checks that the
+// image fits the selected device before any destructive case may run.
+func authorizeDestructiveWrite(backend device.Backend, options commandOptions, selection deviceSelection) writeRequest {
 	if !selection.found {
 		fatal(errors.New("exact allowlisted device is not currently allowed"))
 	}
@@ -140,52 +158,62 @@ func runDestructiveCase(ctx context.Context, backend device.Backend, options com
 	if info.UncompressedSize > selected.Size {
 		fatal(errors.New("test image exceeds disposable device"))
 	}
+	return writeRequest{backend: backend, image: info, selected: selected}
+}
 
-	switch options.testCase {
-	case "write-verify-eject":
-		result, err := run(ctx, writeRequest{backend: backend, image: info, selected: selected, options: app.RunOptions{Verify: true, Eject: true}})
-		fatal(err)
-		if !result.Verified || !result.Ejected {
-			fatal(errors.New("verification or eject result missing"))
-		}
-		fmt.Printf("PASS: bytes=%d sha256=%s verified=%v ejected=%v\n", result.BytesWritten, result.TargetSHA256, result.Verified, result.Ejected)
-	case "write-cancel":
-		cancelCtx, cancel := context.WithTimeout(ctx, options.cancelAfter)
-		defer cancel()
-		_, err := run(cancelCtx, writeRequest{backend: backend, image: info, selected: selected})
-		if !isCancellation(err) {
-			fatal(fmt.Errorf("expected cancellation, got %v", err))
-		}
-		fmt.Printf("PASS: cancellation rejected completion: %v\n", err)
-	case "write-remove":
-		fmt.Fprintln(os.Stderr, "REMOVE THE DISPOSABLE DEVICE WHILE WRITING; success is a test failure")
-		_, err := run(ctx, writeRequest{backend: backend, image: info, selected: selected})
-		if err == nil {
-			fatal(errors.New("write completed; removal was not observed"))
-		}
-		fmt.Printf("PASS: removal failed closed: %v\n", err)
-	case "corruption-detect":
-		_, err := run(ctx, writeRequest{backend: backend, image: info, selected: selected, options: app.RunOptions{Verify: true}})
-		fatal(err)
-		w, err := backend.OpenWriter(ctx, selected)
-		fatal(err)
-		_, err = w.Write([]byte{0x00, 0xff, 0x47, 0x46})
-		if closeErr := w.Close(); err == nil {
-			err = closeErr
-		}
-		fatal(err)
-		fatal(backend.Flush(ctx, selected))
-		r, err := backend.OpenReader(ctx, selected)
-		fatal(err)
-		_, err = verify.ReadBack(ctx, r, info.UncompressedSize, info.SHA256, nil)
-		_ = r.Close()
-		if !errors.Is(err, verify.ErrMismatch) {
-			fatal(fmt.Errorf("expected corruption mismatch, got %v", err))
-		}
-		fmt.Println("PASS: deliberate corruption detected")
-	default:
-		fatal(fmt.Errorf("unknown --case %q", options.testCase))
+func runWriteVerifyEject(ctx context.Context, request writeRequest) {
+	request.options = app.RunOptions{Verify: true, Eject: true}
+	result, err := run(ctx, request)
+	fatal(err)
+	if !result.Verified || !result.Ejected {
+		fatal(errors.New("verification or eject result missing"))
 	}
+	fmt.Printf("PASS: bytes=%d sha256=%s verified=%v ejected=%v\n", result.BytesWritten, result.TargetSHA256, result.Verified, result.Ejected)
+}
+
+func runWriteCancel(ctx context.Context, request writeRequest, cancelAfter time.Duration) {
+	cancelCtx, cancel := context.WithTimeout(ctx, cancelAfter)
+	defer cancel()
+	_, err := run(cancelCtx, request)
+	if !isCancellation(err) {
+		fatal(fmt.Errorf("expected cancellation, got %v", err))
+	}
+	fmt.Printf("PASS: cancellation rejected completion: %v\n", err)
+}
+
+func runWriteRemove(ctx context.Context, request writeRequest) {
+	fmt.Fprintln(os.Stderr, "REMOVE THE DISPOSABLE DEVICE WHILE WRITING; success is a test failure")
+	_, err := run(ctx, request)
+	if err == nil {
+		fatal(errors.New("write completed; removal was not observed"))
+	}
+	fmt.Printf("PASS: removal failed closed: %v\n", err)
+}
+
+func runCorruptionDetect(ctx context.Context, request writeRequest) {
+	request.options = app.RunOptions{Verify: true}
+	_, err := run(ctx, request)
+	fatal(err)
+	corruptTarget(ctx, request.backend, request.selected)
+	r, err := request.backend.OpenReader(ctx, request.selected)
+	fatal(err)
+	_, err = verify.ReadBack(ctx, r, request.image.UncompressedSize, request.image.SHA256, nil)
+	_ = r.Close()
+	if !errors.Is(err, verify.ErrMismatch) {
+		fatal(fmt.Errorf("expected corruption mismatch, got %v", err))
+	}
+	fmt.Println("PASS: deliberate corruption detected")
+}
+
+func corruptTarget(ctx context.Context, backend device.Backend, target device.Device) {
+	w, err := backend.OpenWriter(ctx, target)
+	fatal(err)
+	_, err = w.Write([]byte{0x00, 0xff, 0x47, 0x46})
+	if closeErr := w.Close(); err == nil {
+		err = closeErr
+	}
+	fatal(err)
+	fatal(backend.Flush(ctx, target))
 }
 
 func isCancellation(err error) bool {

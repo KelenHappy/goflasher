@@ -635,7 +635,7 @@ func lockVolume(ctx context.Context, volume string) (windows.Handle, error) {
 	if err := ctx.Err(); err != nil {
 		return windows.InvalidHandle, err
 	}
-	h, err := openVolumeHandle(strings.TrimSuffix(volume, `\`), windows.GENERIC_READ|windows.GENERIC_WRITE)
+	h, err := openVolumeHandle(strings.TrimSuffix(volume, "\\"), windows.GENERIC_READ|windows.GENERIC_WRITE)
 	if err != nil {
 		return windows.InvalidHandle, fmt.Errorf("%w: volume %s open: %w", ErrVolumeLockDenied, volumeGUID(volume), err)
 	}
@@ -899,7 +899,7 @@ func deviceTreeIdentity(dev uint32) (string, bool) {
 		if depth == 0 {
 			leaf = id
 		}
-		if strings.HasPrefix(strings.ToUpper(id), `USB\`) {
+		if strings.HasPrefix(strings.ToUpper(id), "USB\\") {
 			usb = true
 		}
 		var parent uint32
@@ -980,7 +980,7 @@ func queryGrowingBuffer(limit int, call ioctlCall) ([]byte, error) {
 }
 
 func volumeGUID(v string) string {
-	trimmed := strings.TrimSuffix(v, `\`)
+	trimmed := strings.TrimSuffix(v, "\\")
 	const prefix = `\\?\Volume{`
 	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, "}") {
 		return "<unknown-volume>"
@@ -1019,7 +1019,7 @@ func isHexByte(value byte) bool {
 }
 
 func volumeDisks(v string) ([]uint32, error) {
-	h, err := openVolumeHandle(strings.TrimSuffix(v, `\`), 0)
+	h, err := openVolumeHandle(strings.TrimSuffix(v, "\\"), 0)
 	if err != nil {
 		return nil, fmt.Errorf("volume %s open: %w", volumeGUID(v), err)
 	}
@@ -1124,7 +1124,7 @@ func systemDiskNumbers() (map[uint32]bool, error) {
 	if !validSystemRoot(root) {
 		return nil, fmt.Errorf("invalid SystemRoot %q", root)
 	}
-	drive := `\\.\` + root[:2]
+	drive := "\\\\.\\" + root[:2]
 	h, err := openHandle(drive, 0)
 	if err != nil {
 		return nil, err

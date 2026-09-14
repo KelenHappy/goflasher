@@ -69,10 +69,10 @@ func packagePortable(executable, version, output string) error {
 
 // checkFlags rejects the flag combinations no layout can be built from.
 func checkFlags(executable, version, output string) error {
-	switch {
-	case executable == "", output == "":
+	if executable == "" || output == "" {
 		return errUsage
-	case !versionPattern.MatchString(version):
+	}
+	if !versionPattern.MatchString(version) {
 		return errUsage
 	}
 	return nil
@@ -85,7 +85,7 @@ func resetArtifacts(stage, archive string) error {
 	}
 	_ = os.Remove(archive)
 	_ = os.Remove(archive + ".sha256")
-	return os.MkdirAll(filepath.Join(stage, "licenses"), 0o755)
+	return os.MkdirAll(filepath.Join(stage, "licenses"), 0755)
 }
 
 // stageLayout fills the stage directory with everything the ZIP ships.
@@ -111,7 +111,7 @@ func stageReadme(repo, stage, version string) error {
 		return err
 	}
 	text := strings.ReplaceAll(string(readme), "VERSION", version)
-	return os.WriteFile(filepath.Join(stage, "README-Windows.txt"), []byte(text), 0o644)
+	return os.WriteFile(filepath.Join(stage, "README-Windows.txt"), []byte(text), 0644)
 }
 
 // writeChecksum writes the sha256sum-style companion file for the archive.
@@ -121,7 +121,7 @@ func writeChecksum(archive string) error {
 		return err
 	}
 	line := sum + "  " + filepath.Base(archive) + "\n"
-	return os.WriteFile(archive+".sha256", []byte(line), 0o644)
+	return os.WriteFile(archive+".sha256", []byte(line), 0644)
 }
 
 func fileSHA256(path string) (string, error) {

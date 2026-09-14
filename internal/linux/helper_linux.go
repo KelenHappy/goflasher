@@ -92,7 +92,7 @@ func newCommandHelper() privilegedHelper {
 	// init, but imported packages' init() still run as root). Every packaged
 	// build (deb/rpm/arch) ships the standalone cmd/goflasher-helper at
 	// /usr/libexec, tried first above, so this path is reached only by a bare GUI
-	// binary with no accompanying helper — not by any shipped artifact.
+	// binary with no accompanying helper, not by any shipped artifact.
 	return &commandHelper{executable: executable, arguments: []string{embeddedHelperArgument}}
 }
 
@@ -118,8 +118,8 @@ func executableFile(path string) bool {
 // helperCandidates picks which binary the GUI hands to pkexec. This selection
 // is a convenience/packaging concern, NOT a security boundary. It runs entirely
 // in the unprivileged GUI before pkexec, so the executable-relative candidate
-// grants no capability an attacker who already controls this process lacks —
-// such an attacker could invoke pkexec directly. The privilege boundary is the
+// grants no capability an attacker who already controls this process lacks,
+// because such an attacker could invoke pkexec directly. The privilege boundary is the
 // root helper, which trusts nothing in the request: it re-derives the device
 // from the kernel major/minor and rebinds via fstat(fd) in
 // validateOpenedDevice. The fixed /usr/libexec path is tried first, so on a
@@ -589,6 +589,11 @@ func readPrivilegedRequest(in io.Reader) (privilegedRequest, io.Reader, error) {
 
 type syncer interface{ Sync() error }
 
+type syncWriter interface {
+	io.Writer
+	Sync() error
+}
+
 func flushAndInvalidate(target syncer, invalidate func() error) error {
 	if err := target.Sync(); err != nil {
 		return err
@@ -607,10 +612,7 @@ func invalidateBlockCache(target *os.File) error {
 	return nil
 }
 
-func writeAndSync(target interface {
-	io.Writer
-	Sync() error
-}, payload io.Reader) error {
+func writeAndSync(target syncWriter, payload io.Reader) error {
 	if _, err := io.Copy(target, payload); err != nil {
 		return err
 	}
