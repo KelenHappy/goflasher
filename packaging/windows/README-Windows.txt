@@ -21,4 +21,4 @@ This build is not code signed. Windows may show a SmartScreen prompt and an
 "Unknown publisher" confirmation when you run it. Verify the SHA-256 above,
 then choose More info -> Run anyway and confirm the prompt.
 
-Official releases: https://github.com/goflasher/goflasher/releases
+Official releases: https://github.com/KelenHappy/goflasher/releases

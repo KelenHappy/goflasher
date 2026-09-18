@@ -209,5 +209,5 @@ macOS GUI、原生 Finder 選擇器、可移除式 USB 後端、原始寫入、�
 ## 改善建議與錯誤回報
 
 非敏感的錯誤報告與功能建議，請使用
-[GitHub Issue 追蹤器](https://github.com/goflasher/goflasher/issues)。回報時請附上
+[GitHub Issue 追蹤器](https://github.com/KelenHappy/goflasher/issues)。回報時請附上
 GoFlasher 版本、Linux 發行版、桌面環境，以及經過適當遮蔽的相關紀錄。
