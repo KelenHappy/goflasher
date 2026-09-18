@@ -84,14 +84,19 @@ func (a *winAPI) formatFAT32(ctx context.Context, r diskRecord, label string, up
 	}
 	// Progress is best effort: a full channel drops the update rather than
 	// stalling the format, and cancellation is observed by fat32.Format itself.
-	err = fat32.Format(ctx, target, r.Size, label, func(percent uint64) {
-		if updates == nil {
-			return
-		}
-		select {
-		case updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: percent, TotalBytes: 100}:
-		default:
-		}
+	err = fat32.Format(ctx, fat32.Request{
+		Device: target,
+		Size:   r.Size,
+		Label:  label,
+		Progress: func(percent uint64) {
+			if updates == nil {
+				return
+			}
+			select {
+			case updates <- progress.Update{Stage: progress.StageFormatting, BytesProcessed: percent, TotalBytes: 100}:
+			default:
+			}
+		},
 	})
 	if err != nil {
 		return err

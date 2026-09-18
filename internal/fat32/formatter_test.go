@@ -16,7 +16,7 @@ func TestFormatCreatesFAT32AndReportsProgress(t *testing.T) {
 	const size = uint64(64 << 20)
 	f := newTempDisk(t, "disk", size)
 	var got []uint64
-	if err := Format(context.Background(), f, size, "GOFLASHER", func(p uint64) { got = append(got, p) }); err != nil {
+	if err := Format(context.Background(), Request{Device: f, Size: size, Label: "GOFLASHER", Progress: func(p uint64) { got = append(got, p) }}); err != nil {
 		t.Fatal(err)
 	}
 	boot := readDiskRange(t, f, 0, 512)
@@ -60,7 +60,7 @@ func TestFormatRejectsInvalidInputs(t *testing.T) {
 		size  uint64
 		label string
 	}{{64 << 20, "bad label"}, {1 << 20, "GOOD"}} {
-		if err := Format(context.Background(), f, tt.size, tt.label, nil); err == nil {
+		if err := Format(context.Background(), Request{Device: f, Size: tt.size, Label: tt.label}); err == nil {
 			t.Fatalf("accepted %+v", tt)
 		}
 	}
@@ -70,7 +70,7 @@ func TestFormatHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	f := newTempDisk(t, "disk", 0)
-	if err := Format(ctx, f, 64<<20, "GOOD", nil); !errors.Is(err, context.Canceled) {
+	if err := Format(ctx, Request{Device: f, Size: 64 << 20, Label: "GOOD"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -112,7 +112,7 @@ func formatTestPartition(t *testing.T, f *os.File, l *gpt.Layout, sectorSize uin
 		t.Fatal(err)
 	}
 	partitionSize := (l.PartitionEndLBA - l.PartitionStartLBA + 1) * sectorSize
-	if err = FormatPartition(context.Background(), partition, partitionSize, "GOFLASHER", nil); err != nil {
+	if err = FormatPartition(context.Background(), Request{Device: partition, Size: partitionSize, Label: "GOFLASHER"}); err != nil {
 		t.Fatal(err)
 	}
 }

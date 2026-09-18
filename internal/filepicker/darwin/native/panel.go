@@ -94,14 +94,23 @@ func loadObjC() (objcAPI, func(), error) {
 	return api, closeLibs, nil
 }
 
+// lookupClasses resolves every AppKit class the picker needs, naming the first
+// one the Objective-C runtime cannot provide.
 func lookupClasses(api objcAPI) (appKitClasses, error) {
-	classes := appKitClasses{
-		pool:     api.getClass(cString("NSAutoreleasePool")),
-		panel:    api.getClass(cString("NSOpenPanel")),
-		nsString: api.getClass(cString("NSString")),
+	var classes appKitClasses
+	required := []struct {
+		name string
+		dst  *uintptr
+	}{
+		{"NSAutoreleasePool", &classes.pool},
+		{"NSOpenPanel", &classes.panel},
+		{"NSString", &classes.nsString},
 	}
-	if classes.pool == 0 || classes.panel == 0 || classes.nsString == 0 {
-		return appKitClasses{}, errors.New("required AppKit class is unavailable")
+	for _, class := range required {
+		*class.dst = api.getClass(cString(class.name))
+		if *class.dst == 0 {
+			return appKitClasses{}, fmt.Errorf("AppKit class %s is unavailable", class.name)
+		}
 	}
 	return classes, nil
 }

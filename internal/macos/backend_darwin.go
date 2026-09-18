@@ -273,7 +273,8 @@ func (b *backend) FormatFAT32(ctx context.Context, selected device.Device, label
 	}
 	defer target.Close()
 
-	if err = fat32.Format(ctx, target, d.Size, label, formatProgress(ctx, updates)); err != nil {
+	req := fat32.Request{Device: target, Size: d.Size, Label: label, Progress: formatProgress(ctx, updates)}
+	if err = fat32.Format(ctx, req); err != nil {
 		return fmt.Errorf("format FAT32: %w", err)
 	}
 	return nil

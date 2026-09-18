@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"time"
 
 	"github.com/goflasher/goflasher/internal/progress"
 )
+
+const defaultBufferSize = 4 << 20
 
 var (
 	ErrCancelled      = errors.New("write cancelled")
@@ -33,65 +36,115 @@ type Options struct {
 	WriteStage             progress.Stage // defaults to StageWriting when zero
 }
 
+// tooLargeForTarget reports whether a known image size exceeds a known target
+// size; a zero on either side means the size is unknown and cannot be checked.
+func (o Options) tooLargeForTarget() bool {
+	if o.TotalBytes == 0 || o.TargetSize == 0 {
+		return false
+	}
+	return o.TotalBytes > o.TargetSize
+}
+
+// withDefaults fills the optional fields the copy loop relies on.
+func (o Options) withDefaults() Options {
+	if o.BufferSize <= 0 {
+		o.BufferSize = defaultBufferSize
+	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	if o.WriteStage == "" {
+		o.WriteStage = progress.StageWriting
+	}
+	return o
+}
+
 // Copy streams source to target while hashing the exact bytes written.
 func Copy(ctx context.Context, dst io.Writer, src io.Reader, opts Options) (Result, error) {
-	if opts.TotalBytes > 0 && opts.TargetSize > 0 && opts.TotalBytes > opts.TargetSize {
+	if opts.tooLargeForTarget() {
 		return Result{}, ErrTargetTooSmall
 	}
-	if opts.BufferSize <= 0 {
-		opts.BufferSize = 4 << 20
-	}
-	if opts.Now == nil {
-		opts.Now = time.Now
-	}
-	if opts.WriteStage == "" {
-		opts.WriteStage = progress.StageWriting
-	}
-	start := opts.Now()
+	return newCopier(dst, opts.withDefaults()).run(ctx, src)
+}
+
+// copier carries the per-run state of one Copy so the loop stays flat.
+type copier struct {
+	opts    Options
+	sink    io.Writer // target and hash together
+	hash    hash.Hash
+	start   time.Time
+	written uint64
+}
+
+func newCopier(dst io.Writer, opts Options) *copier {
 	h := sha256.New()
-	mw := io.MultiWriter(dst, h)
-	buf := make([]byte, opts.BufferSize)
-	var written uint64
+	return &copier{opts: opts, sink: io.MultiWriter(dst, h), hash: h, start: opts.Now()}
+}
+
+func (c *copier) run(ctx context.Context, src io.Reader) (Result, error) {
+	buf := make([]byte, c.opts.BufferSize)
 	for {
 		if err := ctx.Err(); err != nil {
-			return result(written, h, start, opts.Now()), fmt.Errorf("%w: %v", ErrCancelled, err)
+			return c.result(), fmt.Errorf("%w: %v", ErrCancelled, err)
 		}
 		n, readErr := src.Read(buf)
 		if n > 0 {
-			if opts.TotalBytes > 0 && uint64(n) > opts.TotalBytes-written {
-				return result(written, h, start, opts.Now()), fmt.Errorf("%w: expected %d bytes", ErrSourceChanged, opts.TotalBytes)
+			if err := c.consume(ctx, buf[:n]); err != nil {
+				return c.result(), err
 			}
-			wn, err := mw.Write(buf[:n])
-			written += uint64(wn)
-			if err != nil {
-				return result(written, h, start, opts.Now()), fmt.Errorf("%w: %v", ErrWriteFailed, err)
-			}
-			if wn != n {
-				return result(written, h, start, opts.Now()), fmt.Errorf("%w: %v", ErrWriteFailed, io.ErrShortWrite)
-			}
-			send(ctx, opts.Progress, progress.Calculate(opts.WriteStage, written, opts.TotalBytes, opts.Now().Sub(start)))
 		}
-		if readErr == io.EOF {
-			if opts.TotalBytes > 0 && written != opts.TotalBytes {
-				return result(written, h, start, opts.Now()), fmt.Errorf("%w: got %d bytes, expected %d", ErrSourceChanged, written, opts.TotalBytes)
-			}
-			break
+		done, err := c.afterRead(readErr)
+		if err != nil {
+			return c.result(), err
 		}
-		if readErr != nil {
-			return result(written, h, start, opts.Now()), readErr
+		if done {
+			return c.result(), nil
 		}
 	}
-	return result(written, h, start, opts.Now()), nil
 }
 
-func result(n uint64, h interface{ Sum([]byte) []byte }, start, end time.Time) Result {
-	elapsed := end.Sub(start)
-	r := Result{BytesWritten: n, SHA256: hex.EncodeToString(h.Sum(nil)), Elapsed: elapsed}
+// consume writes one chunk to the target and the hash, then reports progress.
+func (c *copier) consume(ctx context.Context, chunk []byte) error {
+	if c.opts.TotalBytes > 0 && uint64(len(chunk)) > c.opts.TotalBytes-c.written {
+		return fmt.Errorf("%w: expected %d bytes", ErrSourceChanged, c.opts.TotalBytes)
+	}
+	wn, err := c.sink.Write(chunk)
+	c.written += uint64(wn)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrWriteFailed, err)
+	}
+	if wn != len(chunk) {
+		return fmt.Errorf("%w: %v", ErrWriteFailed, io.ErrShortWrite)
+	}
+	send(ctx, c.opts.Progress, progress.Calculate(c.opts.WriteStage, c.written, c.opts.TotalBytes, c.elapsed()))
+	return nil
+}
+
+// afterRead turns the read outcome into "the copy is complete" or a failure.
+func (c *copier) afterRead(readErr error) (bool, error) {
+	switch {
+	case readErr == nil:
+		return false, nil
+	case readErr != io.EOF:
+		return false, readErr
+	case c.opts.TotalBytes > 0 && c.written != c.opts.TotalBytes:
+		return false, fmt.Errorf("%w: got %d bytes, expected %d", ErrSourceChanged, c.written, c.opts.TotalBytes)
+	default:
+		return true, nil
+	}
+}
+
+func (c *copier) elapsed() time.Duration { return c.opts.Now().Sub(c.start) }
+
+func (c *copier) result() Result {
+	elapsed := c.elapsed()
+	r := Result{BytesWritten: c.written, SHA256: hex.EncodeToString(c.hash.Sum(nil)), Elapsed: elapsed}
 	if elapsed > 0 {
-		r.AverageBytesPerSecond = float64(n) / elapsed.Seconds()
+		r.AverageBytesPerSecond = float64(c.written) / elapsed.Seconds()
 	}
 	return r
 }
+
 func send(ctx context.Context, ch chan<- progress.Update, u progress.Update) {
 	if ch == nil {
 		return

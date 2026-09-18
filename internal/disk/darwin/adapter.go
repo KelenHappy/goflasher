@@ -33,12 +33,7 @@ type Adapter interface {
 // whose registry identity could not be read. Those are never exposed, so the
 // count is the only evidence the caller has that they existed.
 func (a *NativeAdapter) List(ctx context.Context) ([]ProbeResult, int, error) {
-	s, e := a.frameworks.NewSession()
-	if e != nil {
-		return nil, 0, e
-	}
-	defer s.Close()
-	disks, e := s.ListDisks(ctx)
+	disks, e := a.listDisks(ctx)
 	if e != nil {
 		return nil, 0, e
 	}
@@ -48,20 +43,49 @@ func (a *NativeAdapter) List(ctx context.Context) ([]ProbeResult, int, error) {
 		if !d.Whole {
 			continue
 		}
-		i, err := a.frameworks.RegistryIdentity(d.BSDName)
-		if err != nil {
-			skipped++
+		r, e := a.probe(d, disks)
+		if e != nil {
+			skipped++ // incomplete identity is never exposed.
 			continue
-		} // incomplete identity is never exposed.
-		r := result(d, i)
-		for _, volume := range disks {
-			if strings.HasPrefix(volume.BSDName, d.BSDName+"s") && volume.VolumePath != "" {
-				r.MountPoints = append(r.MountPoints, volume.VolumePath)
-			}
 		}
 		out = append(out, r)
 	}
 	return out, skipped, nil
+}
+
+// listDisks holds the arbitration session only for the enumeration itself. The
+// registry identities read afterwards come from the frameworks, not the session.
+func (a *NativeAdapter) listDisks(ctx context.Context) ([]native.DiskDescription, error) {
+	s, e := a.frameworks.NewSession()
+	if e != nil {
+		return nil, e
+	}
+	defer s.Close()
+	return s.ListDisks(ctx)
+}
+
+// probe pairs a whole disk with its registry identity and the mount points of
+// its partitions.
+func (a *NativeAdapter) probe(d native.DiskDescription, disks []native.DiskDescription) (ProbeResult, error) {
+	i, e := a.frameworks.RegistryIdentity(d.BSDName)
+	if e != nil {
+		return ProbeResult{}, e
+	}
+	r := result(d, i)
+	r.MountPoints = mountPoints(d.BSDName, disks)
+	return r, nil
+}
+
+// mountPoints collects the volume paths of whole's partitions, which Disk
+// Arbitration names whole + "s" + index.
+func mountPoints(whole string, disks []native.DiskDescription) []string {
+	var out []string
+	for _, v := range disks {
+		if strings.HasPrefix(v.BSDName, whole+"s") && v.VolumePath != "" {
+			out = append(out, v.VolumePath)
+		}
+	}
+	return out
 }
 
 type NativeAdapter struct{ frameworks *native.Frameworks }

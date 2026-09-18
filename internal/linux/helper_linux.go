@@ -811,7 +811,12 @@ func (s *installerSession) reply(response privilege.SessionResponse) error {
 }
 
 func makeFAT32(device *os.File, size uint64, label string, errOut io.Writer) error {
-	return fat32.Format(context.Background(), device, size, label, func(percent uint64) { fmt.Fprintf(errOut, "PROGRESS %d 100\n", percent) })
+	return fat32.Format(context.Background(), fat32.Request{
+		Device:   device,
+		Size:     size,
+		Label:    label,
+		Progress: func(percent uint64) { fmt.Fprintf(errOut, "PROGRESS %d 100\n", percent) },
+	})
 }
 
 func resolveDevice(req privilegedRequest, env helperEnvironment) (string, string, error) {

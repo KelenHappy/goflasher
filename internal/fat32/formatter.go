@@ -22,26 +22,36 @@ const fatCount = uint64(2)
 
 type layout struct{ totalSectors, sectorsPerCluster, fatSectors, clusters uint64 }
 
-func Format(ctx context.Context, device Device, size uint64, label string, progress ProgressFunc) error {
-	return FormatPartition(ctx, device, size, label, progress)
+// Request describes one format job. Size is the length of the view the
+// filesystem is written into: the whole device for Format, the partition for
+// FormatPartition. Progress is optional and may be nil.
+type Request struct {
+	Device   Device
+	Size     uint64
+	Label    string
+	Progress ProgressFunc
+}
+
+func Format(ctx context.Context, req Request) error {
+	return FormatPartition(ctx, req)
 }
 
 // FormatPartition creates a FAT32 filesystem on a partition-relative device
-// view. partitionSize is the length of that view, not the size of the backing
-// disk. Callers formatting a partitioned disk must supply a bounded view so
-// every offset used below is relative to the beginning of the partition.
+// view. req.Size is the length of that view, not the size of the backing disk.
+// Callers formatting a partitioned disk must supply a bounded view so every
+// offset used below is relative to the beginning of the partition.
 //
 // Format remains the whole-device (superfloppy) entry point for callers which
 // intentionally erase and format an entire device.
-func FormatPartition(ctx context.Context, partition Device, partitionSize uint64, label string, progress ProgressFunc) error {
-	if !ValidLabel(label) {
+func FormatPartition(ctx context.Context, req Request) error {
+	if !ValidLabel(req.Label) {
 		return errors.New("invalid FAT32 volume label")
 	}
-	l, err := newLayout(partitionSize)
+	l, err := newLayout(req.Size)
 	if err != nil {
 		return err
 	}
-	f := formatter{ctx: ctx, device: partition, layout: l, label: label, progress: progress}
+	f := formatter{ctx: ctx, device: req.Device, layout: l, label: req.Label, progress: req.Progress}
 	return f.run()
 }
 func ValidLabel(label string) bool {

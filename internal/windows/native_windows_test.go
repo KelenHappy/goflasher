@@ -502,6 +502,7 @@ func TestParseHotplugInfo(t *testing.T) {
 
 func TestDiskRecordFromEvidence(t *testing.T) {
 	const vendor, model, serial = "Vendor", "Model X", " SN 42 "
+	const rawWWN, wantWWN = "5000c50012345678", "5000C50012345678"
 	q := make([]byte, storageDeviceDescriptorSize)
 	off := func(s string) uint32 {
 		o := uint32(len(q))
@@ -514,13 +515,31 @@ func TestDiskRecordFromEvidence(t *testing.T) {
 	binary.LittleEndian.PutUint32(q[16:20], modelOff)
 	binary.LittleEndian.PutUint32(q[24:28], serialOff)
 	binary.LittleEndian.PutUint32(q[28:32], busTypeUSB)
-	r, err := diskRecordFromEvidence(diskEvidence{number: 3, length: 1 << 30, descriptor: q, wwn: "5000c50012345678", hotplug: hotplugFlags{deviceHotplug: true}})
+	ev := diskEvidence{
+		number:     3,
+		length:     1 << 30,
+		descriptor: q,
+		wwn:        rawWWN,
+		hotplug:    hotplugFlags{deviceHotplug: true},
+	}
+	r, err := diskRecordFromEvidence(ev)
 	if err != nil {
 		t.Fatal(err)
 	}
+	const wantSerial = "SN 42"
 	want := diskRecord{
-		Device:        device.Device{ID: "windows:serial=SN 42;wwn=5000C50012345678", Path: `\\.\PhysicalDrive3`, Vendor: vendor, Model: model, Serial: "SN 42", WWN: "5000C50012345678", Transport: "usb", Major: 3, Size: 1 << 30},
-		identity:      windowsIdentityEvidence{Serial: "SN 42", WWN: "5000C50012345678"},
+		Device: device.Device{
+			ID:        "windows:serial=" + wantSerial + ";wwn=" + wantWWN,
+			Path:      `\\.\PhysicalDrive3`,
+			Vendor:    vendor,
+			Model:     model,
+			Serial:    wantSerial,
+			WWN:       wantWWN,
+			Transport: "usb",
+			Major:     3,
+			Size:      1 << 30,
+		},
+		identity:      windowsIdentityEvidence{Serial: wantSerial, WWN: wantWWN},
 		deviceHotplug: true,
 		usbAncestor:   true,
 		deviceNumber:  3,

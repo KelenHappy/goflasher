@@ -65,7 +65,7 @@ type dirEntry struct {
 // NewBuilder formats device and returns a builder for the new, empty volume.
 // Existing contents are always destroyed.  Overwriting paths is not supported.
 func NewBuilder(ctx context.Context, device Device, size uint64, label string) (*Builder, error) {
-	if err := Format(ctx, device, size, label, nil); err != nil {
+	if err := Format(ctx, Request{Device: device, Size: size, Label: label}); err != nil {
 		return nil, err
 	}
 	l, err := newLayout(size)

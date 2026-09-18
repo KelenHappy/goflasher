@@ -25,6 +25,24 @@ func readBlockTopology(classRoot string) (*blockTopology, error) {
 	// Mount, swap, partition, holder, and slave relationships are authorization
 	// inputs: returning before the complete current sysfs view is available, or
 	// reusing an older view, could authorize a device whose topology changed.
+	t, err := indexBlockDevices(classRoot)
+	if err != nil {
+		return nil, err
+	}
+	for name := range t.depends {
+		if err := t.linkDevice(classRoot, name); err != nil {
+			return nil, err
+		}
+	}
+	if err := t.validateAcyclic(); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// indexBlockDevices records every device under classRoot by device number, so
+// the relation pass can reject any edge pointing outside the snapshot.
+func indexBlockDevices(classRoot string) (*blockTopology, error) {
 	entries, err := os.ReadDir(classRoot)
 	if err != nil {
 		return nil, err
@@ -43,34 +61,47 @@ func readBlockTopology(classRoot string) (*blockTopology, error) {
 		t.byNumber[number] = name
 		t.depends[name] = map[string]bool{}
 	}
-	for name := range t.depends {
-		if exists(filepath.Join(classRoot, name, "partition")) {
-			real, err := filepath.EvalSymlinks(filepath.Join(classRoot, name))
-			if err != nil {
-				return nil, fmt.Errorf("resolve partition %s: %w", name, err)
-			}
-			parent := filepath.Base(filepath.Dir(real))
-			if _, ok := t.depends[parent]; !ok || parent == name {
-				return nil, fmt.Errorf("invalid parent for partition %s", name)
-			}
-			t.depends[name][parent] = true
-		}
-		if err := t.readRelations(classRoot, name, "slaves", true); err != nil {
-			return nil, err
-		}
-		if err := t.readRelations(classRoot, name, "holders", false); err != nil {
-			return nil, err
-		}
+	return t, nil
+}
+
+// linkDevice records name's parent disk, when name is a partition, plus the
+// stacked relations sysfs reports from both ends.
+func (t *blockTopology) linkDevice(classRoot, name string) error {
+	if err := t.linkPartitionParent(classRoot, name); err != nil {
+		return err
 	}
-	// Validate the complete snapshot, not only paths later reached by a
-	// particular candidate.  A corrupted cycle must never be hidden by an
-	// earlier successful match during a safety query.
+	if err := t.readRelations(classRoot, name, "slaves", true); err != nil {
+		return err
+	}
+	return t.readRelations(classRoot, name, "holders", false)
+}
+
+func (t *blockTopology) linkPartitionParent(classRoot, name string) error {
+	if !exists(filepath.Join(classRoot, name, "partition")) {
+		return nil
+	}
+	real, err := filepath.EvalSymlinks(filepath.Join(classRoot, name))
+	if err != nil {
+		return fmt.Errorf("resolve partition %s: %w", name, err)
+	}
+	parent := filepath.Base(filepath.Dir(real))
+	if _, ok := t.depends[parent]; !ok || parent == name {
+		return fmt.Errorf("invalid parent for partition %s", name)
+	}
+	t.depends[name][parent] = true
+	return nil
+}
+
+// validateAcyclic walks the complete snapshot, not only the paths later reached
+// by a particular candidate.  A corrupted cycle must never be hidden by an
+// earlier successful match during a safety query.
+func (t *blockTopology) validateAcyclic() error {
 	for name := range t.depends {
 		if _, err := t.dependsOn(name, ""); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return t, nil
+	return nil
 }
 
 func (t *blockTopology) readRelations(root, name, directory string, dependencies bool) error {
@@ -140,17 +171,35 @@ func (t *blockTopology) nameForSwapPath(path, devRoot string) (string, bool, err
 		return name, true, nil
 	}
 	info, err := os.Stat(path)
-	if err == nil {
-		if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Mode&syscall.S_IFMT == syscall.S_IFBLK {
-			name, err := t.nameForNumber(devNumber{uint32(unix.Major(uint64(stat.Rdev))), uint32(unix.Minor(uint64(stat.Rdev)))})
-			return name, err == nil, err
+	if err != nil {
+		if underDeviceRoot(path, devRoot) {
+			return "", false, fmt.Errorf("cannot resolve swap device %q: %w", path, err)
 		}
+		return "", false, nil
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Mode&syscall.S_IFMT != syscall.S_IFBLK {
 		// Regular swap files are protected through the filesystem mount.
 		return "", false, nil
 	}
-	rel, relErr := filepath.Rel(filepath.Clean(devRoot), filepath.Clean(path))
-	if relErr == nil && rel != ".." && !filepath.IsAbs(rel) && rel != "." && filepath.Dir(rel) != ".." {
-		return "", false, fmt.Errorf("cannot resolve swap device %q: %w", path, err)
+	name, err := t.nameForNumber(rdevNumber(uint64(stat.Rdev)))
+	return name, err == nil, err
+}
+
+func rdevNumber(rdev uint64) devNumber {
+	return devNumber{uint32(unix.Major(rdev)), uint32(unix.Minor(rdev))}
+}
+
+// underDeviceRoot reports whether path names an entry directly inside devRoot.
+// A swap path there that cannot be stat'd is a device we failed to resolve and
+// must not silently ignore; a path anywhere else is an ordinary swap file.
+func underDeviceRoot(path, devRoot string) bool {
+	rel, err := filepath.Rel(filepath.Clean(devRoot), filepath.Clean(path))
+	if err != nil {
+		return false
 	}
-	return "", false, nil
+	if rel == "." || rel == ".." || filepath.IsAbs(rel) {
+		return false
+	}
+	return filepath.Dir(rel) != ".."
 }

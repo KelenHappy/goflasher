@@ -163,7 +163,7 @@ func (r *execution) copyFiles() error {
 		if !r.shouldCopy(item) {
 			continue
 		}
-		verified, n, err := copyISOFile(r.ctx, r.builder, r.source, r.plan, item)
+		verified, n, err := r.copyISOFile(item)
 		r.recordCopy(verified, n, err)
 		if err != nil {
 			return err
@@ -227,14 +227,35 @@ func validateSplitPart(part SplitPart, index, plannedParts int, maxSize uint64) 
 	if index > plannedParts {
 		return "", fmt.Errorf("%w: split pipeline produced too many parts", ErrVerification)
 	}
-	name := "install.swm"
-	if index > 1 {
-		name = "install" + strconv.Itoa(index) + ".swm"
-	}
-	if part.Name != name || part.Data == nil || part.Size == 0 || part.Size > maxSize {
-		return "", fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Name)
+	name := splitPartName(index)
+	if err := part.validate(name, maxSize); err != nil {
+		return "", err
 	}
 	return name, nil
+}
+
+// splitPartName is the canonical SWM sequence: install.swm, install2.swm, ...
+func splitPartName(index int) string {
+	if index > 1 {
+		return "install" + strconv.Itoa(index) + ".swm"
+	}
+	return "install.swm"
+}
+
+// validate reports why a part is unusable instead of collapsing every rejection
+// into one message.
+func (p SplitPart) validate(name string, maxSize uint64) error {
+	switch {
+	case p.Name != name:
+		return fmt.Errorf("%w: split part %q, want %q", ErrVerification, p.Name, name)
+	case p.Data == nil:
+		return fmt.Errorf("%w: split part %q carries no data", ErrVerification, p.Name)
+	case p.Size == 0:
+		return fmt.Errorf("%w: split part %q is empty", ErrVerification, p.Name)
+	case p.Size > maxSize:
+		return fmt.Errorf("%w: split part %q is %d bytes, over the %d byte part size", ErrVerification, p.Name, p.Size, maxSize)
+	}
+	return nil
 }
 
 func plannedBySource(plan *BuildPlan, name string) (plannedEntry, bool) {
@@ -246,13 +267,15 @@ func plannedBySource(plan *BuildPlan, name string) (plannedEntry, bool) {
 	return plannedEntry{}, false
 }
 
-func copyISOFile(ctx context.Context, builder *fat32.Builder, source io.ReaderAt, plan *BuildPlan, item plannedEntry) (VerificationEntry, uint64, error) {
-	expected := verificationHash(plan, item.destination, item.source.Size)
+// copyISOFile copies one planned entry straight out of the ISO extents. The
+// plan, source and builder it needs are already the execution's own.
+func (r *execution) copyISOFile(item plannedEntry) (VerificationEntry, uint64, error) {
+	expected := verificationHash(r.plan, item.destination, item.source.Size)
 	if expected == "" {
 		return VerificationEntry{}, 0, fmt.Errorf("%w: no preflight hash for %s", ErrVerification, item.destination)
 	}
-	reader := newExtentReader(source, item.source.Extents, item.source.Size)
-	return copyReaderFile(ctx, builder, fileCopy{
+	reader := newExtentReader(r.source, item.source.Extents, item.source.Size)
+	return copyReaderFile(r.ctx, r.builder, fileCopy{
 		destination:  item.destination,
 		source:       reader,
 		expectedSize: item.source.Size,
