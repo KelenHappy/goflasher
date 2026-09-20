@@ -561,32 +561,42 @@ func TestDiskRecordFromEvidence(t *testing.T) {
 }
 
 func TestDiskVolumeIndexDedupesExtentsOnSameDisk(t *testing.T) {
-	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
-	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
-	enumerateVolumes = func() ([]string, error) {
-		return []string{"\\\\?\\Volume{a}\\", "\\\\?\\Volume{b}\\", "\\\\?\\Volume{a}\\"}, nil
-	}
+	const volA, volB = `\\?\Volume{a}\`, `\\?\Volume{b}\`
+	old := enumerateVolumes
+	t.Cleanup(func() { enumerateVolumes = old })
+	enumerateVolumes = func() ([]string, error) { return []string{volA, volB, volA}, nil }
+
 	queries := 0
-	queryVolumeDisks = func(v string) ([]uint32, error) {
+	index, err := diskVolumeIndexUsing(func(v string) ([]uint32, error) {
 		queries++
-		if strings.Contains(v, "a") {
-			return []uint32{3, 3, 5}, nil
+		if v == volA {
+			return []uint32{3, 3, 5}, nil // two extents of volA land on disk 3
 		}
 		return []uint32{5}, nil
-	}
+	})
+
+	requireNoError(t, err)
+	requireEqual(t, "queries", queries, 2)                       // volA enumerated twice, queried once
+	requireEqual(t, "disk 3", strings.Join(index[3], " "), volA) // duplicate extents collapse
+	requireEqual(t, "disk 5", strings.Join(index[5], " "), volA+" "+volB)
+	requireEqual(t, "disk 9", len(index[9]), 0)
+}
+
+// TestDiskVolumeIndexUsesGlobalQuery covers the wiring the dedupe test skips:
+// diskVolumeIndex must feed diskVolumeIndexUsing with the package-level
+// queryVolumeDisks hook rather than a query of its own.
+func TestDiskVolumeIndexUsesGlobalQuery(t *testing.T) {
+	const vol = `\\?\Volume{a}\`
+	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
+	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
+	enumerateVolumes = func() ([]string, error) { return []string{vol}, nil }
+	queried := ""
+	queryVolumeDisks = func(v string) ([]uint32, error) { queried = v; return []uint32{7}, nil }
+
 	index, err := diskVolumeIndex()
-	if err != nil || queries != 2 {
-		t.Fatalf("queries=%d error=%v", queries, err)
-	}
-	if got := index[3]; len(got) != 1 || got[0] != "\\\\?\\Volume{a}\\" {
-		t.Fatalf("disk 3 volumes=%v", got)
-	}
-	if got := index[5]; len(got) != 2 {
-		t.Fatalf("disk 5 volumes=%v", got)
-	}
-	if got := index[9]; len(got) != 0 {
-		t.Fatalf("disk 9 volumes=%v", got)
-	}
+	requireNoError(t, err)
+	requireEqual(t, "queried volume", queried, vol)
+	requireEqual(t, "disk 7", strings.Join(index[7], " "), vol)
 }
 
 func stubLock(t *testing.T, attempts *int, errs ...error) {
