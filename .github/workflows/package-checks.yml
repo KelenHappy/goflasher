@@ -32,6 +32,19 @@ jobs:
             rpm \
             zstd
 
+      - name: Verify embedded licenses are current
+        run: |
+          go generate ./internal/legal
+
+          if ! git diff --quiet --exit-code internal/legal/texts; then
+            echo "internal/legal/texts is stale." >&2
+            echo "Run: go generate ./internal/legal" >&2
+
+            git diff --stat internal/legal/texts >&2
+
+            exit 1
+          fi
+
       - name: Build binary
         run: |
           mkdir -p dist
@@ -66,17 +79,17 @@ jobs:
 
           test -f "$deb"
 
-          dpkg-deb --contents "$deb" \
-            | grep -F THIRD_PARTY_NOTICES.md
+          # Listed once so that a failure of dpkg-deb itself cannot be mistaken
+          # for the absence of a file.
+          contents=$(dpkg-deb --contents "$deb")
 
-          dpkg-deb --contents "$deb" \
-            | grep -F THIRD_PARTY_NOTICES.zh-TW.md
+          # Debian Policy 12.5 requires the copyright file; the notices are
+          # embedded in the binary and shown under Settings.
+          grep -F /usr/share/doc/goflasher/copyright <<<"$contents"
 
-          dpkg-deb --contents "$deb" \
-            | grep -F github.com_ulikunitz_xz_LICENSE
+          ! grep -F THIRD_PARTY_NOTICES.md <<<"$contents"
 
-          dpkg-deb --contents "$deb" \
-            | grep -F github.com_ebitengine_purego_LICENSE
+          ! grep -F third-party/ <<<"$contents"
 
       - name: Validate RPM package
         run: |
@@ -90,17 +103,13 @@ jobs:
 
           test -n "$rpm_path"
 
-          rpm -qlp "$rpm_path" \
-            | grep -F THIRD_PARTY_NOTICES.md
+          contents=$(rpm -qlp "$rpm_path")
 
-          rpm -qlp "$rpm_path" \
-            | grep -F THIRD_PARTY_NOTICES.zh-TW.md
+          grep -F /usr/share/doc/goflasher/copyright <<<"$contents"
 
-          rpm -qlp "$rpm_path" \
-            | grep -F github.com_ulikunitz_xz_LICENSE
+          ! grep -F THIRD_PARTY_NOTICES.md <<<"$contents"
 
-          rpm -qlp "$rpm_path" \
-            | grep -F github.com_ebitengine_purego_LICENSE
+          ! grep -F third-party/ <<<"$contents"
 
       - name: Validate Arch package
         run: |
@@ -108,17 +117,13 @@ jobs:
 
           test -f "$arch_path"
 
-          tar --zstd -tf "$arch_path" \
-            | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md
+          contents=$(tar --zstd -tf "$arch_path")
 
-          tar --zstd -tf "$arch_path" \
-            | grep -F ./usr/share/doc/goflasher/THIRD_PARTY_NOTICES.zh-TW.md
+          grep -F ./usr/share/licenses/goflasher/LICENSE <<<"$contents"
 
-          tar --zstd -tf "$arch_path" \
-            | grep -F ./usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE
+          ! grep -F THIRD_PARTY_NOTICES.md <<<"$contents"
 
-          tar --zstd -tf "$arch_path" \
-            | grep -F ./usr/share/doc/goflasher/third-party/github.com_ebitengine_purego_LICENSE
+          ! grep -F third-party/ <<<"$contents"
 
           tar --zstd -xOf "$arch_path" ./.PKGINFO \
             | grep -F 'depend = polkit'
@@ -214,15 +219,15 @@ jobs:
 
           test -f "$root/GoFlasher.exe"
           test -f "$root/README-Windows.txt"
-          test -f "$root/THIRD_PARTY_NOTICES.md"
-          test -f "$root/THIRD_PARTY_NOTICES.zh-TW.md"
 
-          test -n "$(
-            find "$root/licenses" \
-              -type f \
-              -print \
-              -quit
-          )"
+          # Licenses ship inside the executable (internal/legal) and are read
+          # under Settings, so check the texts are embedded and that no stale
+          # copies were left beside them.
+          grep -qa 'GNU GENERAL PUBLIC LICENSE' "$root/GoFlasher.exe"
+          grep -qa 'Third-party notices' "$root/GoFlasher.exe"
+
+          test ! -e "$root/licenses"
+          test ! -e "$root/THIRD_PARTY_NOTICES.md"
 
           (
             cd dist

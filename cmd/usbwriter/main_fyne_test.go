@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
-	fyneapp "fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/test"
 	core "github.com/goflasher/goflasher/internal/app"
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/i18n"
@@ -197,11 +197,15 @@ func TestRefreshAndLanguageChangeShareGUIThread(t *testing.T) {
 	waitFor(t, func() bool { return len(c.devices) == 1 })
 }
 
+// newTestController builds the controller on Fyne's test driver. The glfw
+// driver cannot be used here: since Fyne 2.6 window creation routes through the
+// main event loop, which only runs under ShowAndRun, so a test that never
+// starts one blocks forever inside NewWindow.
 func newTestController(t *testing.T) *guiController {
 	t.Helper()
-	a := fyneapp.NewWithID(fmt.Sprintf("org.goflasher.test.%d", time.Now().UnixNano()))
+	a := test.NewApp()
 	t.Cleanup(a.Quit)
-	w := a.NewWindow("test")
+	w := test.NewWindow(nil)
 	tr := i18n.New("en")
 	v := newApplicationView(tr, w)
 	w.SetContent(windowContent(tr, v))

@@ -21,6 +21,7 @@ import (
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/i18n"
 	"github.com/goflasher/goflasher/internal/image"
+	"github.com/goflasher/goflasher/internal/legal"
 	"github.com/goflasher/goflasher/internal/progress"
 )
 
@@ -200,8 +201,55 @@ func (c *guiController) showSettings() {
 		widget.NewLabel(c.tr.T("settings.theme")), themeSelect,
 		widget.NewLabel(c.tr.T("settings.scale")), scaleSelect,
 		widget.NewLabel(c.tr.T("settings.source")), sourceCodeLink(),
+		widget.NewLabel(c.tr.T("settings.licenses")), widget.NewButton(c.tr.T("action.licenses"), c.showLicenses),
 	)
 	dialog.NewCustom(c.tr.T("settings.title"), c.tr.T("settings.close"), content, c.view.window).Show()
+}
+
+// showLicenses presents the embedded notices as a collapsed accordion. GPLv3
+// and LGPL require these texts to travel with the binary, so they are embedded
+// rather than linked; the accordion keeps the dialog usable with one entry per
+// component instead of one continuous wall of text.
+func (c *guiController) showLicenses() {
+	documents := legal.Documents()
+	items := make([]*widget.AccordionItem, 0, len(documents))
+	for _, document := range documents {
+		items = append(items, widget.NewAccordionItem(document.Title, licenseDetail(document.Body)))
+	}
+	accordion := widget.NewAccordion(items...)
+	// MultiOpen stays off so an opened entry collapses the previous one and the
+	// dialog never grows past the window.
+	panel := dialog.NewCustom(c.tr.T("licenses.title"), c.tr.T("settings.close"),
+		container.NewVScroll(accordion), c.view.window)
+	panel.Resize(licenseDialogSize(c.view.window.Canvas().Size()))
+	panel.Show()
+}
+
+// licenseDetail renders one license body at a fixed height so that opening a
+// long text scrolls within the entry rather than resizing the dialog.
+func licenseDetail(body string) fyne.CanvasObject {
+	text := widget.NewLabel(body)
+	text.Wrapping = fyne.TextWrapWord
+	text.TextStyle = fyne.TextStyle{Monospace: true}
+	detail := container.NewVScroll(text)
+	detail.SetMinSize(fyne.NewSize(0, licenseDetailHeight))
+	return detail
+}
+
+// licenseDetailHeight is the visible height of an opened license text.
+const licenseDetailHeight = 320
+
+// licenseDialogSize fits the dialog to the window while leaving the parent
+// visible, and keeps a floor for windows too small to divide.
+func licenseDialogSize(canvas fyne.Size) fyne.Size {
+	width, height := canvas.Width*0.9, canvas.Height*0.9
+	if width < 480 {
+		width = 480
+	}
+	if height < 400 {
+		height = 400
+	}
+	return fyne.NewSize(width, height)
 }
 
 // settingChoice and newSettingSelect keep presentation labels separate from

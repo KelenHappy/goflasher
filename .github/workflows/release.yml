@@ -73,9 +73,12 @@ jobs:
           root="dist/GoFlasher-$VERSION-windows-amd64"
           test -f "$root/GoFlasher.exe"
           test -f "$root/README-Windows.txt"
-          test -f "$root/THIRD_PARTY_NOTICES.md"
-          test -f "$root/THIRD_PARTY_NOTICES.zh-TW.md"
-          test -n "$(find "$root/licenses" -type f -print -quit)"
+          # The GPL requires the license text to reach the user with the
+          # program. It now travels inside the executable (internal/legal),
+          # so assert it is actually there rather than that a file sits beside it.
+          grep -qa 'GNU GENERAL PUBLIC LICENSE' "$root/GoFlasher.exe"
+          grep -qa 'Third-party notices' "$root/GoFlasher.exe"
+          grep -qa 'Settings -> Licenses' "$root/README-Windows.txt"
           test -z "$(find "$root" -type f \( -name '*.pfx' -o -name '*.p12' -o -name '*.cer' -o -name '*.crt' -o -name '*.key' -o -name '*.pdb' \) -print -quit)"
           unzip -t "dist/GoFlasher-$VERSION-windows-amd64.zip"
           unzip -Z1 "dist/GoFlasher-$VERSION-windows-amd64.zip" | grep -Fx "GoFlasher-$VERSION-windows-amd64/GoFlasher.exe"

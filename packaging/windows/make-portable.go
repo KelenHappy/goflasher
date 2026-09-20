@@ -3,7 +3,6 @@ package main
 
 import (
 	"archive/zip"
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,18 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 )
 
-var (
-	versionPattern     = regexp.MustCompile(`^v?[0-9A-Za-z][0-9A-Za-z._-]*$`)
-	licenseNamePattern = regexp.MustCompile(`^(LICENSE|COPYING|NOTICE)(\..*)?$`)
-	unsafeNameChars    = regexp.MustCompile(`[^A-Za-z0-9._-]`)
-)
+var versionPattern = regexp.MustCompile(`^v?[0-9A-Za-z][0-9A-Za-z._-]*$`)
 
 var errUsage = errors.New("usage: go run ./packaging/windows --executable EXE --version VERSION --output DIR")
 
@@ -85,23 +78,21 @@ func resetArtifacts(stage, archive string) error {
 	}
 	_ = os.Remove(archive)
 	_ = os.Remove(archive + ".sha256")
-	return os.MkdirAll(filepath.Join(stage, "licenses"), 0755)
+	return os.MkdirAll(stage, 0755)
 }
 
 // stageLayout fills the stage directory with everything the ZIP ships.
+//
+// License texts are not staged here: they are embedded in the executable by
+// internal/legal and shown under Settings, which is how they reach the user.
+// README-Windows.txt stays a file because it explains how to verify the ZIP
+// before running the executable, and that has to be readable without running
+// it.
 func stageLayout(repo, stage, executable, version string) error {
 	if err := copyFile(executable, filepath.Join(stage, "GoFlasher.exe")); err != nil {
 		return err
 	}
-	for _, notice := range []string{"THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.zh-TW.md"} {
-		if err := copyFile(filepath.Join(repo, "docs", "legal", notice), filepath.Join(stage, notice)); err != nil {
-			return err
-		}
-	}
-	if err := stageReadme(repo, stage, version); err != nil {
-		return err
-	}
-	return collectLicenses(repo, stage)
+	return stageReadme(repo, stage, version)
 }
 
 // stageReadme copies README-Windows.txt with VERSION substituted.
@@ -139,71 +130,6 @@ func fileSHA256(path string) (string, error) {
 		return "", closeErr
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func collectLicenses(repo, stage string) error {
-	modules, err := compiledModuleDirs(repo)
-	if err != nil {
-		return err
-	}
-	paths := make([]string, 0, len(modules))
-	for path := range modules {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	for _, module := range paths {
-		if err := copyModuleLicenses(module, modules[module], filepath.Join(stage, "licenses")); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// compiledModuleDirs maps every module compiled into the GUI binary to its
-// source directory.
-func compiledModuleDirs(repo string) (map[string]string, error) {
-	cmd := exec.Command("go", "list", "-deps", "-tags", "fyne", "-f", `{{with .Module}}{{if .Dir}}{{.Path}}|{{.Dir}}{{end}}{{end}}`, "./cmd/usbwriter")
-	cmd.Dir = repo
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("go list compiled modules: %w", err)
-	}
-	modules := make(map[string]string)
-	scan := bufio.NewScanner(strings.NewReader(string(out)))
-	for scan.Scan() {
-		parts := strings.SplitN(scan.Text(), "|", 2)
-		if len(parts) == 2 {
-			modules[parts[0]] = parts[1]
-		}
-	}
-	if err := scan.Err(); err != nil {
-		return nil, err
-	}
-	return modules, nil
-}
-
-// copyModuleLicenses copies each root license file of module into licenses and
-// fails when the module ships none.
-func copyModuleLicenses(module, dir, licenses string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	safe := unsafeNameChars.ReplaceAllString(module, "_")
-	found := false
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !licenseNamePattern.MatchString(entry.Name()) {
-			continue
-		}
-		found = true
-		if err := copyFile(filepath.Join(dir, entry.Name()), filepath.Join(licenses, safe+"_"+entry.Name())); err != nil {
-			return err
-		}
-	}
-	if !found {
-		return fmt.Errorf("compiled module %s has no root license file", module)
-	}
-	return nil
 }
 
 func zipTree(base, stage, destination string) error {

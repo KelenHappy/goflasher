@@ -11,9 +11,16 @@ if [[ "${GOFLASHER_RELEASE_GATE:-0}" = 1 ]]; then
   grep -Fxq APPROVED "$record/LEGAL_APPROVED" || { echo "release legal approval missing" >&2; exit 65; }
 fi
 find_one() { find "$payload" -type f -name "$1" -print -quit; }
-for notice in THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES.zh-TW.md; do
-  test -n "$(find_one "$notice")" || { echo "missing $notice" >&2; exit 65; }
+# The notices travel inside the executable (internal/legal) and are shown under
+# Settings, so assert the texts are actually compiled in rather than that a file
+# sits beside the binary. The project license still ships as a file because the
+# distribution policies require it.
+app=$(find "$payload" -type f \( -path '*/bin/goflasher' -o -path '*/MacOS/GoFlasher' \) -print -quit)
+test -n "$app" || { echo "no GoFlasher executable in payload" >&2; exit 65; }
+for notice in 'GNU GENERAL PUBLIC LICENSE' 'Third-party notices' '第三方元件聲明'; do
+  grep -qa "$notice" "$app" || { echo "missing embedded notice: $notice" >&2; exit 65; }
 done
+test -n "$(find_one copyright)$(find_one LICENSE)" || { echo "missing project license file" >&2; exit 65; }
 # UEFI is non-MVP. Inspect payload names, not user ISO contents processed later.
 if find "$payload" -type f \( -iname '*edk2*' -o -iname '*gnu-efi*' -o -iname '*uefi-shell*' -o -iname 'shim*.efi' \) -print -quit | grep -q .; then
   echo "prohibited UEFI component in release payload" >&2; exit 65

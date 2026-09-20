@@ -21,4 +21,10 @@ This build is not code signed. Windows may show a SmartScreen prompt and an
 "Unknown publisher" confirmation when you run it. Verify the SHA-256 above,
 then choose More info -> Run anyway and confirm the prompt.
 
+GoFlasher is free software under the GNU General Public License version 3 or
+later. The full license, the third-party notices, and the license text of every
+component compiled into this build are included in GoFlasher.exe and can be
+read under Settings -> Licenses.
+
 Official releases: https://github.com/KelenHappy/goflasher/releases
+Source code: https://github.com/KelenHappy/goflasher

@@ -86,7 +86,7 @@ mkdir -p \
   "$CONTENTS/MacOS" \
   "$CONTENTS/Frameworks" \
   "$CONTENTS/Library/HelperTools" \
-  "$CONTENTS/Resources/legal/licenses"
+  "$CONTENTS/Resources/legal"
 
 install -m755 \
   "$GUI" \
@@ -96,39 +96,12 @@ install -m755 \
   "$HELPER" \
   "$CONTENTS/Library/HelperTools/org.goflasher.helper"
 
+# Third-party notices and dependency licenses are embedded in the binary by
+# internal/legal and shown under Settings. The project license stays a file so
+# the bundle carries its own terms.
 install -m644 \
   "$ROOT/LICENSE" \
   "$CONTENTS/Resources/legal/LICENSE"
-
-install -m644 \
-  "$ROOT/docs/legal/THIRD_PARTY_NOTICES.md" \
-  "$CONTENTS/Resources/legal/"
-
-install -m644 \
-  "$ROOT/docs/legal/THIRD_PARTY_NOTICES.zh-TW.md" \
-  "$CONTENTS/Resources/legal/"
-
-purego_dir=$(
-  cd "$ROOT"
-  go list -m -f '{{.Dir}}' github.com/ebitengine/purego
-)
-
-xz_dir=$(
-  cd "$ROOT"
-  go list -m -f '{{.Dir}}' github.com/ulikunitz/xz
-)
-
-install -m644 \
-  "$purego_dir/LICENSE" \
-  "$CONTENTS/Resources/legal/licenses/github.com_ebitengine_purego_LICENSE"
-
-install -m644 \
-  "$xz_dir/LICENSE" \
-  "$CONTENTS/Resources/legal/licenses/github.com_ulikunitz_xz_LICENSE"
-
-install -m644 \
-  "$(go env GOROOT)/LICENSE" \
-  "$CONTENTS/Resources/legal/licenses/golang_LICENSE"
 
 #
 # Bundle libwim when provided.

@@ -11,8 +11,6 @@ version=${2#v}
 pkgver=${version//-/_}
 output=$(realpath -m "$3")
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-xz_dir=$(cd "$root" && go list -m -f '{{.Dir}}' github.com/ulikunitz/xz)
-purego_dir=$(cd "$root" && go list -m -f '{{.Dir}}' github.com/ebitengine/purego)
 arch=${ARCH_PKG_ARCH:-$(uname -m)}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
@@ -34,15 +32,10 @@ install -Dm644 "$root/packaging/org.goflasher.usbwriter.desktop" \
   "$stage/usr/share/applications/org.goflasher.usbwriter.desktop"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.svg" \
   "$stage/usr/share/icons/hicolor/scalable/apps/org.goflasher.usbwriter.svg"
+# Third-party notices and dependency licenses are embedded in the binary by
+# internal/legal and shown under Settings. Arch packaging standards still want
+# the project license under /usr/share/licenses, so it also ships as a file.
 install -Dm644 "$root/LICENSE" "$stage/usr/share/licenses/goflasher/LICENSE"
-install -Dm644 "$root/docs/legal/THIRD_PARTY_NOTICES.md" \
-  "$stage/usr/share/doc/goflasher/THIRD_PARTY_NOTICES.md"
-install -Dm644 "$root/docs/legal/THIRD_PARTY_NOTICES.zh-TW.md" \
-  "$stage/usr/share/doc/goflasher/THIRD_PARTY_NOTICES.zh-TW.md"
-install -Dm644 "$xz_dir/LICENSE" \
-  "$stage/usr/share/doc/goflasher/third-party/github.com_ulikunitz_xz_LICENSE"
-install -Dm644 "$purego_dir/LICENSE" "$stage/usr/share/doc/goflasher/third-party/github.com_ebitengine_purego_LICENSE"
-install -Dm644 "$(go env GOROOT)/LICENSE" "$stage/usr/share/doc/goflasher/third-party/golang_LICENSE"
 WIMLIB_COMPLIANCE_RECORD=${WIMLIB_COMPLIANCE_RECORD:-} "$root/packaging/legal/verify-release.sh" "$stage"
 
 size=$(du -sk "$stage" | cut -f1)

@@ -132,6 +132,7 @@ var catalogs = map[Locale]map[string]string{
 		"action.settings": "Settings", "settings.title": "Settings", "settings.language": "Language", "settings.close": "Close",
 		"settings.theme": "Theme", "settings.theme.system": "System", "settings.theme.light": "Light", "settings.theme.dark": "Dark",
 		"settings.scale": "Interface scale", "settings.source": "Source code (GPLv3)",
+		"settings.licenses": "Licenses", "action.licenses": "View licenses", "licenses.title": "Licenses and third-party notices",
 	},
 	TraditionalChinese: {
 		"launcher":     "GoFlasher 圖形介面需使用 'fyne' 建置標籤。安裝 Fyne 建置相依套件後，執行：go run -tags fyne ./cmd/usbwriter",
@@ -169,6 +170,7 @@ var catalogs = map[Locale]map[string]string{
 		"action.settings": "設定", "settings.title": "設定", "settings.language": "語言", "settings.close": "關閉",
 		"settings.theme": "主題", "settings.theme.system": "跟隨系統", "settings.theme.light": "淺色", "settings.theme.dark": "深色",
 		"settings.scale": "介面縮放", "settings.source": "原始碼（GPLv3）",
+		"settings.licenses": "授權", "action.licenses": "檢視授權", "licenses.title": "授權與第三方元件聲明",
 	},
 	SimplifiedChinese: {
 		"launcher":     "GoFlasher 图形界面需要使用 'fyne' 构建标签。安装 Fyne 构建依赖后运行：go run -tags fyne ./cmd/usbwriter",
@@ -193,6 +195,7 @@ var catalogs = map[Locale]map[string]string{
 		"action.settings": "设置", "settings.title": "设置", "settings.language": "语言", "settings.close": "关闭",
 		"settings.theme": "主题", "settings.theme.system": "跟随系统", "settings.theme.light": "浅色", "settings.theme.dark": "深色",
 		"settings.scale": "界面缩放", "settings.source": "源代码（GPLv3）",
+		"settings.licenses": "许可", "action.licenses": "查看许可", "licenses.title": "许可与第三方组件声明",
 	},
 	Japanese: {
 		"launcher":     "GoFlasher GUI には 'fyne' ビルドタグが必要です。Fyne の依存関係をインストールして実行してください：go run -tags fyne ./cmd/usbwriter",
@@ -216,5 +219,6 @@ var catalogs = map[Locale]map[string]string{
 		"action.settings": "設定", "settings.title": "設定", "settings.language": "言語", "settings.close": "閉じる",
 		"settings.theme": "テーマ", "settings.theme.system": "システム", "settings.theme.light": "ライト", "settings.theme.dark": "ダーク",
 		"settings.scale": "画面の拡大率", "settings.source": "ソースコード（GPLv3）",
+		"settings.licenses": "ライセンス", "action.licenses": "ライセンスを表示", "licenses.title": "ライセンスおよび第三者コンポーネントの告知",
 	},
 }
