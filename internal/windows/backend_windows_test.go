@@ -136,15 +136,23 @@ func TestEveryOpenRevalidates(t *testing.T) {
 	w, err := b.OpenWriter(context.Background(), d)
 	requireNoError(t, err)
 	requireNoError(t, w.Close())
-	assertOpenAndLockCounts(t, api, 1, 1, 0)
+	assertOpenAndLockCounts(t, api, apiCounts{opens: 1, lockCalls: 1})
 }
 
-func assertOpenAndLockCounts(t *testing.T, api *fakeAPI, opens, lockCalls, closes int) {
+// apiCounts is the tally of fakeAPI calls compared by assertOpenAndLockCounts.
+type apiCounts struct{ opens, lockCalls, closes int }
+
+func (f *fakeAPI) counts() apiCounts {
+	return apiCounts{opens: f.opens, lockCalls: f.lockCalls, closes: f.locks.closes}
+}
+
+func assertOpenAndLockCounts(t *testing.T, api *fakeAPI, want apiCounts) {
 	t.Helper()
-	if api.opens != opens || api.lockCalls != lockCalls || api.locks.closes != closes {
-		t.Fatalf("opens=%d locks=%d closes=%d", api.opens, api.lockCalls, api.locks.closes)
+	if got := api.counts(); got != want {
+		t.Fatalf("counts = %+v, want %+v", got, want)
 	}
 }
+
 func TestChangedIdentityFailsClosed(t *testing.T) {
 	r := candidate()
 	b := &Backend{api: &fakeAPI{records: []diskRecord{r}}, locks: map[string]volumeLocks{}}

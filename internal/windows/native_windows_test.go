@@ -104,10 +104,12 @@ func TestParseStorageDeviceWWN(t *testing.T) {
 }
 
 func TestParseStorageDeviceIDs(t *testing.T) {
+	const wwn = "5000C50012345678"
 	binaryWWN := storageIdentifier(1, 3, 0, []byte{0x50, 0x00, 0xc5, 0x00, 0x12, 0x34, 0x56, 0x78})
+	otherWWN := storageIdentifier(1, 3, 0, []byte{0x60, 0, 0, 0, 0, 0, 0, 1})
 	asciiWWN := storageIdentifier(2, 2, 0, []byte(" 5000c50012345678 \x00"))
 	utf8WWN := storageIdentifier(3, 2, 0, []byte("5000c50012345678"))
-	vendorSpecific := storageIdentifier(1, 0, 0, []byte{0xde, 0xad})
+	vendor := storageIdentifier(1, 0, 0, []byte{0xde, 0xad})
 	ignored := storageIdentifier(1, 3, 1, []byte{0xde, 0xad})
 
 	tests := []struct {
@@ -116,13 +118,13 @@ func TestParseStorageDeviceIDs(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "binary NAA", data: storageDeviceIDDescriptor(binaryWWN), want: "5000C50012345678"},
-		{name: "normalized ASCII EUI", data: storageDeviceIDDescriptor(asciiWWN), want: "5000C50012345678"},
-		{name: "UTF-8 EUI", data: storageDeviceIDDescriptor(utf8WWN), want: "5000C50012345678"},
-		{name: "ignores vendor-specific type", data: storageDeviceIDDescriptor(vendorSpecific, binaryWWN), want: "5000C50012345678"},
-		{name: "no stable identifier", data: storageDeviceIDDescriptor(vendorSpecific, ignored), want: ""},
-		{name: "ignores non-device association", data: storageDeviceIDDescriptor(ignored, binaryWWN), want: "5000C50012345678"},
-		{name: "rejects conflicting identifiers", data: storageDeviceIDDescriptor(binaryWWN, storageIdentifier(1, 3, 0, []byte{0x60, 0, 0, 0, 0, 0, 0, 1})), wantErr: true},
+		{name: "binary NAA", data: deviceIDDescriptor(binaryWWN), want: wwn},
+		{name: "normalized ASCII EUI", data: deviceIDDescriptor(asciiWWN), want: wwn},
+		{name: "UTF-8 EUI", data: deviceIDDescriptor(utf8WWN), want: wwn},
+		{name: "ignores vendor-specific type", data: deviceIDDescriptor(vendor, binaryWWN), want: wwn},
+		{name: "no stable identifier", data: deviceIDDescriptor(vendor, ignored), want: ""},
+		{name: "ignores non-device association", data: deviceIDDescriptor(ignored, binaryWWN), want: wwn},
+		{name: "rejects conflicting identifiers", data: deviceIDDescriptor(binaryWWN, otherWWN), wantErr: true},
 		{name: "rejects short descriptor", data: make([]byte, 11), wantErr: true},
 		{name: "rejects undersized descriptor size", data: descriptorWithSize(11, 0, nil), wantErr: true},
 		{name: "rejects oversized descriptor size", data: descriptorWithSize(64, 0, nil), wantErr: true},
@@ -231,7 +233,7 @@ func storageIdentifierWithField(value []byte, offset int, v uint16) []byte {
 	return entry
 }
 
-func storageDeviceIDDescriptor(entries ...[]byte) []byte {
+func deviceIDDescriptor(entries ...[]byte) []byte {
 	size := 12
 	for _, entry := range entries {
 		size += len(entry)
@@ -257,7 +259,13 @@ func descriptorWithSize(size, count uint32, payload []byte) []byte {
 }
 
 func TestIdentityAdmissionRequiresSerialOrWWN(t *testing.T) {
-	for _, evidence := range []windowsIdentityEvidence{{Serial: "SERIAL"}, {WWN: "5000C50012345678"}, {Serial: "SERIAL", WWN: "5000C50012345678"}} {
+	const wwn = "5000C50012345678"
+	accepted := []windowsIdentityEvidence{
+		{Serial: "SERIAL"},
+		{WWN: wwn},
+		{Serial: "SERIAL", WWN: wwn},
+	}
+	for _, evidence := range accepted {
 		r := candidate()
 		r.identity = evidence
 		r.ID, r.Serial, r.WWN = evidence.canonicalID(), evidence.Serial, evidence.WWN
