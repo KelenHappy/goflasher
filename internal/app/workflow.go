@@ -131,44 +131,72 @@ type WindowsInstallerExecutor struct {
 	state    *StateMachine
 }
 
-func (x WindowsInstallerExecutor) Execute(ctx context.Context, plan *installer.BuildPlan, info image.Info, target device.Device, updates chan<- progress.Update, out *RunResult) (err error) {
-	r, _, _, err := info.RetainedReaderAt()
+// installerRequest is one Windows installer build: what to write, where, and
+// where to report progress and results.
+type installerRequest struct {
+	plan    *installer.BuildPlan
+	info    image.Info
+	target  device.Device
+	updates chan<- progress.Update
+	out     *RunResult
+}
+
+func (x WindowsInstallerExecutor) Execute(ctx context.Context, req installerRequest) (err error) {
+	r, _, _, err := req.info.RetainedReaderAt()
 	if err != nil {
 		return err
 	}
-	if err := x.state.Transition(Partitioning); err != nil {
+	if err := x.enter(ctx, req.updates, Partitioning, progress.StagePartitioning); err != nil {
 		return err
 	}
-	sendStage(ctx, updates, progress.StagePartitioning)
-	raw, err := x.backend.OpenInstallerTarget(ctx, target)
+	raw, err := x.backend.OpenInstallerTarget(ctx, req.target)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, raw.Close()) }()
-	if err := x.state.Transition(Formatting); err != nil {
+	if err := x.enter(ctx, req.updates, Formatting, progress.StageFormatting); err != nil {
 		return err
 	}
-	sendStage(ctx, updates, progress.StageFormatting)
-	if err := x.state.Transition(Extracting); err != nil {
+	if err := x.enter(ctx, req.updates, Extracting, progress.StageExtracting); err != nil {
 		return err
 	}
-	sendStage(ctx, updates, progress.StageExtracting)
-	result, err := (installer.Executor{Splitter: x.splitter}).Execute(ctx, plan, r, raw)
+	result, err := (installer.Executor{Splitter: x.splitter}).Execute(ctx, req.plan, r, raw)
 	if err != nil {
 		return err
 	}
 	if !result.Complete {
 		return installer.ErrIncomplete
 	}
-	out.FilesWritten = len(result.VerificationManifest)
-	out.ManifestSHA256 = verificationManifestHash(result.VerificationManifest)
-	out.installerManifest = append([]installer.VerificationEntry(nil), result.VerificationManifest...)
-	for _, entry := range result.VerificationManifest {
-		if entry.Path == "sources/install.swm" || strings.HasPrefix(entry.Path, "sources/install") && strings.HasSuffix(entry.Path, ".swm") {
+	req.out.recordInstallerManifest(result.VerificationManifest)
+	return nil
+}
+
+// enter advances the state machine and reports the stage that goes with it.
+func (x WindowsInstallerExecutor) enter(ctx context.Context, updates chan<- progress.Update, next State, stage progress.Stage) error {
+	if err := x.state.Transition(next); err != nil {
+		return err
+	}
+	sendStage(ctx, updates, stage)
+	return nil
+}
+
+// recordInstallerManifest stores the build's verification manifest on the
+// result and counts the split WIM parts it contains.
+func (out *RunResult) recordInstallerManifest(entries []installer.VerificationEntry) {
+	out.FilesWritten = len(entries)
+	out.ManifestSHA256 = verificationManifestHash(entries)
+	out.installerManifest = append([]installer.VerificationEntry(nil), entries...)
+	for _, entry := range entries {
+		if isWIMPart(entry.Path) {
 			out.WIMParts++
 		}
 	}
-	return nil
+}
+
+// isWIMPart reports whether path is one of the sources/install*.swm parts that
+// splitting an oversized install.wim produces.
+func isWIMPart(path string) bool {
+	return strings.HasPrefix(path, "sources/install") && strings.HasSuffix(path, ".swm")
 }
 
 func verificationManifestHash(entries []installer.VerificationEntry) string {

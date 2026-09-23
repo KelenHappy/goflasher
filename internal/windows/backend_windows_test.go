@@ -306,9 +306,7 @@ func TestFormatLocksAndRevalidates(t *testing.T) {
 	if err := b.FormatFAT32(context.Background(), d, "GOFLASHER", nil); err != nil {
 		t.Fatal(err)
 	}
-	if api.lockCalls != 1 || api.locks.closes != 1 {
-		t.Fatalf("lock calls=%d closes=%d", api.lockCalls, api.locks.closes)
-	}
+	assertOpenAndLockCounts(t, api, apiCounts{lockCalls: 1, closes: 1})
 }
 
 // A disk that fails inspection never becomes a diskRecord, so it carries no

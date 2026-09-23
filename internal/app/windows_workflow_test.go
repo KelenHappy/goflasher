@@ -57,14 +57,16 @@ func TestCompressedWindowsRejectedAndLinuxHybridRawWritten(t *testing.T) {
 		},
 	}
 	for suffix, encode := range encoders {
-		t.Run("windows."+suffix, func(t *testing.T) { runCompressedWorkflowTest(t, encode(windowsISOFixture()), suffix, false) })
+		t.Run("windows."+suffix, func(t *testing.T) {
+			requireCompressedRejected(t, encode(windowsISOFixture()), suffix)
+		})
 		t.Run("linux."+suffix, func(t *testing.T) {
 			p := linuxHybridISOFixture(t)
 			p[446+4] = 0x17
 			binary.LittleEndian.PutUint32(p[446+8:], 1)
 			binary.LittleEndian.PutUint32(p[446+12:], 159)
 			p[510], p[511] = 0x55, 0xaa
-			runCompressedWorkflowTest(t, encode(p), suffix, true)
+			requireRawWrite(t, encode(p), suffix)
 		})
 	}
 }
@@ -93,7 +95,11 @@ func linuxHybridISOFixture(t *testing.T) []byte {
 	}
 	return p
 }
-func runCompressedWorkflowTest(t *testing.T, data []byte, suffix string, wantRaw bool) {
+
+// runCompressedWorkflow writes data as a compressed image, detects it, and
+// runs the workflow against a backend that counts every raw-path call.
+func runCompressedWorkflow(t *testing.T, data []byte, suffix string) (*noRawWriteBackend, error) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "source.iso."+suffix)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
@@ -105,22 +111,37 @@ func runCompressedWorkflowTest(t *testing.T, data []byte, suffix string, wantRaw
 	b := &noRawWriteBackend{}
 	s := &Service{Backend: b, State: readyToRunState(t)}
 	_, err = s.Run(context.Background(), RunRequest{Image: info, Target: device.Device{Size: 1 << 30}})
-	if wantRaw {
-		if err != nil {
-			t.Fatal(err)
-		}
-		if b.openWriter != 1 || b.writes == 0 {
-			t.Fatalf("raw path calls: %+v", b)
-		}
-		return
+	return b, err
+}
+
+// requireRawWrite asserts the image was streamed straight to the raw writer.
+func requireRawWrite(t *testing.T, data []byte, suffix string) {
+	t.Helper()
+	b, err := runCompressedWorkflow(t, data, suffix)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if b.openWriter != 1 {
+		t.Fatalf("OpenWriter calls = %d, want 1", b.openWriter)
+	}
+	if b.writes == 0 {
+		t.Fatalf("raw writer never written to: %+v", b)
+	}
+}
+
+// requireCompressedRejected asserts the workflow refused the image without
+// touching the raw path at all.
+func requireCompressedRejected(t *testing.T, data []byte, suffix string) {
+	t.Helper()
+	b, err := runCompressedWorkflow(t, data, suffix)
 	if !errors.Is(err, ErrCompressedWindowsInstallerUnsupported) {
 		t.Fatalf("error=%v", err)
 	}
-	if b.openWriter != 0 || b.writes != 0 || b.unmounts != 0 {
+	if *b != (noRawWriteBackend{}) {
 		t.Fatalf("raw path used: %+v", b)
 	}
 }
+
 func (*noRawWriteBackend) RefreshDevice(context.Context, string) (device.Device, error) {
 	return device.Device{}, nil
 }

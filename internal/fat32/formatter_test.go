@@ -38,17 +38,21 @@ func TestFormatPartitionPreservesGPTMetadata(t *testing.T) {
 	)
 	f := newTempDisk(t, "gpt-disk", totalLBAs*sectorSize)
 	l := writeTestGPT(t, f, totalLBAs, sectorSize)
-	primaryOffset, primarySize := uint64(0), l.FirstUsableLBA*sectorSize
-	backupOffset, backupSize := l.BackupEntriesLBA*sectorSize, (totalLBAs-l.BackupEntriesLBA)*sectorSize
-	primaryBefore := readDiskRange(t, f, primaryOffset, primarySize)
-	backupBefore := readDiskRange(t, f, backupOffset, backupSize)
+	untouched := []*diskSnapshot{
+		{size: l.FirstUsableLBA * sectorSize,
+			what: "protective MBR, primary GPT header, or primary entries"},
+		{off: l.BackupEntriesLBA * sectorSize, size: (totalLBAs - l.BackupEntriesLBA) * sectorSize,
+			what: "backup GPT entries or header"},
+	}
+	for _, s := range untouched {
+		s.capture(t, f)
+	}
 
 	formatTestPartition(t, f, l, sectorSize)
 
-	assertDiskRangeUnchanged(t, f, primaryOffset, primaryBefore,
-		"formatter modified the protective MBR, primary GPT header, or primary entries")
-	assertDiskRangeUnchanged(t, f, backupOffset, backupBefore,
-		"formatter modified the backup GPT entries or header")
+	for _, s := range untouched {
+		s.requireUnchanged(t, f)
+	}
 	if !isFAT32BootSector(readDiskRange(t, f, l.PartitionStartLBA*sectorSize, sectorSize)) {
 		t.Fatal("ESP does not contain a FAT32 boot sector at its partition-relative offset zero")
 	}
@@ -117,10 +121,23 @@ func formatTestPartition(t *testing.T, f *os.File, l *gpt.Layout, sectorSize uin
 	}
 }
 
-func assertDiskRangeUnchanged(t *testing.T, f *os.File, off uint64, before []byte, msg string) {
+// diskSnapshot is a byte range recorded before formatting, so the test can
+// prove the formatter left it untouched. what names it in the failure.
+type diskSnapshot struct {
+	off, size uint64
+	what      string
+	before    []byte
+}
+
+func (s *diskSnapshot) capture(t *testing.T, f *os.File) {
 	t.Helper()
-	if !bytes.Equal(readDiskRange(t, f, off, uint64(len(before))), before) {
-		t.Fatal(msg)
+	s.before = readDiskRange(t, f, s.off, s.size)
+}
+
+func (s *diskSnapshot) requireUnchanged(t *testing.T, f *os.File) {
+	t.Helper()
+	if !bytes.Equal(readDiskRange(t, f, s.off, s.size), s.before) {
+		t.Fatalf("formatter modified the %s", s.what)
 	}
 }
 

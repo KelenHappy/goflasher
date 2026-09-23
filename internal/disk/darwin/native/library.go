@@ -5,6 +5,7 @@ package native
 import (
 	"fmt"
 	"sync"
+	"unsafe"
 
 	"github.com/ebitengine/purego"
 )
@@ -45,10 +46,15 @@ func loadLibraries() (libraries, error) {
 	return loaded, loadErr
 }
 
+// symbolValue reads the pointer stored at an exported symbol, which is how the
+// framework constants (CFStringRef globals such as kDADiskDescriptionMediaSize)
+// are fetched. The address comes from dlsym and points into the mapped dylib,
+// never into Go memory, so the Go collector neither moves nor frees it; go vet
+// still reports the uintptr conversion because it cannot see that provenance.
 func symbolValue(lib uintptr, name string) (uintptr, error) {
 	p, e := purego.Dlsym(lib, name)
 	if e != nil {
 		return 0, e
 	}
-	return *(*uintptr)(unsafePointer(p)), nil
+	return *(*uintptr)(unsafe.Pointer(p)), nil
 }

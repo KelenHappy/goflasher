@@ -141,15 +141,16 @@ func TestParseStorageDeviceIDs(t *testing.T) {
 }
 
 func TestParseStorageIdentifierRejectsInvalidEntryBounds(t *testing.T) {
+	const hdr = storageIdentifierHeaderSize
 	tests := []struct {
 		name string
 		data []byte
 	}{
-		{name: "truncated header", data: make([]byte, storageIdentifierHeaderSize-1)},
+		{name: "truncated header", data: make([]byte, hdr-1)},
 		{name: "empty identifier", data: storageIdentifier(1, 3, 0, nil)},
 		{name: "truncated identifier", data: storageIdentifierWithField([]byte{1}, 8, 2)},
-		{name: "next overlaps identifier", data: storageIdentifierWithField([]byte{1, 2}, 10, storageIdentifierHeaderSize+1)},
-		{name: "next exceeds buffer", data: storageIdentifierWithField([]byte{1}, 10, storageIdentifierHeaderSize+2)},
+		{name: "next overlaps identifier", data: storageIdentifierWithField([]byte{1, 2}, 10, hdr+1)},
+		{name: "next exceeds buffer", data: storageIdentifierWithField([]byte{1}, 10, hdr+2)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -161,22 +162,24 @@ func TestParseStorageIdentifierRejectsInvalidEntryBounds(t *testing.T) {
 }
 
 func TestValidateStorageIdentifierLink(t *testing.T) {
+	const hdr = storageIdentifierHeaderSize
 	tests := []struct {
 		name          string
 		next          int
 		parsed, count uint32
 		wantError     bool
 	}{
-		{name: "middle entry links to next", next: storageIdentifierHeaderSize, parsed: 1, count: 2},
+		{name: "middle entry links to next", next: hdr, parsed: 1, count: 2},
 		{name: "middle entry ends list", parsed: 1, count: 2, wantError: true},
 		{name: "last entry ends list", parsed: 2, count: 2},
-		{name: "last entry links beyond count", next: storageIdentifierHeaderSize, parsed: 2, count: 2, wantError: true},
+		{name: "last entry links beyond count", next: hdr, parsed: 2, count: 2, wantError: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateStorageIdentifierLink(tt.next, tt.parsed, tt.count)
 			if (err != nil) != tt.wantError {
-				t.Fatalf("validateStorageIdentifierLink(%d, %d, %d) error = %v, want error %t", tt.next, tt.parsed, tt.count, err, tt.wantError)
+				t.Fatalf("validateStorageIdentifierLink(%d, %d, %d) error = %v, want error %t",
+					tt.next, tt.parsed, tt.count, err, tt.wantError)
 			}
 		})
 	}
@@ -309,12 +312,13 @@ func TestQueryVolumeExtentsGrowthIsBounded(t *testing.T) {
 }
 
 func TestVolumesForDiskFailsOnPartialEnumeration(t *testing.T) {
+	const volOne, volTwo = `\\?\Volume{one}\`, `\\?\Volume{two}\`
 	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
 	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
-	enumerateVolumes = func() ([]string, error) { return []string{"\\\\?\\Volume{one}\\", "\\\\?\\Volume{two}\\"}, nil }
+	enumerateVolumes = func() ([]string, error) { return []string{volOne, volTwo}, nil }
 	sentinel := errors.New("extent query failed")
 	queryVolumeDisks = func(v string) ([]uint32, error) {
-		if strings.Contains(v, "two") {
+		if v == volTwo {
 			return nil, sentinel
 		}
 		return []uint32{3}, nil
@@ -363,8 +367,10 @@ func TestVolumeExtentQueryErrorNamesGUIDAndOperation(t *testing.T) {
 	oldOpen, oldCall := openVolumeHandle, callVolumeExtentIOCTL
 	t.Cleanup(func() { openVolumeHandle, callVolumeExtentIOCTL = oldOpen, oldCall })
 	openVolumeHandle = func(string, uint32) (windows.Handle, error) { return windows.InvalidHandle, nil }
-	callVolumeExtentIOCTL = func(windows.Handle, []byte) (uint32, error) { return 0, windows.ERROR_ACCESS_DENIED }
-	guid := "\\\\?\\Volume{12345678-1234-1234-1234-123456789abc}\\"
+	callVolumeExtentIOCTL = func(windows.Handle, []byte) (uint32, error) {
+		return 0, windows.ERROR_ACCESS_DENIED
+	}
+	guid := `\\?\Volume{12345678-1234-1234-1234-123456789abc}\`
 	_, err := volumeDisks(guid)
 	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
 	requireErrorContains(t, err, strings.TrimSuffix(guid, "\\"))

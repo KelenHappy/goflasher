@@ -82,7 +82,6 @@ func resetArtifacts(stage, archive string) error {
 }
 
 // stageLayout fills the stage directory with everything the ZIP ships.
-//
 // License texts are not staged here: they are embedded in the executable by
 // internal/legal and shown under Settings, which is how they reach the user.
 // README-Windows.txt stays a file because it explains how to verify the ZIP

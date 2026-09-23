@@ -258,7 +258,8 @@ func (s *Service) executePlan(ctx context.Context, plan WorkflowPlan, info image
 		return (RawWriteExecutor{service: s}).Execute(request)
 	}
 	executor := WindowsInstallerExecutor{backend: windowsBackend, splitter: splitter, state: s.State}
-	if err := executor.Execute(ctx, plan.Windows, info, target, updates, out); err != nil {
+	req := installerRequest{plan: plan.Windows, info: info, target: target, updates: updates, out: out}
+	if err := executor.Execute(ctx, req); err != nil {
 		return err
 	}
 	return s.flushAndVerifyInstaller(ctx, plan.Windows, target, updates, windowsBackend, out)
