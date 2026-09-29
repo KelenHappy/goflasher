@@ -31,7 +31,7 @@ func TestProjectDocumentsCarryRequiredTexts(t *testing.T) {
 	if !strings.Contains(documents[0].Body, "GNU GENERAL PUBLIC LICENSE") {
 		t.Error("first document is not the GPL text")
 	}
-	for i, want := range []string{"Third-party notices", "第三方"} {
+	for i, want := range []string{"Third-party notices", "第三方軟體聲明"} {
 		if !strings.Contains(documents[i+1].Body, want) {
 			t.Errorf("document %d does not contain %q", i+1, want)
 		}

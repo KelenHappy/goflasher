@@ -1,0 +1,3 @@
+# Embedded license texts must stay byte-identical to the generator output
+# on every platform, so CI's regenerate-and-diff check passes on Windows.
+internal/legal/texts/** text eol=lf

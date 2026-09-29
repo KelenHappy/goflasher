@@ -51,7 +51,10 @@ func moduleDocuments() []Document {
 	index := read("index.txt")
 	documents := make([]Document, 0, strings.Count(index, "\n"))
 	for line := range strings.SplitSeq(index, "\n") {
-		if line == "" || strings.HasPrefix(line, "#") {
+		// A Windows checkout with core.autocrlf rewrites the index to CRLF;
+		// the stray \r would otherwise end up in the last file name.
+		line = strings.TrimSuffix(line, "\r")
+		if line == ""|| strings.HasPrefix(line, "#") {
 			continue
 		}
 		title, files, ok := strings.Cut(line, "\t")

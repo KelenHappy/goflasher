@@ -17,7 +17,7 @@ find_one() { find "$payload" -type f -name "$1" -print -quit; }
 # distribution policies require it.
 app=$(find "$payload" -type f \( -path '*/bin/goflasher' -o -path '*/MacOS/GoFlasher' \) -print -quit)
 test -n "$app" || { echo "no GoFlasher executable in payload" >&2; exit 65; }
-for notice in 'GNU GENERAL PUBLIC LICENSE' 'Third-party notices' '第三方元件聲明'; do
+for notice in 'GNU GENERAL PUBLIC LICENSE' 'Third-party notices' '第三方軟體聲明'; do
   grep -qa "$notice" "$app" || { echo "missing embedded notice: $notice" >&2; exit 65; }
 done
 test -n "$(find_one copyright)$(find_one LICENSE)" || { echo "missing project license file" >&2; exit 65; }
