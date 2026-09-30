@@ -25,6 +25,7 @@ const (
 	ioctlStorageGetDeviceNumber     = 0x002d1080
 	ioctlStorageGetHotplugInfo      = 0x002d0c14
 	ioctlDiskGetLengthInfo          = 0x0007405c
+	ioctlDiskGetDriveGeometryEx     = 0x000700a0
 	ioctlVolumeGetVolumeDiskExtents = 0x00560000
 	ioctlStorageMediaRemoval        = 0x002d4804
 	ioctlStorageEjectMedia          = 0x002d4808
@@ -55,6 +56,10 @@ const (
 	hotplugMediaOffset       = 5
 	hotplugDeviceOffset      = 6
 	maxStorageDescriptorSize = 1 << 20
+	// DISK_GEOMETRY_EX: a 24-byte DISK_GEOMETRY, then the DiskSize
+	// LARGE_INTEGER, then variable partition and detection data.
+	diskGeometryExSizeOffset = 24
+	diskGeometryExQuerySize  = 256
 
 	storageIDCodeSetBinary = 1
 	storageIDCodeSetASCII  = 2
@@ -436,15 +441,27 @@ func verifyDeviceNumber(h windows.Handle, expected uint32) error {
 	return nil
 }
 
+// diskLength prefers IOCTL_DISK_GET_LENGTH_INFO, which requires
+// FILE_READ_ACCESS. Enumeration opens disks with no access rights, so it falls
+// back to IOCTL_DISK_GET_DRIVE_GEOMETRY_EX (FILE_ANY_ACCESS), whose
+// DISK_GEOMETRY_EX.DiskSize follows the 24-byte DISK_GEOMETRY.
 func diskLength(h windows.Handle) (uint64, error) {
 	length, err := query(h, ioctlDiskGetLengthInfo, 8)
-	if err != nil {
-		return 0, fmt.Errorf("IOCTL_DISK_GET_LENGTH_INFO: %w", err)
+	if err == nil && len(length) >= 8 {
+		return binary.LittleEndian.Uint64(length), nil
 	}
-	if len(length) < 8 {
-		return 0, errors.New("short GET_LENGTH_INFORMATION")
+	geometry, geometryErr := query(h, ioctlDiskGetDriveGeometryEx, diskGeometryExQuerySize)
+	if geometryErr != nil {
+		return 0, fmt.Errorf("IOCTL_DISK_GET_LENGTH_INFO: %v; IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: %w", err, geometryErr)
 	}
-	return binary.LittleEndian.Uint64(length), nil
+	return parseDiskGeometryExSize(geometry)
+}
+
+func parseDiskGeometryExSize(b []byte) (uint64, error) {
+	if len(b) < diskGeometryExSizeOffset+8 {
+		return 0, fmt.Errorf("short DISK_GEOMETRY_EX: got %d bytes", len(b))
+	}
+	return binary.LittleEndian.Uint64(b[diskGeometryExSizeOffset:]), nil
 }
 
 func storageDescriptor(h windows.Handle) ([]byte, error) {
@@ -1112,6 +1129,9 @@ func diskVolumeIndexUsing(diskQuery func(string) ([]uint32, error)) (map[uint32]
 		}
 		seen[v] = true
 		disks, err := diskQuery(v)
+		if volumeNotDiskBacked(err) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrVolumeTopologyUnavailable, err)
 		}
@@ -1120,6 +1140,26 @@ func diskVolumeIndexUsing(diskQuery func(string) ([]uint32, error)) (map[uint32]
 		}
 	}
 	return index, nil
+}
+
+// volumeNotDiskBacked reports volume errors that mean the volume has no disk
+// extents to lock: optical drives and mounted ISO images reject
+// IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, empty card-reader slots report no
+// media, and a volume can vanish between enumeration and open. None of these
+// can hold a volume on a disk with readable media, so they must not fail the
+// whole enumeration.
+func volumeNotDiskBacked(err error) bool {
+	for _, benign := range []error{
+		windows.ERROR_INVALID_FUNCTION, windows.ERROR_NOT_SUPPORTED,
+		windows.ERROR_NOT_READY, windows.ERROR_NO_MEDIA_IN_DRIVE,
+		windows.ERROR_FILE_NOT_FOUND, windows.ERROR_PATH_NOT_FOUND,
+		windows.ERROR_DEV_NOT_EXIST, windows.ERROR_UNRECOGNIZED_VOLUME,
+	} {
+		if errors.Is(err, benign) {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueDisks(disks []uint32) []uint32 {

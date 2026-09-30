@@ -588,6 +588,49 @@ func TestDiskVolumeIndexDedupesExtentsOnSameDisk(t *testing.T) {
 	requireEqual(t, "disk 9", len(index[9]), 0)
 }
 
+// Optical drives, mounted ISO images, and empty card-reader slots have no
+// disk extents; they must not hide every USB disk from the list.
+func TestDiskVolumeIndexSkipsVolumesWithoutDiskExtents(t *testing.T) {
+	const cdrom, empty, usb = `\\?\Volume{c}\`, `\\?\Volume{e}\`, `\\?\Volume{u}\`
+	old := enumerateVolumes
+	t.Cleanup(func() { enumerateVolumes = old })
+	enumerateVolumes = func() ([]string, error) { return []string{cdrom, empty, usb}, nil }
+
+	index, err := diskVolumeIndexUsing(func(v string) ([]uint32, error) {
+		switch v {
+		case cdrom:
+			return nil, fmt.Errorf("volume IOCTL: %w", windows.ERROR_INVALID_FUNCTION)
+		case empty:
+			return nil, fmt.Errorf("volume open: %w", windows.ERROR_NOT_READY)
+		}
+		return []uint32{2}, nil
+	})
+
+	requireNoError(t, err)
+	requireEqual(t, "disk 2", strings.Join(index[2], " "), usb)
+}
+
+func TestDiskVolumeIndexFailsClosedOnOtherVolumeErrors(t *testing.T) {
+	old := enumerateVolumes
+	t.Cleanup(func() { enumerateVolumes = old })
+	enumerateVolumes = func() ([]string, error) { return []string{`\\?\Volume{a}\`}, nil }
+	_, err := diskVolumeIndexUsing(func(string) ([]uint32, error) { return nil, windows.ERROR_ACCESS_DENIED })
+	if !errors.Is(err, ErrVolumeTopologyUnavailable) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestParseDiskGeometryExSize(t *testing.T) {
+	b := make([]byte, 32)
+	binary.LittleEndian.PutUint64(b[24:], 16<<30)
+	size, err := parseDiskGeometryExSize(b)
+	requireNoError(t, err)
+	requireEqual(t, "size", size, uint64(16<<30))
+	if _, err := parseDiskGeometryExSize(b[:31]); err == nil {
+		t.Fatal("short DISK_GEOMETRY_EX accepted")
+	}
+}
+
 // TestDiskVolumeIndexUsesGlobalQuery covers the wiring the dedupe test skips:
 // diskVolumeIndex must feed diskVolumeIndexUsing with the package-level
 // queryVolumeDisks hook rather than a query of its own.

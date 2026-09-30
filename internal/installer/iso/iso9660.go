@@ -184,7 +184,19 @@ func isoRecordName(x []byte, joliet bool) (name string, skip bool, err error) {
 	if isoDotIdentifier(nb) {
 		return "", true, nil
 	}
-	return strings.TrimSuffix(decodeName(nb, joliet), ";1"), false, nil
+	return isoFileName(decodeName(nb, joliet)), false, nil
+}
+
+// isoFileName strips the ";N" version suffix and, for extensionless ISO9660
+// names such as "BOOTMGR.;1", the trailing separator dot.
+func isoFileName(name string) string {
+	if i := strings.LastIndexByte(name, ';'); i > 0 {
+		name = name[:i]
+	}
+	if trimmed := strings.TrimSuffix(name, "."); trimmed != "" {
+		name = trimmed
+	}
+	return name
 }
 
 // isoDotIdentifier reports the reserved single-byte identifiers: 0x00 is "."

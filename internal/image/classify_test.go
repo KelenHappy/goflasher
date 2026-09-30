@@ -67,6 +67,43 @@ func TestClassifyLinuxHybridISOWithWholeImageAndEmbeddedPartitions(t *testing.T)
 	}
 }
 
+// Every UEFI-bootable Linux ISO ships the generic EFI/BOOT/BOOTX64.EFI
+// loader; it must not be mistaken for an incomplete Windows installer.
+func TestClassifyLinuxHybridWithGenericUEFILoader(t *testing.T) {
+	b := installerISO(false, true)
+	root := b[20*2048 : 21*2048]
+	off := 0
+	for root[off] != 0 {
+		off += int(root[off])
+	}
+	copy(root[off:], isoRecord(25, 2048, []byte("EFI"), true))
+	efi := b[25*2048:]
+	off = 0
+	for _, rec := range [][]byte{isoRecord(25, 2048, []byte{0}, true), isoRecord(20, 2048, []byte{1}, true), isoRecord(26, 2048, []byte("BOOT"), true)} {
+		copy(efi[off:], rec)
+		off += len(rec)
+	}
+	boot := b[26*2048:]
+	off = 0
+	for _, rec := range [][]byte{isoRecord(26, 2048, []byte{0}, true), isoRecord(25, 2048, []byte{1}, true), isoRecord(35, 1, []byte("BOOTX64.EFI;1"), false)} {
+		copy(boot[off:], rec)
+		off += len(rec)
+	}
+	if got, err := classifyISO(t, "linux.iso", b); err != nil || got != LinuxHybridISO {
+		t.Fatalf("Classify() = %q, %v", got, err)
+	}
+}
+
+// xorriso isohybrid images (Arch, Debian) describe the data partition with
+// MBR type 0 at a nonzero offset.
+func TestClassifyLinuxHybridWithTypeZeroDataPartition(t *testing.T) {
+	b := installerISO(false, true)
+	b[446+4] = 0
+	if got, err := classifyISO(t, "linux.iso", b); err != nil || got != LinuxHybridISO {
+		t.Fatalf("Classify() = %q, %v", got, err)
+	}
+}
+
 func TestClassifyDecodedRemovesTemporaryFile(t *testing.T) {
 	temp := t.TempDir()
 	t.Setenv("TMPDIR", temp)

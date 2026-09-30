@@ -209,14 +209,22 @@ func isWindowsInstallerSignal(p string) bool {
 	if strings.HasPrefix(p, "sources/boot.wim") || strings.HasPrefix(p, "sources/install.") {
 		return true
 	}
-	if strings.HasPrefix(p, "efi/microsoft/boot/") {
-		return true
-	}
-	return strings.HasPrefix(p, "efi/boot/boot") && strings.HasSuffix(p, ".efi")
+	// The generic efi/boot/boot*.efi fallback loader is deliberately not a
+	// signal: every UEFI-bootable Linux ISO carries it too.
+	return strings.HasPrefix(p, "efi/microsoft/boot/")
+}
+
+var linuxHybridSignals = []string{
+	"isolinux/isolinux.bin", "isolinux/isolinux.cfg",
+	"boot/grub/grub.cfg", "boot/grub/i386-pc/eltorito.img",
+	"boot/grub2/grub.cfg", "boot/grub2/i386-pc/eltorito.img",
+	"boot/syslinux/syslinux.cfg", "syslinux/syslinux.cfg",
+	"efi/boot/grub.cfg", "efi/boot/bootx64.efi", "efi/boot/bootaa64.efi",
+	".disk/info",
 }
 
 func hasLinuxHybridSignals(paths map[string]bool) bool {
-	return hasAny(paths, []string{"isolinux/isolinux.bin", "boot/grub/grub.cfg", "boot/grub/i386-pc/eltorito.img", ".disk/info"})
+	return hasAny(paths, linuxHybridSignals)
 }
 
 // mbrPartition is one 16-byte entry of the classic MBR partition table.
@@ -247,9 +255,10 @@ func (p mbrPartition) coversImage(totalSectors uint64) bool {
 	return p.start == 0 && p.count == totalSectors
 }
 
-// defined reports whether the entry has a type, a nonzero start, and a
-// nonzero length.
-func (p mbrPartition) defined() bool { return p.kind != 0 && p.start != 0 && p.count != 0 }
+// defined reports whether the entry has a nonzero start and length. The type
+// may be 0: xorriso isohybrid images (Arch, Debian) describe the ISO9660 data
+// partition with type 0 at a nonzero offset.
+func (p mbrPartition) defined() bool { return p.start != 0 && p.count != 0 }
 
 func (p mbrPartition) inBounds(totalSectors uint64) bool {
 	return p.defined() && p.start < totalSectors && p.count <= totalSectors-p.start
@@ -315,6 +324,17 @@ func (s *hybridMBRScan) accept(p mbrPartition) bool {
 }
 
 // complete reports whether the accepted entries describe the image payload.
+// The last partition may stop short of the image end by the trailing padding
+// mastering tools append (xorriso pads by default), bounded to 1 MiB and to a
+// small fraction of the image so a range planted early in a small image is
+// still rejected.
 func (s *hybridMBRScan) complete() bool {
-	return s.coversWholeImage || s.previousEnd == s.totalSectors
+	if s.coversWholeImage {
+		return true
+	}
+	slack := min(maxHybridTailPaddingSectors, s.totalSectors/64)
+	return s.previousEnd != 0 && s.totalSectors-s.previousEnd <= slack
 }
+
+// maxHybridTailPaddingSectors is 1 MiB of 512-byte sectors.
+const maxHybridTailPaddingSectors = 2048

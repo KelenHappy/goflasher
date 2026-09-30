@@ -44,6 +44,44 @@ func TestCorpusUDFOnly(t *testing.T) {
 		t.Fatalf("manifest=%+v", m)
 	}
 }
+
+// Windows media carry a UDF bridge whose ISO9660 tree only holds a README
+// placeholder; the UDF tree must win.
+func TestCorpusUDFBridgePrefersUDF(t *testing.T) {
+	b := oneFileUDF()
+	copy(b, oneFileISO("README.TXT;1", false, 30)[:40*2048])
+	r, err := New(bytes.NewReader(b), int64(len(b)), nopCloser{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	m := r.Manifest()
+	if len(m.Entries) != 1 || m.Entries[0].Path != "BOOTMGR" {
+		t.Fatalf("manifest=%+v", m)
+	}
+}
+func TestCorpusExtensionlessISO9660Name(t *testing.T) {
+	b := oneFileISO("BOOTMGR.;1", false, 30)
+	r, err := New(bytes.NewReader(b), int64(len(b)), nopCloser{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if m := r.Manifest(); len(m.Entries) != 1 || m.Entries[0].Path != "BOOTMGR" {
+		t.Fatalf("manifest=%+v", m)
+	}
+}
+func TestCorpusAcceptsSharedIdenticalExtents(t *testing.T) {
+	r := &Reader{size: 1000}
+	entries := []Entry{
+		{Path: "a.mui", Type: File, Size: 10, Extents: []Extent{{100, 10}}},
+		{Path: "b.mui", Type: File, Size: 10, Extents: []Extent{{100, 10}}},
+		{Path: "c", Type: File, Size: 10, Extents: []Extent{{110, 10}}},
+	}
+	if err := r.validate(entries); err != nil {
+		t.Fatalf("error=%v", err)
+	}
+}
 func TestCorpusRejectsMalformedImages(t *testing.T) {
 	tests := []struct {
 		name string

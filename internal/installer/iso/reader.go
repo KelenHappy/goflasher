@@ -82,14 +82,19 @@ func validateSource(source io.ReaderAt, size int64, retained io.Closer) error {
 	return nil
 }
 
+// parse prefers UDF when the image carries it: Windows media ship a UDF
+// bridge whose ISO9660 tree holds only a README placeholder, so the ISO9660
+// view alone would hide the installer content.
 func (r *Reader) parse() ([]Entry, error) {
-	entries, found, err := r.readISO9660()
+	entries, err := r.readUDF()
 	if err != nil {
-		return nil, err
-	}
-	if !found {
-		if entries, err = r.readUDF(); err != nil {
+		var found bool
+		entries, found, err = r.readISO9660()
+		if err != nil {
 			return nil, err
+		}
+		if !found {
+			return nil, invalid("no ISO9660 or UDF filesystem")
 		}
 	}
 	if err := r.validate(entries); err != nil {
@@ -284,15 +289,28 @@ func (v *validator) inBounds(x Extent) bool {
 	return x.Offset <= v.size && x.Length <= v.size-x.Offset
 }
 
-// checkSpans rejects two paths claiming overlapping bytes; a single path may
-// legitimately list adjacent or repeated extents.
+// checkSpans rejects two paths claiming partially overlapping bytes. A single
+// path may list adjacent or repeated extents, and different paths may share
+// an identical extent: mastering tools deduplicate identical files (Windows
+// oscdimg) or store hard links (xorriso) that way.
 func (v *validator) checkSpans() error {
-	sort.Slice(v.spans, func(i, j int) bool { return v.spans[i].start < v.spans[j].start })
-	for i := 1; i < len(v.spans); i++ {
-		prev, cur := v.spans[i-1], v.spans[i]
-		if cur.start < prev.end && cur.path != prev.path {
+	sort.Slice(v.spans, func(i, j int) bool {
+		if v.spans[i].start != v.spans[j].start {
+			return v.spans[i].start < v.spans[j].start
+		}
+		return v.spans[i].end < v.spans[j].end
+	})
+	var maxEnd uint64
+	var owner extentSpan
+	for i, cur := range v.spans {
+		if i > 0 && cur.start < maxEnd && !sameExtent(cur, owner) && cur.path != owner.path {
 			return invalid("extent collision")
+		}
+		if cur.end > maxEnd {
+			maxEnd, owner = cur.end, cur
 		}
 	}
 	return nil
 }
+
+func sameExtent(a, b extentSpan) bool { return a.start == b.start && a.end == b.end }
