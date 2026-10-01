@@ -84,27 +84,32 @@ func newCopier(dst io.Writer, opts Options) *copier {
 func (c *copier) run(ctx context.Context, src io.Reader) (Result, error) {
 	buf := make([]byte, c.opts.BufferSize)
 	for {
-		if err := ctx.Err(); err != nil {
-			return c.result(), fmt.Errorf("%w: %v", ErrCancelled, err)
-		}
-		n, readErr := src.Read(buf)
-		if n > 0 {
-			if err := c.consume(ctx, buf[:n]); err != nil {
-				return c.result(), err
-			}
-		}
-		done, err := c.afterRead(readErr)
-		if err != nil {
+		done, err := c.step(ctx, src, buf)
+		if err != nil || done {
 			return c.result(), err
-		}
-		if done {
-			return c.result(), nil
 		}
 	}
 }
 
+// step performs one read-and-write iteration and reports whether the copy is
+// complete.
+func (c *copier) step(ctx context.Context, src io.Reader, buf []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrCancelled, err)
+	}
+	n, readErr := src.Read(buf)
+	if err := c.consume(ctx, buf[:n]); err != nil {
+		return false, err
+	}
+	return c.afterRead(readErr)
+}
+
 // consume writes one chunk to the target and the hash, then reports progress.
+// An empty chunk is a no-op so a zero-byte read reports no progress.
 func (c *copier) consume(ctx context.Context, chunk []byte) error {
+	if len(chunk) == 0 {
+		return nil
+	}
 	if c.opts.TotalBytes > 0 && uint64(len(chunk)) > c.opts.TotalBytes-c.written {
 		return fmt.Errorf("%w: expected %d bytes", ErrSourceChanged, c.opts.TotalBytes)
 	}

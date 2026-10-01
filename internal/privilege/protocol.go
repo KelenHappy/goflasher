@@ -78,17 +78,29 @@ func (r Request) Validate() error {
 	if r.Version != ProtocolVersion {
 		return fmt.Errorf("%w: got %d, want %d", ErrIncompatible, r.Version, ProtocolVersion)
 	}
-	if r.Operation != OperationWrite && r.Operation != OperationFormat && r.Operation != OperationInstallerSession {
+	if !isSupportedOperation(r.Operation) {
 		return fmt.Errorf("unsupported privileged operation %q", r.Operation)
 	}
-	if r.Operation == OperationInstallerSession && (r.LogicalSectorSize < 512 || r.LogicalSectorSize&(r.LogicalSectorSize-1) != 0) {
+	if r.Operation == OperationInstallerSession && !isValidSectorSize(r.LogicalSectorSize) {
 		return ErrInvalidTarget
 	}
-	t := r.Target
-	if !t.hasRequiredClaims() {
+	if !r.Target.hasRequiredClaims() {
 		return ErrInvalidTarget
 	}
 	return nil
+}
+
+func isSupportedOperation(op string) bool {
+	switch op {
+	case OperationWrite, OperationFormat, OperationInstallerSession:
+		return true
+	}
+	return false
+}
+
+// isValidSectorSize reports whether size is a power of two of at least 512.
+func isValidSectorSize(size uint32) bool {
+	return size >= 512 && size&(size-1) == 0
 }
 
 func (t Target) hasRequiredClaims() bool {
@@ -120,17 +132,25 @@ func (c SessionCommand) Validate(capacity uint64) error {
 	if c.Version != ProtocolVersion {
 		return ErrIncompatible
 	}
+	var ok bool
 	switch c.Kind {
 	case SessionWriteAt, SessionReadAt:
-		if c.Length == 0 || c.Offset > capacity || uint64(c.Length) > capacity-c.Offset {
-			return ErrInvalidTarget
-		}
+		ok = c.hasValidRange(capacity)
 	case SessionFlush, SessionCancel, SessionClose:
-		if c.Offset != 0 || c.Length != 0 {
-			return ErrInvalidTarget
-		}
-	default:
+		ok = c.hasNoRange()
+	}
+	if !ok {
 		return ErrInvalidTarget
 	}
 	return nil
+}
+
+// hasValidRange reports whether [Offset, Offset+Length) is a non-empty range
+// within capacity, written to avoid uint64 overflow.
+func (c SessionCommand) hasValidRange(capacity uint64) bool {
+	return c.Length != 0 && c.Offset <= capacity && uint64(c.Length) <= capacity-c.Offset
+}
+
+func (c SessionCommand) hasNoRange() bool {
+	return c.Offset == 0 && c.Length == 0
 }
