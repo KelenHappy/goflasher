@@ -115,7 +115,7 @@ go test ./...
 Build the Linux GUI:
 
 ```sh
-go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -o dist/goflasher ./cmd/usbwriter
 go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
 sudo install -m 0755 dist/goflasher-helper /usr/libexec/goflasher-helper
 sudo install -m 0644 packaging/org.goflasher.usbwriter.policy \
@@ -135,7 +135,7 @@ GUI entry point from an Administrator Command Prompt:
 
 ```bat
 go test ./...
-go build -trimpath -tags fyne -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
 ```
 
 Run `dist\goflasher.exe` as Administrator so that Windows permits the selected
@@ -200,7 +200,7 @@ On macOS, install Go and the Fyne prerequisites, then build the GUI:
 
 ```sh
 go test ./...
-go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -o dist/goflasher ./cmd/usbwriter
 ```
 
 The Darwin manager loads Disk Arbitration and IOKit through PureGo. The image picker uses AppKit `NSOpenPanel`; neither path invokes a command-line fallback. Never run the GUI with `sudo`. Raw-operation development remains fail-closed until the authenticated helper/XPC cutover is complete.

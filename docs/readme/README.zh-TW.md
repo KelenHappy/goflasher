@@ -141,7 +141,7 @@ go run -tags fyne ./cmd/usbwriter
 
 ```bat
 go test ./...
-go build -trimpath -tags fyne -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
 ```
 
 請以系統管理員身分執行 `dist\goflasher.exe`，讓程式可以將已確認的可移除式磁碟
@@ -151,7 +151,7 @@ go build -trimpath -tags fyne -ldflags "-H=windowsgui" -o dist\goflasher.exe ./c
 
 ```sh
 go test ./...
-go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -o dist/goflasher ./cmd/usbwriter
 ```
 
 在專用權限提升輔助程式完成前，需使用 `sudo` 啟動本機建置的程式，才能存取

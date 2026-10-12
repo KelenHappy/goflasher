@@ -98,7 +98,7 @@ func (l Localizer) T(id string, args ...any) string {
 var catalogs = map[Locale]map[string]string{
 	English: {
 		"launcher":     "GoFlasher GUI source is available with the 'fyne' build tag. Install Fyne build dependencies, then run: go run -tags fyne ./cmd/usbwriter",
-		"window.title": "GoFlasher USB Writer", "device.none": "No device selected",
+		"window.title": "GoFlasher", "device.none": "No device selected",
 		"image.empty":   "Image format: —\nImage size: —\nSHA-256: not verified",
 		"option.verify": "Verify after writing", "option.eject": "Safely eject when finished",
 		"status.ready": "Ready", "metrics.empty": "Speed: —        Written: —        Remaining: —",
@@ -136,7 +136,7 @@ var catalogs = map[Locale]map[string]string{
 	},
 	TraditionalChinese: {
 		"launcher":     "GoFlasher 圖形介面需使用 'fyne' 建置標籤。安裝 Fyne 建置相依套件後，執行：go run -tags fyne ./cmd/usbwriter",
-		"window.title": "GoFlasher USB 寫入工具", "device.none": "未選擇裝置",
+		"window.title": "GoFlasher", "device.none": "未選擇裝置",
 		"image.empty":   "映像格式：—\n映像大小：—\nSHA-256：未驗證",
 		"option.verify": "寫入後驗證", "option.eject": "完成後安全退出",
 		"status.ready": "準備就緒", "metrics.empty": "速度：—        已寫入：—        剩餘：—",
@@ -174,7 +174,7 @@ var catalogs = map[Locale]map[string]string{
 	},
 	SimplifiedChinese: {
 		"launcher":     "GoFlasher 图形界面需要使用 'fyne' 构建标签。安装 Fyne 构建依赖后运行：go run -tags fyne ./cmd/usbwriter",
-		"window.title": "GoFlasher USB 写入工具", "device.none": "未选择设备",
+		"window.title": "GoFlasher", "device.none": "未选择设备",
 		"image.empty": "镜像格式：—\n镜像大小：—\nSHA-256：未验证", "option.verify": "写入后验证", "option.eject": "完成后安全弹出",
 		"status.ready": "准备就绪", "metrics.empty": "速度：—        已写入：—        剩余：—", "log.details": "详细日志",
 		"action.start": "开始", "action.copy_error": "复制错误详情", "action.copy_log": "复制日志", "action.rescan": "重新扫描", "action.choose": "选择",
@@ -199,7 +199,7 @@ var catalogs = map[Locale]map[string]string{
 	},
 	Japanese: {
 		"launcher":     "GoFlasher GUI には 'fyne' ビルドタグが必要です。Fyne の依存関係をインストールして実行してください：go run -tags fyne ./cmd/usbwriter",
-		"window.title": "GoFlasher USB ライター", "device.none": "デバイスが選択されていません", "image.empty": "イメージ形式：—\nイメージサイズ：—\nSHA-256：未検証",
+		"window.title": "GoFlasher", "device.none": "デバイスが選択されていません", "image.empty": "イメージ形式：—\nイメージサイズ：—\nSHA-256：未検証",
 		"option.verify": "書き込み後に検証", "option.eject": "完了後に安全に取り出す", "status.ready": "準備完了", "metrics.empty": "速度：—        書き込み済み：—        残り：—", "log.details": "詳細ログ",
 		"action.start": "開始", "action.copy_error": "エラー詳細をコピー", "action.copy_log": "ログをコピー", "action.rescan": "再スキャン", "action.choose": "選択",
 		"error.devices": "デバイスを読み取れません：%v", "error.operation": "操作に失敗しました", "error.iso_unsupported": "未対応または判別不能なISO", "error.uefi_loader": "必要なUEFI x64ローダーがありません", "error.target_small": "対象USBデバイスの容量が不足しています", "error.temporary_space": "一時ディスク容量が不足しています", "error.libwim_unavailable": "Bundled libwimを利用できません", "error.libwim_abi": "Bundled libwimのABIまたはバージョンが一致しません", "error.wim_split": "WIM分割に失敗しました", "error.gpt_verify": "GPTレイアウト検証に失敗しました", "error.fat_verify": "FAT32ファイルシステム検証に失敗しました", "error.device_changed": "対象デバイスの識別情報が変更されました", "log.devices": "許可された USB デバイスが %d 台見つかりました", "log.devices.skipped": "識別できないデバイスを %d 台スキップしました", "device.details": "%s %s\n%.1f GB · %s\nシリアル：%s · USB · カードリーダー：%s · マウント済み：%s · %d パーティション",

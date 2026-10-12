@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"net/url"
@@ -88,17 +89,22 @@ const (
 
 const languagePreference = "language"
 
+// appIcon is rendered from packaging/org.goflasher.usbwriter.svg. Plain
+// go build does not apply FyneApp.toml, so the window icon is set explicitly.
+//
+//go:embed Icon.png
+var appIcon []byte
+
 func newGUIController(tr i18n.Localizer) *guiController {
 	a := app.NewWithID("org.goflasher.usbwriter")
-	scale := loadUIScale(a.Preferences())
-	applyUIScale(scale)
-	a.Settings().SetTheme(newReadableTheme(loadThemeMode(a.Preferences())))
+	a.SetIcon(fyne.NewStaticResource("Icon.png", appIcon))
+	a.Settings().SetTheme(newReadableTheme(loadThemeMode(a.Preferences()), loadUIScale(a.Preferences())))
 	if saved := a.Preferences().String(languagePreference); saved != "" {
 		tr = i18n.New(saved)
 	}
 	configureFyneTranslations(string(tr.Locale()))
 	w := a.NewWindow(tr.T("window.title"))
-	w.Resize(baseWindowSize(scale))
+	w.Resize(baseWindowSize())
 	view := newApplicationView(tr, w)
 	return &guiController{tr: tr, view: view, backend: newBackend(), machine: core.NewStateMachine(), app: a}
 }
@@ -232,23 +238,25 @@ func licenseDetail(body string) fyne.CanvasObject {
 	text.Wrapping = fyne.TextWrapWord
 	text.TextStyle = fyne.TextStyle{Monospace: true}
 	detail := container.NewVScroll(text)
-	detail.SetMinSize(fyne.NewSize(0, licenseDetailHeight))
+	detail.SetMinSize(fyne.NewSize(0, em(licenseDetailHeightEm)))
 	return detail
 }
 
-// licenseDetailHeight is the visible height of an opened license text.
-const licenseDetailHeight = 320
+const (
+	// licenseDetailHeightEm is the visible height of an opened license text.
+	licenseDetailHeightEm = 23
+	// licenseDialogMinWidthEm/HeightEm are the floor for windows too small to
+	// divide; licenseDialogCoverage leaves the parent visible around the dialog.
+	licenseDialogMinWidthEm  = 34
+	licenseDialogMinHeightEm = 28
+	licenseDialogCoverage    = 0.9
+)
 
 // licenseDialogSize fits the dialog to the window while leaving the parent
 // visible, and keeps a floor for windows too small to divide.
 func licenseDialogSize(canvas fyne.Size) fyne.Size {
-	width, height := canvas.Width*0.9, canvas.Height*0.9
-	if width < 480 {
-		width = 480
-	}
-	if height < 400 {
-		height = 400
-	}
+	width := max(canvas.Width*licenseDialogCoverage, em(licenseDialogMinWidthEm))
+	height := max(canvas.Height*licenseDialogCoverage, em(licenseDialogMinHeightEm))
 	return fyne.NewSize(width, height)
 }
 
@@ -278,27 +286,19 @@ func newSettingSelect[T comparable](choices []settingChoice[T], current T, chang
 
 func (c *guiController) setTheme(mode themeMode) {
 	c.app.Preferences().SetString(themePreference, string(mode))
-	c.app.Settings().SetTheme(newReadableTheme(mode))
+	c.applyTheme()
 }
 
-// setUIScale re-broadcasts the current theme once the new ratio is in place,
-// which is what makes every open canvas recalculate its scale immediately
-// instead of waiting for a restart.
+// setUIScale only rebuilds the theme: the ratio lives in its sizes, so every
+// open canvas re-lays out immediately while the window keeps its pixel size.
 func (c *guiController) setUIScale(scale float64) {
-	scale = knownUIScale(scale)
-	previous := loadUIScale(c.app.Preferences())
-	c.app.Preferences().SetFloat(scalePreference, scale)
-	applyUIScale(scale)
-	c.app.Settings().SetTheme(newReadableTheme(loadThemeMode(c.app.Preferences())))
-	if previous == scale {
-		return
-	}
-	// Fyne keeps the logical size across a rescale, which would grow or shrink
-	// the window itself; shrinking the logical size by the inverse ratio keeps
-	// the window's pixel size where the user put it and zooms only the content.
-	size := c.view.window.Canvas().Size()
-	ratio := float32(previous / scale)
-	c.view.window.Resize(fyne.NewSize(size.Width*ratio, size.Height*ratio))
+	c.app.Preferences().SetFloat(scalePreference, knownUIScale(scale))
+	c.applyTheme()
+}
+
+func (c *guiController) applyTheme() {
+	preferences := c.app.Preferences()
+	c.app.Settings().SetTheme(newReadableTheme(loadThemeMode(preferences), loadUIScale(preferences)))
 }
 
 func (c *guiController) setLanguage(locale i18n.Locale) {

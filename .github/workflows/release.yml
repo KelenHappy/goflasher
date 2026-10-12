@@ -35,7 +35,7 @@ jobs:
           test -n "$windres"
           "$windres" --target=pe-x86-64 -I packaging/windows packaging/windows/goflasher.rc -O coff -o cmd/usbwriter/goflasher_windows_amd64.syso
           mkdir -p dist
-          go build -trimpath -tags fyne -ldflags "-s -w -H=windowsgui" -o dist/GoFlasher.exe ./cmd/usbwriter
+          go build -trimpath -tags fyne,no_emoji -ldflags "-s -w -H=windowsgui" -o dist/GoFlasher.exe ./cmd/usbwriter
           rm cmd/usbwriter/goflasher_windows_amd64.syso
           mt=$(find '/c/Program Files (x86)/Windows Kits/10/bin' -path '*/x64/mt.exe' -print 2>/dev/null | sort -V | tail -1)
           test -n "$mt"
@@ -108,7 +108,7 @@ jobs:
         run: |
           go test ./...
           mkdir -p dist
-          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
+          go build -trimpath -tags fyne,no_emoji -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
           go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
       - name: Build Debian package
         run: packaging/make-deb.sh dist/goflasher "$VERSION" dist
@@ -202,7 +202,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          go build -trimpath -tags fyne -ldflags "-s -w" -o dist/GoFlasher ./cmd/usbwriter
+          go build -trimpath -tags fyne,no_emoji -ldflags "-s -w" -o dist/GoFlasher ./cmd/usbwriter
           go build -trimpath -ldflags "-s -w" -o dist/goflasher-helper ./cmd/goflasher-helper
       - name: Package DMG
         env:

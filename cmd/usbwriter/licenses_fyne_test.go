@@ -42,8 +42,9 @@ func TestLicenseAccordionBuildsPromptly(t *testing.T) {
 // proportional size alone would produce a dialog too small to read.
 func TestLicenseDialogSizeKeepsAFloor(t *testing.T) {
 	small := licenseDialogSize(fyne.NewSize(200, 150))
-	if small.Width != 480 || small.Height != 400 {
-		t.Errorf("small window gave %v, want the 480x400 floor", small)
+	floor := fyne.NewSize(em(licenseDialogMinWidthEm), em(licenseDialogMinHeightEm))
+	if small != floor {
+		t.Errorf("small window gave %v, want the %v floor", small, floor)
 	}
 	large := licenseDialogSize(fyne.NewSize(1000, 1000))
 	if large.Width != 900 || large.Height != 900 {

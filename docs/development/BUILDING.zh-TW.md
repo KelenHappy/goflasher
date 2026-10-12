@@ -73,7 +73,7 @@ go test ./...
 Linux GUI與helper：
 
 ```sh
-go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -o dist/goflasher ./cmd/usbwriter
 go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
 sudo install -m 0755 dist/goflasher-helper /usr/libexec/goflasher-helper
 sudo install -m 0644 packaging/org.goflasher.usbwriter.policy \
@@ -86,7 +86,7 @@ Windows：
 
 ```bat
 go test ./...
-go build -trimpath -tags fyne -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -ldflags "-H=windowsgui" -o dist\goflasher.exe ./cmd/usbwriter
 ```
 
 以Administrator執行 `dist\goflasher.exe`，讓Windows允許lock/dismount及raw open；backend仍會在destructive access前重新驗證identity。
@@ -141,7 +141,7 @@ macOS：
 
 ```sh
 go test ./...
-go build -trimpath -tags fyne -o dist/goflasher ./cmd/usbwriter
+go build -trimpath -tags fyne,no_emoji -o dist/goflasher ./cmd/usbwriter
 ```
 
 Darwin manager 透過 PureGo 載入 Disk Arbitration 與 IOKit；picker 使用 AppKit `NSOpenPanel`，兩者都沒有 command fallback。GUI 不得以 `sudo` 執行；authenticated helper/XPC cutover 完成前，raw-operation development 必須 fail closed。

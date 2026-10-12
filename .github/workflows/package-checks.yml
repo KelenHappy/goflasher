@@ -51,7 +51,7 @@ jobs:
 
           go build \
             -trimpath \
-            -tags fyne \
+            -tags fyne,no_emoji \
             -ldflags "-s -w" \
             -o dist/goflasher \
             ./cmd/usbwriter
@@ -169,7 +169,7 @@ jobs:
 
           go build \
             -trimpath \
-            -tags fyne \
+            -tags fyne,no_emoji \
             -ldflags "-s -w -H=windowsgui" \
             -o dist/GoFlasher.exe \
             ./cmd/usbwriter

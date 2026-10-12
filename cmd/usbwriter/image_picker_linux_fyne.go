@@ -12,7 +12,11 @@ import (
 	"fyne.io/fyne/v2/storage"
 )
 
-const fileDialogResizePollInterval = 100 * time.Millisecond
+const (
+	fileDialogResizePollInterval = 100 * time.Millisecond
+	fileDialogWidthEm            = 54
+	fileDialogHeightEm           = 37
+)
 
 var supportedImageSuffixes = []string{
 	".iso", ".img", ".raw",
@@ -62,7 +66,7 @@ func openImage(parent fyne.Window, labels imagePickerLabels, done func(string, e
 	chooser.SetTitleText(labels.Title)
 	chooser.SetConfirmText(labels.Accept)
 	chooser.SetDismissText(labels.Dismiss)
-	desiredSize := fyne.NewSize(760, 520)
+	desiredSize := fyne.NewSize(em(fileDialogWidthEm), em(fileDialogHeightEm))
 	// Fyne 2.8 initializes FileDialog's internal widget tree in Show. Calling
 	// Resize first dereferences an uninitialized dialog in FileDialog.MinSize.
 	chooser.Show()

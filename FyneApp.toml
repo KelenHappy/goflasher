@@ -1,7 +1,8 @@
 
 [Details]
   ID = "org.goflasher.usbwriter"
-  Name = "USB Writer"
+  Name = "GoFlasher"
+  Icon = "cmd/usbwriter/Icon.png"
 
 [Migrations]
   fyneDo = true

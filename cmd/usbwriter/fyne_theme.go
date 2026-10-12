@@ -11,7 +11,8 @@ import (
 
 type readableTheme struct {
 	fyne.Theme
-	mode themeMode
+	mode  themeMode
+	scale float64
 }
 
 type themeMode string
@@ -31,7 +32,7 @@ func loadThemeMode(preferences fyne.Preferences) themeMode {
 	return mode
 }
 
-func newReadableTheme(mode themeMode) fyne.Theme {
+func newReadableTheme(mode themeMode, scale float64) fyne.Theme {
 	base := theme.DefaultTheme()
 	switch mode {
 	case themeModeLight:
@@ -39,7 +40,22 @@ func newReadableTheme(mode themeMode) fyne.Theme {
 	case themeModeDark:
 		base = theme.DarkTheme()
 	}
-	return readableTheme{Theme: base, mode: mode}
+	return readableTheme{Theme: base, mode: mode, scale: knownUIScale(scale)}
+}
+
+// Size scales every theme dimension by the chosen ratio. Widgets size
+// themselves from these values, so one ratio zooms the whole interface.
+func (t readableTheme) Size(name fyne.ThemeSizeName) float32 {
+	return scaledSize(t.Theme.Size(name), t.scale, isTextSize(name))
+}
+
+func isTextSize(name fyne.ThemeSizeName) bool {
+	switch name {
+	case theme.SizeNameText, theme.SizeNameHeadingText, theme.SizeNameSubHeadingText, theme.SizeNameCaptionText:
+		return true
+	default:
+		return false
+	}
 }
 
 func (t readableTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {

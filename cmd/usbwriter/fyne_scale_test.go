@@ -3,8 +3,11 @@
 package main
 
 import (
-	"os"
+	"math"
 	"testing"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/theme"
 )
 
 func TestKnownUIScaleRejectsUnofferedRatios(t *testing.T) {
@@ -20,28 +23,39 @@ func TestKnownUIScaleRejectsUnofferedRatios(t *testing.T) {
 	}
 }
 
-func TestApplyUIScalePublishesChosenRatio(t *testing.T) {
-	t.Setenv(scaleEnvKey, "")
-	applyUIScale(1.2)
-	if got := os.Getenv(scaleEnvKey); got != "1.2000" {
-		t.Errorf("%s = %q, want \"1.2000\"", scaleEnvKey, got)
+func TestThemeRoundsTextSizesUp(t *testing.T) {
+	textSizes := []fyne.ThemeSizeName{theme.SizeNameText, theme.SizeNameHeadingText, theme.SizeNameSubHeadingText, theme.SizeNameCaptionText}
+	for _, scale := range uiScaleChoices {
+		scaled := newReadableTheme(themeModeSystem, scale)
+		for _, name := range textSizes {
+			base := float64(theme.DefaultTheme().Size(name))
+			got := float64(scaled.Size(name))
+			if got != math.Ceil(base*scale) {
+				t.Errorf("scale %v %s = %v, want %v", scale, name, got, math.Ceil(base*scale))
+			}
+		}
+	}
+	// 14 x 1.2 = 16.8 is the case that motivated rounding up.
+	if got := newReadableTheme(themeModeSystem, 1.2).Size(theme.SizeNameText); got != 17 {
+		t.Errorf("120%% text size = %v, want 17", got)
 	}
 }
 
-func TestBaseWindowSizeKeepsPixelFootprint(t *testing.T) {
-	for _, scale := range uiScaleChoices {
-		size := baseWindowSize(scale)
-		width := float64(size.Width) * scale
-		height := float64(size.Height) * scale
-		if width < baseWindowWidth-1 || width > baseWindowWidth+1 {
-			t.Errorf("baseWindowSize(%v) width footprint %v, want ~%v", scale, width, baseWindowWidth)
-		}
-		if height < baseWindowHeight-1 || height > baseWindowHeight+1 {
-			t.Errorf("baseWindowSize(%v) height footprint %v, want ~%v", scale, height, baseWindowHeight)
+func TestThemeScalesNonTextSizesProportionally(t *testing.T) {
+	scaled := newReadableTheme(themeModeSystem, 2.0)
+	base := theme.DefaultTheme()
+	for _, name := range []fyne.ThemeSizeName{theme.SizeNamePadding, theme.SizeNameInlineIcon, theme.SizeNameModalBlurRadius} {
+		if got, want := scaled.Size(name), base.Size(name)*2; got != want {
+			t.Errorf("200%% %s = %v, want %v", name, got, want)
 		}
 	}
-	if got := baseWindowSize(0); got != baseWindowSize(defaultUIScale) {
-		t.Errorf("baseWindowSize(0) = %v, want the default ratio size", got)
+}
+
+func TestBaseWindowSizeIgnoresUIScale(t *testing.T) {
+	unit := theme.DefaultTheme().Size(theme.SizeNameText)
+	want := fyne.NewSize(windowWidthEm*unit, windowHeightEm*unit)
+	if got := baseWindowSize(); got != want {
+		t.Errorf("baseWindowSize() = %v, want %v", got, want)
 	}
 }
 
