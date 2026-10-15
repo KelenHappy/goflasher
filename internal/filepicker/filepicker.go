@@ -15,8 +15,16 @@ func localPath(files []string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse selected file URI: %w", err)
 	}
-	if uri.Scheme != "file" || (uri.Host != "" && uri.Host != "localhost") {
+	if !isLocalFileURI(uri) {
 		return "", fmt.Errorf("file chooser returned a non-local URI: %s", uri.Redacted())
 	}
 	return filepath.FromSlash(uri.Path), nil
+}
+
+// isLocalFileURI accepts file:///path and file://localhost/path only.
+func isLocalFileURI(uri *url.URL) bool {
+	if uri.Scheme != "file" {
+		return false
+	}
+	return uri.Host == "" || uri.Host == "localhost"
 }

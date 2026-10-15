@@ -19,30 +19,18 @@ func TestCorpusISO9660AndJoliet(t *testing.T) {
 		filename string
 	}{{"iso9660", false, "BOOTMGR;1"}, {"joliet", true, "BΩOT"}} {
 		t.Run(tc.name, func(t *testing.T) {
-			b := oneFileISO(tc.filename, tc.joliet, 30)
-			r, err := New(bytes.NewReader(b), int64(len(b)), nopCloser{})
-			if err != nil {
-				t.Fatal(err)
+			e := singleEntry(t, oneFileISO(tc.filename, tc.joliet, 30))
+			if e.Type != File {
+				t.Fatalf("type=%v", e.Type)
 			}
-			defer r.Close()
-			m := r.Manifest()
-			if len(m.Entries) != 1 || m.Entries[0].Type != File || m.Entries[0].Extents[0].Offset != 30*2048 {
-				t.Fatalf("manifest=%+v", m)
+			if e.Extents[0].Offset != 30*2048 {
+				t.Fatalf("extents=%+v", e.Extents)
 			}
 		})
 	}
 }
 func TestCorpusUDFOnly(t *testing.T) {
-	b := oneFileUDF()
-	r, err := New(bytes.NewReader(b), int64(len(b)), nopCloser{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	m := r.Manifest()
-	if len(m.Entries) != 1 || m.Entries[0].Path != "BOOTMGR" {
-		t.Fatalf("manifest=%+v", m)
-	}
+	requireSinglePath(t, oneFileUDF(), "BOOTMGR")
 }
 
 // Windows media carry a UDF bridge whose ISO9660 tree only holds a README
@@ -50,26 +38,10 @@ func TestCorpusUDFOnly(t *testing.T) {
 func TestCorpusUDFBridgePrefersUDF(t *testing.T) {
 	b := oneFileUDF()
 	copy(b, oneFileISO("README.TXT;1", false, 30)[:40*2048])
-	r, err := New(bytes.NewReader(b), int64(len(b)), nopCloser{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	m := r.Manifest()
-	if len(m.Entries) != 1 || m.Entries[0].Path != "BOOTMGR" {
-		t.Fatalf("manifest=%+v", m)
-	}
+	requireSinglePath(t, b, "BOOTMGR")
 }
 func TestCorpusExtensionlessISO9660Name(t *testing.T) {
-	b := oneFileISO("BOOTMGR.;1", false, 30)
-	r, err := New(bytes.NewReader(b), int64(len(b)), nopCloser{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	if m := r.Manifest(); len(m.Entries) != 1 || m.Entries[0].Path != "BOOTMGR" {
-		t.Fatalf("manifest=%+v", m)
-	}
+	requireSinglePath(t, oneFileISO("BOOTMGR.;1", false, 30), "BOOTMGR")
 }
 func TestCorpusAcceptsSharedIdenticalExtents(t *testing.T) {
 	r := &Reader{size: 1000}
@@ -106,6 +78,28 @@ func TestCorpusRejectsPathAndExtentCollisions(t *testing.T) {
 				t.Fatalf("error=%v", err)
 			}
 		})
+	}
+}
+
+// singleEntry opens image b and returns its only manifest entry.
+func singleEntry(t *testing.T, b []byte) Entry {
+	t.Helper()
+	r, err := New(bytes.NewReader(b), int64(len(b)), nopCloser{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	m := r.Manifest()
+	if len(m.Entries) != 1 {
+		t.Fatalf("manifest=%+v", m)
+	}
+	return m.Entries[0]
+}
+
+func requireSinglePath(t *testing.T, b []byte, want string) {
+	t.Helper()
+	if e := singleEntry(t, b); e.Path != want {
+		t.Fatalf("path=%q, want %q", e.Path, want)
 	}
 }
 

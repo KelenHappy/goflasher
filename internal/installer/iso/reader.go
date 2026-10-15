@@ -302,8 +302,8 @@ func (v *validator) checkSpans() error {
 	})
 	var maxEnd uint64
 	var owner extentSpan
-	for i, cur := range v.spans {
-		if i > 0 && cur.start < maxEnd && !sameExtent(cur, owner) && cur.path != owner.path {
+	for _, cur := range v.spans {
+		if cur.start < maxEnd && conflicts(owner, cur) {
 			return invalid("extent collision")
 		}
 		if cur.end > maxEnd {
@@ -314,3 +314,7 @@ func (v *validator) checkSpans() error {
 }
 
 func sameExtent(a, b extentSpan) bool { return a.start == b.start && a.end == b.end }
+
+// conflicts reports whether overlapping spans a and b may not coexist: only
+// spans from the same path or identical extents are allowed to share bytes.
+func conflicts(a, b extentSpan) bool { return a.path != b.path && !sameExtent(a, b) }

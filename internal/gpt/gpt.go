@@ -199,15 +199,28 @@ func (l *Layout) validPartitionBounds() bool {
 func (l *Layout) validHeaders() bool {
 	last := l.TotalLBAs - 1
 	entriesCRC := crc32.ChecksumIEEE(l.entries)
-	return validHeader(l.primaryHeader, 1, last, l.PrimaryEntriesLBA, entriesCRC) &&
-		validHeader(l.backupHeader, last, 1, l.BackupEntriesLBA, entriesCRC)
+	return validHeader(l.primaryHeader, headerFields{1, last, l.PrimaryEntriesLBA, entriesCRC}) &&
+		validHeader(l.backupHeader, headerFields{last, 1, l.BackupEntriesLBA, entriesCRC})
 }
-func validHeader(header []byte, current, alternate, entriesLBA uint64, entriesCRC uint32) bool {
+
+// headerFields are the header values that differ between the primary and
+// backup copies, plus the CRC both share over the entry array.
+type headerFields struct {
+	current, alternate, entriesLBA uint64
+	entriesCRC                     uint32
+}
+
+func validHeader(header []byte, want headerFields) bool {
 	if !validHeaderCRC(header) {
 		return false
 	}
-	got := [3]uint64{binary.LittleEndian.Uint64(header[24:32]), binary.LittleEndian.Uint64(header[32:40]), binary.LittleEndian.Uint64(header[72:80])}
-	return got == [3]uint64{current, alternate, entriesLBA} && binary.LittleEndian.Uint32(header[88:92]) == entriesCRC
+	got := headerFields{
+		current:    binary.LittleEndian.Uint64(header[24:32]),
+		alternate:  binary.LittleEndian.Uint64(header[32:40]),
+		entriesLBA: binary.LittleEndian.Uint64(header[72:80]),
+		entriesCRC: binary.LittleEndian.Uint32(header[88:92]),
+	}
+	return got == want
 }
 func validHeaderCRC(header []byte) bool {
 	if len(header) < int(HeaderSize) || binary.LittleEndian.Uint32(header[12:16]) != HeaderSize {
