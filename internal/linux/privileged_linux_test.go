@@ -64,7 +64,7 @@ func TestOpenedLinuxDeviceIsRevalidatedBeforeUse(t *testing.T) {
 				return nil
 			}
 			req := privilegedRequest{Identity: "FLASH123", Serial: "FLASH123", Major: 8, Minor: 16, Capacity: 65536 * 512, Mode: modeWrite}
-			opened, err := openDevice(req, env, "sdb")
+			opened, err := deviceGuard{req: req, env: env}.open(blockDevice{name: "sdb"})
 			if opened != nil {
 				_ = opened.Close()
 			}

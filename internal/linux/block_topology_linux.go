@@ -50,13 +50,12 @@ func indexBlockDevices(classRoot string) (*blockTopology, error) {
 	t := &blockTopology{byNumber: map[devNumber]string{}, depends: map[string]map[string]bool{}}
 	for _, entry := range entries {
 		name := entry.Name()
-		major, minor, err := readDeviceNumber(filepath.Join(classRoot, name, "dev"))
+		number, err := readDeviceNumber(filepath.Join(classRoot, name, "dev"))
 		if err != nil {
 			return nil, fmt.Errorf("read block topology for %s: %w", name, err)
 		}
-		number := devNumber{major, minor}
 		if _, duplicate := t.byNumber[number]; duplicate {
-			return nil, fmt.Errorf("duplicate block device number %d:%d", major, minor)
+			return nil, fmt.Errorf("duplicate block device number %s", number)
 		}
 		t.byNumber[number] = name
 		t.depends[name] = map[string]bool{}
@@ -161,7 +160,7 @@ func (t *blockTopology) dependsOn(start, target string) (bool, error) {
 func (t *blockTopology) nameForNumber(number devNumber) (string, error) {
 	name, ok := t.byNumber[number]
 	if !ok {
-		return "", fmt.Errorf("unknown block device %d:%d", number.major, number.minor)
+		return "", fmt.Errorf("unknown block device %s", number)
 	}
 	return name, nil
 }

@@ -15,7 +15,7 @@ func TestBuiltInFAT32FormatterCreatesFilesystemWithoutExternalTools(t *testing.T
 	const size = uint64(64 << 20)
 	file := newDirtyDeviceFile(t, size)
 	var formatProgress strings.Builder
-	requireNoError(t, makeFAT32(file, size, "GOFLASHER", &formatProgress))
+	requireNoError(t, privilegedOperation{request: privilegedRequest{Capacity: size, Label: "GOFLASHER"}, target: file, errorOutput: &formatProgress}.formatFAT32())
 	if got, want := formatProgress.String(), "PROGRESS 10 100\nPROGRESS 15 100\nPROGRESS 25 100\nPROGRESS 80 100\nPROGRESS 90 100\nPROGRESS 100 100\n"; got != want {
 		t.Fatalf("format progress = %q, want %q", got, want)
 	}

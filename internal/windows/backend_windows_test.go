@@ -66,13 +66,6 @@ func candidate() diskRecord {
 	return diskRecord{Device: device.Device{ID: e.canonicalID(), Path: `\\.\PhysicalDrive4`, Model: "Flash", Serial: e.Serial, Transport: "usb", Major: 4, Size: 16 << 30}, identity: e, deviceNumber: 4, usbAncestor: true, deviceHotplug: true}
 }
 
-func requireNoError(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 func listedDevice(t *testing.T, b *Backend) device.Device {
 	t.Helper()
 	devices, _, err := b.ListAllowedDevices(context.Background())

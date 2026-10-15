@@ -51,7 +51,7 @@ func TestPlainMountedPartitionIsDetectedAtBothBoundaries(t *testing.T) {
 	if !got.Mounted {
 		t.Fatal("backend did not associate directly mounted partition with disk")
 	}
-	unsafe, err := mountedOrSystem("sdb", 8, 16, helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot})
+	unsafe, err := helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot}.mountedOrSystem(blockDevice{name: "sdb", number: devNumber{8, 16}})
 	requireNoError(t, err)
 	if !unsafe {
 		t.Fatal("privileged helper accepted disk with a mounted partition")
@@ -88,7 +88,7 @@ func TestStackedMountedDevicesRejectBackingUSB(t *testing.T) {
 			got, err := f.RefreshDevice(context.Background(), "FLASH123")
 			requireNoError(t, err)
 			assertSystemDisk(t, got, tc.name)
-			unsafe, err := mountedOrSystem("sdb", 8, 16, helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot})
+			unsafe, err := helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot}.mountedOrSystem(blockDevice{name: "sdb", number: devNumber{8, 16}})
 			requireNoError(t, err)
 			if !unsafe {
 				t.Fatal("privileged helper safety check accepted stacked system disk")
@@ -107,7 +107,7 @@ func TestStackedSwapRejectsBackingUSBInBothBoundaries(t *testing.T) {
 	got, err := f.RefreshDevice(context.Background(), "FLASH123")
 	requireNoError(t, err)
 	assertSystemDisk(t, got, "stacked swap")
-	unsafe, err := mountedOrSystem("sdb", 8, 16, helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot})
+	unsafe, err := helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot}.mountedOrSystem(blockDevice{name: "sdb", number: devNumber{8, 16}})
 	requireNoError(t, err)
 	if !unsafe {
 		t.Fatal("privileged helper safety check accepted stacked swap disk")
@@ -145,7 +145,7 @@ func TestMalformedOrCyclicTopologyFailsClosed(t *testing.T) {
 		if _, _, err := f.ListAllowedDevices(context.Background()); err == nil {
 			t.Fatal("backend accepted unsafe topology")
 		}
-		_, err := mountedOrSystem("sdb", 8, 16, helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot})
+		_, err := helperEnvironment{SysClassBlock: f.SysClassBlock, MountInfo: f.MountInfo, Swaps: f.Swaps, DevRoot: f.DevRoot}.mountedOrSystem(blockDevice{name: "sdb", number: devNumber{8, 16}})
 		if err == nil || errors.Is(err, ErrSystemDisk) {
 			t.Fatalf("privileged topology validation did not fail closed: %v", err)
 		}

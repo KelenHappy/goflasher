@@ -563,7 +563,7 @@ func (o privilegedOperation) execute() error {
 	case modeFlush:
 		return flushAndInvalidate(o.target, func() error { return invalidateBlockCache(o.target) })
 	case modeFormatFAT32:
-		return makeFAT32(o.target, o.request.Capacity, o.request.Label, o.errorOutput)
+		return o.formatFAT32()
 	case modeInstallerSession:
 		return runInstallerSession(installerSession{request: o.request, target: o.target, input: bufio.NewReader(o.payload), output: o.output, env: o.env})
 	default:
@@ -625,20 +625,22 @@ func validateAndOpen(req privilegedRequest, env helperEnvironment) (*os.File, er
 	if !req.valid() {
 		return nil, errors.New("incomplete request")
 	}
-	name, real, err := resolveDevice(req, env)
+	g := deviceGuard{req: req, env: env}
+	d, err := g.resolve()
 	if err != nil {
 		return nil, err
 	}
-	class := filepath.Join(env.SysClassBlock, name)
-	major, minor, err := validateDeviceMetadata(req, class, real)
-	if err != nil {
+	if err := validateDeviceMetadata(req, d); err != nil {
 		return nil, err
 	}
-	if err := validateDeviceSafety(env, name, major, minor); err != nil {
+	if err := g.validateSafety(d); err != nil {
 		return nil, err
 	}
-	return openDevice(req, env, name)
+	return g.open(d)
 }
+
+// device is the kernel device number the request is bound to.
+func (req privilegedRequest) device() devNumber { return devNumber{req.Major, req.Minor} }
 
 func (req privilegedRequest) valid() bool {
 	if !req.validProtocol() || !req.hasRequiredIdentity() {
@@ -705,20 +707,20 @@ func (s *installerSession) run() error {
 func (s *installerSession) readCommand() (privilege.SessionCommand, bool, error) {
 	line, err := s.input.ReadSlice('\n')
 	if errors.Is(err, bufio.ErrBufferFull) || len(line) > maxPrivilegedRequestBytes {
-		return privilege.SessionCommand{}, false, s.failure("invalid-command", "command frame too large")
+		return privilege.SessionCommand{}, false, s.failure(failInvalidCommand, "command frame too large")
 	}
 	if err != nil {
 		return privilege.SessionCommand{}, false, err
 	}
 	var command privilege.SessionCommand
 	if err := json.Unmarshal(line, &command); err != nil {
-		return command, false, s.failure("invalid-command", err.Error())
+		return command, false, s.failure(failInvalidCommand, err.Error())
 	}
 	if err := command.Validate(s.request.Capacity); err != nil {
-		return command, false, s.failure("invalid-command", err.Error())
+		return command, false, s.failure(failInvalidCommand, err.Error())
 	}
 	if command.Length > maxSessionTransfer {
-		return command, false, s.failure("transfer-too-large", "session transfer exceeds bound")
+		return command, false, s.failure(failTransferTooLarge, "session transfer exceeds bound")
 	}
 	return command, true, nil
 }
@@ -729,11 +731,11 @@ func (s *installerSession) execute(command privilege.SessionCommand) error {
 		return err
 	}
 	if err := s.revalidateTarget(); err != nil {
-		_ = s.failure("device-changed", err.Error())
+		_ = s.failure(failDeviceChanged, err.Error())
 		return err
 	}
 	if err := s.perform(command, payload); err != nil {
-		_ = s.failure("operation-failed", err.Error())
+		_ = s.failure(failOperationFailed, err.Error())
 		return err
 	}
 	return nil
@@ -749,11 +751,12 @@ func (s *installerSession) readWritePayload(command privilege.SessionCommand) ([
 }
 
 func (s *installerSession) revalidateTarget() error {
-	name, _, err := resolveDevice(s.request, s.env)
+	g := deviceGuard{req: s.request, env: s.env}
+	d, err := g.resolve()
 	if err != nil {
 		return err
 	}
-	return validateOpenedDevice(s.request, s.env, name, s.target)
+	return g.validateOpened(d, s.target)
 }
 
 func (s *installerSession) perform(command privilege.SessionCommand, payload []byte) error {
@@ -765,7 +768,7 @@ func (s *installerSession) perform(command privilege.SessionCommand, payload []b
 	case privilege.SessionFlush:
 		return s.performFlush()
 	default:
-		return s.failure("invalid-command", "unsupported session command")
+		return s.failure(failInvalidCommand, "unsupported session command")
 	}
 }
 
@@ -795,8 +798,18 @@ func (s *installerSession) performFlush() error {
 	return s.reply(privilege.SessionResponse{OK: true})
 }
 
-func (s *installerSession) failure(code, message string) error {
-	return s.reply(privilege.SessionResponse{Code: code, Message: message})
+// sessionFailure is a SessionResponse.Code the helper reports to the GUI.
+type sessionFailure string
+
+const (
+	failInvalidCommand   sessionFailure = "invalid-command"
+	failTransferTooLarge sessionFailure = "transfer-too-large"
+	failDeviceChanged    sessionFailure = "device-changed"
+	failOperationFailed  sessionFailure = "operation-failed"
+)
+
+func (s *installerSession) failure(code sessionFailure, message string) error {
+	return s.reply(privilege.SessionResponse{Code: string(code), Message: message})
 }
 
 func (s *installerSession) reply(response privilege.SessionResponse) error {
@@ -810,74 +823,81 @@ func (s *installerSession) reply(response privilege.SessionResponse) error {
 	return err
 }
 
-func makeFAT32(device *os.File, size uint64, label string, errOut io.Writer) error {
+// formatFAT32 formats the whole target, reporting progress on errorOutput in
+// the PROGRESS lines formattingProgress parses on the GUI side.
+func (o privilegedOperation) formatFAT32() error {
 	return fat32.Format(context.Background(), fat32.Request{
-		Device:   device,
-		Size:     size,
-		Label:    label,
-		Progress: func(percent uint64) { fmt.Fprintf(errOut, "PROGRESS %d 100\n", percent) },
+		Device:   o.target,
+		Size:     o.request.Capacity,
+		Label:    o.request.Label,
+		Progress: func(percent uint64) { fmt.Fprintf(o.errorOutput, "PROGRESS %d 100\n", percent) },
 	})
 }
 
-func resolveDevice(req privilegedRequest, env helperEnvironment) (string, string, error) {
-	link := filepath.Join(env.SysDevBlock, fmt.Sprintf("%d:%d", req.Major, req.Minor))
-	real, err := filepath.EvalSymlinks(link)
+// deviceGuard checks one request against the kernel's current view of the
+// device it names. Every method re-reads sysfs; nothing is cached.
+type deviceGuard struct {
+	req privilegedRequest
+	env helperEnvironment
+}
+
+// resolve finds the whole USB disk behind the request's device number. The
+// returned number is the one it was looked up by; validateDeviceMetadata
+// confirms the class entry still reports it.
+func (g deviceGuard) resolve() (blockDevice, error) {
+	number := g.req.device()
+	real, err := filepath.EvalSymlinks(filepath.Join(g.env.SysDevBlock, number.String()))
 	if err != nil {
-		return "", "", ErrDeviceChanged
+		return blockDevice{}, ErrDeviceChanged
 	}
 	name := filepath.Base(real)
-	class := filepath.Join(env.SysClassBlock, name)
-	if exists(filepath.Join(class, "partition")) {
-		return "", "", ErrUnsupportedDevice
+	d := blockDevice{name: name, link: filepath.Join(g.env.SysClassBlock, name), real: sysfsPath(real), number: number}
+	if d.isPartition() {
+		return blockDevice{}, ErrUnsupportedDevice
 	}
-	if !supportedUSBDevice(class, real) {
-		return "", "", ErrUnsupportedDevice
+	if !d.supportedUSB() {
+		return blockDevice{}, ErrUnsupportedDevice
 	}
-	return name, real, nil
+	return d, nil
 }
 
-func supportedUSBDevice(class, real string) bool {
-	if readTrim(filepath.Join(class, "removable")) != "1" {
+func (d blockDevice) supportedUSB() bool {
+	if d.attr("removable") != "1" {
 		return false
 	}
-	if readTrim(filepath.Join(class, "device/type")) != "0" {
+	if d.attr("device/type") != "0" {
 		return false
 	}
-	return strings.Contains(real, "/usb")
+	return d.real.underUSB()
 }
 
-func validateDeviceMetadata(req privilegedRequest, class, real string) (uint32, uint32, error) {
-	major, minor, err := readDeviceNumber(filepath.Join(class, "dev"))
-	if err != nil {
-		return 0, 0, ErrDeviceChanged
+func validateDeviceMetadata(req privilegedRequest, d blockDevice) error {
+	number, err := readDeviceNumber(filepath.Join(d.link, "dev"))
+	if err != nil || number != req.device() {
+		return ErrDeviceChanged
 	}
-	if major != req.Major {
-		return 0, 0, ErrDeviceChanged
+	d.number = number
+	if req.Mode == modeInstallerSession && d.attr("queue/logical_block_size") != fmt.Sprint(req.LogicalSectorSize) {
+		return ErrDeviceChanged
 	}
-	if req.Mode == modeInstallerSession && readTrim(filepath.Join(class, "queue/logical_block_size")) != fmt.Sprint(req.LogicalSectorSize) {
-		return 0, 0, ErrDeviceChanged
+	if d.capacity() != req.Capacity {
+		return ErrDeviceChanged
 	}
-	if minor != req.Minor {
-		return 0, 0, ErrDeviceChanged
+	if !readDeviceIdentities(d).matches(req) {
+		return ErrDeviceChanged
 	}
-	if readUint(filepath.Join(class, "size"))*512 != req.Capacity {
-		return 0, 0, ErrDeviceChanged
-	}
-	if !readDeviceIdentities(class, real, major, minor).matches(req) {
-		return 0, 0, ErrDeviceChanged
-	}
-	return major, minor, nil
+	return nil
 }
 
 type deviceIdentities struct {
 	serials, wwns, all []string
 }
 
-func readDeviceIdentities(class, real string, major, minor uint32) deviceIdentities {
-	serials := uniqueIdentityValues(readTrim(filepath.Join(class, "device/serial")), readUSBAncestorAttribute(real, "serial"))
-	wwns := uniqueIdentityValues(readTrim(filepath.Join(class, "wwid")), readTrim(filepath.Join(class, "device/wwid")))
+func readDeviceIdentities(d blockDevice) deviceIdentities {
+	serials := uniqueIdentityValues(d.attr("device/serial"), d.real.usbAncestorAttribute("serial"))
+	wwns := uniqueIdentityValues(d.attr("wwid"), d.attr("device/wwid"))
 	all := append(append([]string{}, serials...), wwns...)
-	all = append(all, fmt.Sprintf("%d:%d@%s", major, minor, real))
+	all = append(all, d.topologyID())
 	return deviceIdentities{serials: serials, wwns: wwns, all: all}
 }
 
@@ -911,90 +931,25 @@ func containsIdentity(values []string, wanted string) bool {
 	return false
 }
 
-// Some USB flash drives expose their serial only on the USB device node, while
-// udev propagates it to ID_SERIAL_SHORT for the block device. Walk to the first
-// physical USB ancestor so privileged revalidation uses the same hardware
-// identity without trusting data supplied by the GUI.
-func readUSBAncestorAttribute(real, attribute string) string {
-	path := usbDeviceAncestor(real)
-	if path == "" {
-		return ""
-	}
-	if !hasUSBDeviceIdentifiers(path) {
-		return ""
-	}
-	return readTrim(filepath.Join(path, attribute))
-}
-
-func hasUSBDeviceIdentifiers(path string) bool {
-	return exists(filepath.Join(path, "idVendor")) && exists(filepath.Join(path, "idProduct"))
-}
-
-// usbDeviceAncestor uses the kernel's documented USB sysfs node names to find
-// the nearest physical device. Interface nodes contain a colon (for example,
-// 1-13:1.0); device nodes contain a bus-port chain such as 1-13 or 1-2.4.
-// Keeping this ancestry walk lexical avoids probing the filesystem at every
-// level of the SCSI/block-device path.
-func usbDeviceAncestor(real string) string {
-	for path := filepath.Clean(real); path != filepath.Dir(path); path = filepath.Dir(path) {
-		if isUSBDeviceNode(filepath.Base(path)) {
-			return path
-		}
-	}
-	return ""
-}
-
-func isUSBDeviceNode(name string) bool {
-	bus, ports, found := strings.Cut(name, "-")
-	if !found {
-		return false
-	}
-	if !decimalDigits(bus) {
-		return false
-	}
-	return isUSBPortChain(ports)
-}
-
-func isUSBPortChain(ports string) bool {
-	for _, port := range strings.Split(ports, ".") {
-		if !decimalDigits(port) {
-			return false
-		}
-	}
-	return true
-}
-
-func decimalDigits(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, character := range value {
-		if character < '0' || character > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func validateDeviceSafety(env helperEnvironment, name string, major, minor uint32) error {
-	unsafe, err := mountedOrSystem(name, major, minor, env)
+func (g deviceGuard) validateSafety(d blockDevice) error {
+	unsafe, err := g.env.mountedOrSystem(d)
 	if err != nil {
 		return err
 	}
 	if unsafe {
 		return ErrSystemDisk
 	}
-	return validateDeviceNode(env, name, major, minor)
+	return g.env.validateDeviceNode(d)
 }
 
 // validateDeviceNode is a best-effort pre-open fail-fast check, NOT a security
 // boundary. It stats a path, so a TOCTOU swap of /dev/<name> between this Stat
 // and the subsequent open() is possible. That window is harmless because the
-// authoritative decision runs post-open in validateOpenedDevice via fstat(fd),
+// authoritative decision runs post-open in validateOpened via fstat(fd),
 // which rebinds to the actual kernel object before any write or ioctl. Do not
 // rely on this function alone for authorization.
-func validateDeviceNode(env helperEnvironment, name string, major, minor uint32) error {
-	node := filepath.Join(env.DevRoot, name)
+func (env helperEnvironment) validateDeviceNode(d blockDevice) error {
+	node := filepath.Join(env.DevRoot, d.name)
 	var st syscall.Stat_t
 	if err := syscall.Stat(node, &st); err != nil {
 		return err
@@ -1002,23 +957,23 @@ func validateDeviceNode(env helperEnvironment, name string, major, minor uint32)
 	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
 		return ErrDeviceChanged
 	}
-	if unix.Major(uint64(st.Rdev)) != major || unix.Minor(uint64(st.Rdev)) != minor {
+	if rdevNumber(uint64(st.Rdev)) != d.number {
 		return ErrDeviceChanged
 	}
 	return nil
 }
 
-func openDevice(req privilegedRequest, env helperEnvironment, name string) (*os.File, error) {
-	flags := deviceOpenFlags(req.Mode)
-	opener := env.openFile
+func (g deviceGuard) open(d blockDevice) (*os.File, error) {
+	flags := deviceOpenFlags(g.req.Mode)
+	opener := g.env.openFile
 	if opener == nil {
 		opener = os.OpenFile
 	}
-	f, err := opener(filepath.Join(env.DevRoot, name), flags|syscall.O_CLOEXEC, 0)
+	f, err := opener(filepath.Join(g.env.DevRoot, d.name), flags|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateOpenedDevice(req, env, name, f); err != nil {
+	if err := g.validateOpened(d, f); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -1046,58 +1001,49 @@ func deviceOpenFlags(mode operationMode) int {
 	}
 }
 
-// validateOpenedDevice binds the final authorization decision to the kernel
+// validateOpened binds the final authorization decision to the kernel
 // object referenced by f. Opening a raw device does not itself write bytes, so
 // every destructive mode reaches this check before its first write or ioctl.
-func validateOpenedDevice(req privilegedRequest, env helperEnvironment, expectedName string, f *os.File) error {
-	if err := validateOpenedDescriptor(req, env, f); err != nil {
+func (g deviceGuard) validateOpened(expected blockDevice, f *os.File) error {
+	if err := g.validateDescriptor(f); err != nil {
 		return err
 	}
-	name, err := revalidateResolvedDevice(req, env, expectedName)
+	d, err := g.revalidateResolved(expected)
 	if err != nil {
 		return err
 	}
-	return revalidateDeviceSafety(req, env, name)
+	return g.revalidateSafety(d)
 }
 
-func validateOpenedDescriptor(req privilegedRequest, env helperEnvironment, f *os.File) error {
+func (g deviceGuard) validateDescriptor(f *os.File) error {
 	var st syscall.Stat_t
-	fstat := env.fstat
+	fstat := g.env.fstat
 	if fstat == nil {
 		fstat = syscall.Fstat
 	}
 	if err := fstat(int(f.Fd()), &st); err != nil {
 		return fmt.Errorf("fstat opened device: %w", err)
 	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
-		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
-	}
-	if unix.Major(uint64(st.Rdev)) != req.Major {
-		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
-	}
-	if unix.Minor(uint64(st.Rdev)) != req.Minor {
+	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK || rdevNumber(uint64(st.Rdev)) != g.req.device() {
 		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
 	}
 	return nil
 }
 
-func revalidateResolvedDevice(req privilegedRequest, env helperEnvironment, expectedName string) (string, error) {
-	name, real, err := resolveDevice(req, env)
-	if err != nil {
-		return "", fmt.Errorf("%w: opened device no longer resolves", ErrDeviceChanged)
+func (g deviceGuard) revalidateResolved(expected blockDevice) (blockDevice, error) {
+	d, err := g.resolve()
+	if err != nil || d.name != expected.name {
+		return blockDevice{}, fmt.Errorf("%w: opened device no longer resolves", ErrDeviceChanged)
 	}
-	if name != expectedName {
-		return "", fmt.Errorf("%w: opened device no longer resolves", ErrDeviceChanged)
+	if err := validateDeviceMetadata(g.req, d); err != nil {
+		return blockDevice{}, fmt.Errorf("revalidate opened device metadata: %w", err)
 	}
-	if _, _, err := validateDeviceMetadata(req, filepath.Join(env.SysClassBlock, name), real); err != nil {
-		return "", fmt.Errorf("revalidate opened device metadata: %w", err)
-	}
-	return name, nil
+	return d, nil
 }
 
-func revalidateDeviceSafety(req privilegedRequest, env helperEnvironment, name string) error {
+func (g deviceGuard) revalidateSafety(d blockDevice) error {
 	// Mount and swap state may also have changed while open() was pending.
-	unsafe, err := mountedOrSystem(name, req.Major, req.Minor, env)
+	unsafe, err := g.env.mountedOrSystem(d)
 	if err != nil {
 		return fmt.Errorf("revalidate opened device safety: %w", err)
 	}
@@ -1107,7 +1053,7 @@ func revalidateDeviceSafety(req privilegedRequest, env helperEnvironment, name s
 	return nil
 }
 
-func mountedOrSystem(name string, major, minor uint32, env helperEnvironment) (bool, error) {
+func (env helperEnvironment) mountedOrSystem(d blockDevice) (bool, error) {
 	topology, err := readBlockTopology(env.SysClassBlock)
 	if err != nil {
 		return false, err
@@ -1116,7 +1062,7 @@ func mountedOrSystem(name string, major, minor uint32, env helperEnvironment) (b
 	if err != nil {
 		return false, err
 	}
-	if mounted, err := deviceMounted(name, major, minor, mounts, topology); err != nil {
+	if mounted, err := mounts.backs(d, topology); err != nil {
 		return false, err
 	} else if mounted {
 		return true, nil
@@ -1125,64 +1071,5 @@ func mountedOrSystem(name string, major, minor uint32, env helperEnvironment) (b
 	if err != nil {
 		return false, err
 	}
-	return deviceUsedForSwap(name, env.DevRoot, swaps, topology)
-}
-
-func deviceMounted(name string, major, minor uint32, mounts map[devNumber][]string, topology *blockTopology) (bool, error) {
-	target := devNumber{major: major, minor: minor}
-	for number, points := range mounts {
-		if len(points) == 0 {
-			continue
-		}
-		mounted, err := mountBacksDevice(number, target, name, topology)
-		if err != nil {
-			return false, err
-		}
-		if mounted {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func mountBacksDevice(number, target devNumber, name string, topology *blockTopology) (bool, error) {
-	mounted, usable, err := mountedDeviceName(number, topology)
-	if err != nil || !usable {
-		return false, err
-	}
-	if number == target {
-		return true, nil
-	}
-	return topology.dependsOn(mounted, name)
-}
-
-func mountedDeviceName(number devNumber, topology *blockTopology) (string, bool, error) {
-	name, err := topology.nameForNumber(number)
-	if err == nil {
-		return name, true, nil
-	}
-	if number.major == 0 {
-		return "", false, nil
-	}
-	return "", false, err
-}
-
-func deviceUsedForSwap(name, devRoot string, swaps map[string]bool, topology *blockTopology) (bool, error) {
-	for path := range swaps {
-		swapName, block, err := topology.nameForSwapPath(path, devRoot)
-		if err != nil {
-			return false, err
-		}
-		if !block {
-			continue
-		}
-		backed, err := topology.dependsOn(swapName, name)
-		if err != nil {
-			return false, err
-		}
-		if backed {
-			return true, nil
-		}
-	}
-	return false, nil
+	return swaps.backs(d, env.DevRoot, topology)
 }

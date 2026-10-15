@@ -3,7 +3,6 @@
 package linux
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -92,8 +91,8 @@ func (b *Backend) list(ctx context.Context) ([]device.Device, int, error) {
 
 type enumerationSnapshot struct {
 	entries  []os.DirEntry
-	mounts   map[devNumber][]string
-	swaps    map[string]bool
+	mounts   mountTable
+	swaps    swapTable
 	topology *blockTopology
 }
 
@@ -135,55 +134,50 @@ const (
 )
 
 func (b *Backend) deviceFromEntry(entry os.DirEntry, snapshot enumerationSnapshot) (device.Device, entryOutcome, error) {
-	name := entry.Name()
-	link := filepath.Join(b.SysClassBlock, name)
-	if exists(filepath.Join(link, "partition")) {
+	disk := blockDevice{name: entry.Name(), link: filepath.Join(b.SysClassBlock, entry.Name())}
+	if disk.isPartition() {
 		return device.Device{}, entryNotADisk, nil
 	}
-	real, err := filepath.EvalSymlinks(link)
+	real, err := filepath.EvalSymlinks(disk.link)
 	if err != nil {
 		return device.Device{}, entrySkipped, nil
 	}
-	major, minor, err := readDeviceNumber(filepath.Join(link, "dev"))
-	if err != nil {
+	disk.real = sysfsPath(real)
+	if disk.number, err = readDeviceNumber(filepath.Join(disk.link, "dev")); err != nil {
 		return device.Device{}, entrySkipped, nil
 	}
-	properties := b.udev(major, minor)
-	candidate := sysfsDevice{name: name, link: link, real: real, major: major, minor: minor, properties: properties}
+	candidate := sysfsDevice{blockDevice: disk, properties: b.udev(disk.number)}
 	d := b.basicDevice(candidate)
-	d.PartitionCount = countPartitions(snapshot.entries, name, b.SysClassBlock)
+	d.PartitionCount = snapshot.partitionCount(disk)
 	if err := b.populateSafetyMetadata(&d, candidate, snapshot); err != nil {
 		return device.Device{}, entrySkipped, err
 	}
-	b.classifyDevice(&d, link, real, properties)
-	d.ID = first(d.Serial, d.WWN, fmt.Sprintf("%d:%d@%s", major, minor, real))
+	b.classifyDevice(&d, candidate)
+	d.ID = first(d.Serial, d.WWN, disk.topologyID())
 	return d, entryDevice, nil
 }
 
+// sysfsDevice is a whole-disk candidate with its supplementary udev record.
 type sysfsDevice struct {
-	name       string
-	link       string
-	real       string
-	major      uint32
-	minor      uint32
-	properties map[string]string
+	blockDevice
+	properties udevProperties
 }
 
 func (b *Backend) basicDevice(candidate sysfsDevice) device.Device {
 	return device.Device{
-		Path: filepath.Join(b.DevRoot, candidate.name), Major: candidate.major, Minor: candidate.minor, SysfsPath: candidate.real,
-		Vendor: readTrim(filepath.Join(candidate.link, "device/vendor")), Model: readTrim(filepath.Join(candidate.link, "device/model")),
-		Serial: first(candidate.properties["ID_SERIAL_SHORT"], readTrim(filepath.Join(candidate.link, "device/serial"))),
-		WWN:    candidate.properties["ID_WWN"], Transport: strings.ToLower(candidate.properties["ID_BUS"]), Size: readUint(filepath.Join(candidate.link, "size")) * 512,
+		Path: filepath.Join(b.DevRoot, candidate.name), Major: candidate.number.major, Minor: candidate.number.minor, SysfsPath: string(candidate.real),
+		Vendor: candidate.attr("device/vendor"), Model: candidate.attr("device/model"),
+		Serial: first(candidate.properties["ID_SERIAL_SHORT"], candidate.attr("device/serial")),
+		WWN:    candidate.properties["ID_WWN"], Transport: strings.ToLower(candidate.properties["ID_BUS"]), Size: candidate.capacity(),
 	}
 }
 
 func (b *Backend) populateSafetyMetadata(d *device.Device, candidate sysfsDevice, snapshot enumerationSnapshot) error {
-	mountPoints, err := mountPointsBackedBy(candidate.name, snapshot.mounts, snapshot.topology)
+	mountPoints, err := snapshot.mounts.pointsBackedBy(candidate.blockDevice, snapshot.topology)
 	if err != nil {
 		return err
 	}
-	hasSwap, err := deviceUsedForSwap(candidate.name, b.DevRoot, snapshot.swaps, snapshot.topology)
+	hasSwap, err := snapshot.swaps.backs(candidate.blockDevice, b.DevRoot, snapshot.topology)
 	if err != nil {
 		return err
 	}
@@ -193,123 +187,109 @@ func (b *Backend) populateSafetyMetadata(d *device.Device, candidate sysfsDevice
 	return nil
 }
 
-// mountPointsBackedBy resolves every mounted block device through the kernel
-// topology. This includes mounts layered on partitions, device-mapper, LVM, or
-// software RAID rather than only mounts whose source directly names the disk.
-func mountPointsBackedBy(name string, mounts map[devNumber][]string, topology *blockTopology) ([]string, error) {
-	var mountPoints []string
-	for number, points := range mounts {
-		backed, err := mountBackedBy(number, name, topology)
-		if err != nil {
-			return nil, err
-		}
-		if backed {
-			mountPoints = appendUnique(mountPoints, points...)
+func (s enumerationSnapshot) partitionCount(disk blockDevice) int {
+	root := filepath.Dir(disk.link)
+	n := 0
+	for _, e := range s.entries {
+		if strings.HasPrefix(e.Name(), disk.name) && exists(filepath.Join(root, e.Name(), "partition")) {
+			n++
 		}
 	}
-	return mountPoints, nil
+	return n
 }
 
-func mountBackedBy(number devNumber, name string, topology *blockTopology) (bool, error) {
-	mounted, err := topology.nameForNumber(number)
-	if err != nil {
-		if number.major == 0 {
-			return false, nil
-		}
-		return false, err
-	}
-	return topology.dependsOn(mounted, name)
-}
-
-func containsCriticalMount(mountPoints []string) bool {
-	critical := map[string]bool{"/": true, "/boot": true, "/boot/efi": true, "/home": true}
-	for _, mountPoint := range mountPoints {
-		if critical[mountPoint] {
-			return true
-		}
-	}
-	return false
-}
-
-func (b *Backend) classifyDevice(d *device.Device, link, real string, properties map[string]string) {
-	d.IsCardReader = isCardReader(properties)
-	usb := isUSBDevice(d.Transport, real)
-	removable := readTrim(filepath.Join(link, "removable")) == "1"
-	diskType := readTrim(filepath.Join(link, "device/type")) == "0"
-	isFlash := isFlashDevice(properties)
-	isSmallUSBStorage := isSmallUSBStorageDevice(properties, d.Size)
-	description := strings.ToLower(strings.Join([]string{d.Vendor, d.Model, properties["ID_MODEL"], properties["ID_VENDOR"]}, " "))
-	suspicious := suspiciousStorage(description, properties)
+func (b *Backend) classifyDevice(d *device.Device, candidate sysfsDevice) {
+	d.IsCardReader = candidate.properties.isCardReader()
+	c := characterize(*d, candidate)
 	switch {
 	case d.IsSystemDisk:
 		d.RejectReason = ErrSystemDisk.Error()
-	case unsupportedDevice(deviceCharacteristics{
-		usb: usb, removable: removable, diskType: diskType,
-		size: d.Size, suspicious: suspicious,
-	}):
+	case c.unsupported():
 		d.RejectReason = ErrUnsupportedDevice.Error()
-	case !positivelyIdentified(isFlash, d.IsCardReader, isSmallUSBStorage):
+	case !c.positivelyIdentified():
 		d.RejectReason = "not positively identified as USB flash media"
 	default:
 		d.IsAllowed = true
 	}
 }
 
-func isUSBDevice(transport, real string) bool {
-	if transport != "usb" {
-		return false
-	}
-	return strings.Contains(real, "/usb")
-}
+// udevProperties is one device's E: records from the udev database.
+type udevProperties map[string]string
 
-func isFlashDevice(properties map[string]string) bool {
-	if properties["ID_DRIVE_THUMB"] == "1" {
+func (p udevProperties) isFlash() bool {
+	if p["ID_DRIVE_THUMB"] == "1" {
 		return true
 	}
-	return properties["ID_DRIVE_FLASH"] == "1"
+	return p["ID_DRIVE_FLASH"] == "1"
 }
 
-func isSmallUSBStorageDevice(properties map[string]string, size uint64) bool {
-	if properties["ID_USB_DRIVER"] != "usb-storage" {
+func (p udevProperties) isCardReader() bool {
+	for _, k := range []string{"ID_DRIVE_FLASH_SD", "ID_DRIVE_FLASH_MMC", "ID_DRIVE_FLASH_CF", "ID_DRIVE_FLASH_MS", "ID_DRIVE_FLASH_SM"} {
+		if p[k] == "1" {
+			return true
+		}
+	}
+	return false
+}
+
+func (p udevProperties) isSmallUSBStorage(size uint64) bool {
+	if p["ID_USB_DRIVER"] != "usb-storage" {
 		return false
 	}
 	return size <= maxGenericUSBFlashSize
 }
 
-func suspiciousStorage(description string, properties map[string]string) bool {
+func (p udevProperties) suspicious(d device.Device) bool {
+	description := strings.ToLower(strings.Join([]string{d.Vendor, d.Model, p["ID_MODEL"], p["ID_VENDOR"]}, " "))
 	if containsAny(description, "ssd", "hard disk", "hdd", "bridge", "sata", "nvme") {
 		return true
 	}
-	if properties["ID_ATA"] == "1" {
+	if p["ID_ATA"] == "1" {
 		return true
 	}
-	return properties["ID_USB_DRIVER"] == "uas"
+	return p["ID_USB_DRIVER"] == "uas"
 }
 
 type deviceCharacteristics struct {
-	usb        bool
-	removable  bool
-	diskType   bool
-	size       uint64
-	suspicious bool
+	usb             bool
+	removable       bool
+	diskType        bool
+	size            uint64
+	suspicious      bool
+	flash           bool
+	cardReader      bool
+	smallUSBStorage bool
 }
 
-func unsupportedDevice(characteristics deviceCharacteristics) bool {
-	return !characteristics.usb ||
-		!characteristics.removable ||
-		!characteristics.diskType ||
-		characteristics.size == 0 ||
-		characteristics.suspicious
+func characterize(d device.Device, candidate sysfsDevice) deviceCharacteristics {
+	return deviceCharacteristics{
+		usb:             d.Transport == "usb" && candidate.real.underUSB(),
+		removable:       candidate.attr("removable") == "1",
+		diskType:        candidate.attr("device/type") == "0",
+		size:            d.Size,
+		suspicious:      candidate.properties.suspicious(d),
+		flash:           candidate.properties.isFlash(),
+		cardReader:      d.IsCardReader,
+		smallUSBStorage: candidate.properties.isSmallUSBStorage(d.Size),
+	}
 }
 
-func positivelyIdentified(flash, cardReader, smallUSBStorage bool) bool {
-	if flash {
+func (c deviceCharacteristics) unsupported() bool {
+	return !c.usb ||
+		!c.removable ||
+		!c.diskType ||
+		c.size == 0 ||
+		c.suspicious
+}
+
+func (c deviceCharacteristics) positivelyIdentified() bool {
+	if c.flash {
 		return true
 	}
-	if cardReader {
+	if c.cardReader {
 		return true
 	}
-	return smallUSBStorage
+	return c.smallUSBStorage
 }
 
 func (b *Backend) RefreshDevice(ctx context.Context, id string) (device.Device, error) {
@@ -465,71 +445,6 @@ func (b *Backend) FormatFAT32(ctx context.Context, d device.Device, label string
 	return nil
 }
 
-type devNumber struct{ major, minor uint32 }
-
-func parseMountInfo(path string) (map[devNumber][]string, error) {
-	f, e := os.Open(path)
-	if e != nil {
-		return nil, e
-	}
-	defer f.Close()
-	out := map[devNumber][]string{}
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		p := strings.Fields(s.Text())
-		if len(p) < 5 {
-			continue
-		}
-		a := strings.Split(p[2], ":")
-		if len(a) != 2 {
-			continue
-		}
-		ma, majorErr := strconv.ParseUint(a[0], 10, 32)
-		mi, minorErr := strconv.ParseUint(a[1], 10, 32)
-		if majorErr != nil || minorErr != nil {
-			continue
-		}
-		out[devNumber{uint32(ma), uint32(mi)}] = append(out[devNumber{uint32(ma), uint32(mi)}], decodeMount(p[4]))
-	}
-	return out, s.Err()
-}
-func parseSwaps(path string) (map[string]bool, error) {
-	f, e := os.Open(path)
-	if e != nil {
-		return nil, e
-	}
-	defer f.Close()
-	out := map[string]bool{}
-	s := bufio.NewScanner(f)
-	firstLine := true
-	for s.Scan() {
-		if firstLine {
-			firstLine = false
-			continue
-		}
-		p := strings.Fields(s.Text())
-		if len(p) > 0 {
-			out[p[0]] = true
-		}
-	}
-	return out, s.Err()
-}
-func decodeMount(s string) string {
-	r := strings.NewReplacer("\\040", " ", "\\011", "\t", "\\012", "\n", "\\134", "\x5c")
-	return r.Replace(s)
-}
-func readDeviceNumber(path string) (uint32, uint32, error) {
-	p := strings.Split(readTrim(path), ":")
-	if len(p) != 2 {
-		return 0, 0, errors.New("bad device number")
-	}
-	a, e := strconv.ParseUint(p[0], 10, 32)
-	if e != nil {
-		return 0, 0, e
-	}
-	c, e := strconv.ParseUint(p[1], 10, 32)
-	return uint32(a), uint32(c), e
-}
 func readTrim(p string) string { v, _ := os.ReadFile(p); return strings.TrimSpace(string(v)) }
 func readUint(p string) uint64 { v, _ := strconv.ParseUint(readTrim(p), 10, 64); return v }
 func exists(p string) bool     { _, e := os.Stat(p); return e == nil }
@@ -564,31 +479,6 @@ func appendUnique(dst []string, values ...string) []string {
 	}
 	return dst
 }
-func isCardReader(p map[string]string) bool {
-	for _, k := range []string{"ID_DRIVE_FLASH_SD", "ID_DRIVE_FLASH_MMC", "ID_DRIVE_FLASH_CF", "ID_DRIVE_FLASH_MS", "ID_DRIVE_FLASH_SM"} {
-		if p[k] == "1" {
-			return true
-		}
-	}
-	return false
-}
-func countPartitions(entries []os.DirEntry, name, root string) int {
-	n := 0
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), name) && exists(filepath.Join(root, e.Name(), "partition")) {
-			n++
-		}
-	}
-	return n
-}
-func parentName(root string, d devNumber) string {
-	for _, e := range mustReadDir(root) {
-		if readTrim(filepath.Join(root, e.Name(), "dev")) == fmt.Sprintf("%d:%d", d.major, d.minor) {
-			return parentForPath(root, e.Name())
-		}
-	}
-	return ""
-}
 func parentForPath(root, path string) string {
 	name := filepath.Base(path)
 	real, e := filepath.EvalSymlinks(filepath.Join(root, name))
@@ -606,19 +496,19 @@ func (b *Backend) mountedPartitions(parent device.Device) []string {
 	var result []string
 	for number := range mounts {
 		for _, entry := range mustReadDir(b.SysClassBlock) {
-			if readTrim(filepath.Join(b.SysClassBlock, entry.Name(), "dev")) == fmt.Sprintf("%d:%d", number.major, number.minor) && parentForPath(b.SysClassBlock, entry.Name()) == filepath.Base(parent.Path) {
+			if readTrim(filepath.Join(b.SysClassBlock, entry.Name(), "dev")) == number.String() && parentForPath(b.SysClassBlock, entry.Name()) == filepath.Base(parent.Path) {
 				result = append(result, filepath.Join(b.DevRoot, entry.Name()))
 			}
 		}
 	}
 	return result
 }
-func (b *Backend) udev(major, minor uint32) map[string]string {
-	data, err := os.ReadFile(filepath.Join(b.UdevDataRoot, fmt.Sprintf("b%d:%d", major, minor)))
+func (b *Backend) udev(number devNumber) udevProperties {
+	data, err := os.ReadFile(filepath.Join(b.UdevDataRoot, "b"+number.String()))
 	if err != nil {
-		return map[string]string{}
+		return udevProperties{}
 	}
-	properties := map[string]string{}
+	properties := udevProperties{}
 	for _, line := range strings.Split(string(data), "\n") {
 		if !strings.HasPrefix(line, "E:") {
 			continue

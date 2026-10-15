@@ -17,7 +17,7 @@ func TestReadUSBAncestorSerial(t *testing.T) {
 	write(t, filepath.Join(usb, "idVendor"), "090c")
 	write(t, filepath.Join(usb, "idProduct"), "1000")
 	write(t, filepath.Join(usb, "serial"), "AA0OO7RP1MRHMVZW")
-	if got := readUSBAncestorAttribute(block, "serial"); got != "AA0OO7RP1MRHMVZW" {
+	if got := sysfsPath(block).usbAncestorAttribute("serial"); got != "AA0OO7RP1MRHMVZW" {
 		t.Fatalf("USB ancestor serial = %q", got)
 	}
 }
@@ -25,7 +25,7 @@ func TestReadUSBAncestorSerial(t *testing.T) {
 func TestUSBDeviceAncestorUsesPhysicalDeviceNode(t *testing.T) {
 	path := filepath.Join("sys", "devices", "pci0000:00", "0000:00:14.0", "usb1", "1-2", "1-2.4", "1-2.4:1.0", "host8", "block", "sdc")
 	want := filepath.Join("sys", "devices", "pci0000:00", "0000:00:14.0", "usb1", "1-2", "1-2.4")
-	if got := usbDeviceAncestor(path); got != want {
+	if got := sysfsPath(path).usbAncestor(); got != sysfsPath(want) {
 		t.Fatalf("USB ancestor = %q, want %q", got, want)
 	}
 	for _, name := range []string{"usb1", "1-2.4:1.0", "host8", "target8:0:0", "", "1-"} {
@@ -49,11 +49,12 @@ func TestMetadataAcceptsMatchingUSBSerialWhenSCSISerialDiffers(t *testing.T) {
 	write(t, filepath.Join(class, "dev"), "8:32")
 	write(t, filepath.Join(class, "size"), "65536")
 	req := privilegedRequest{Identity: "USB-SERIAL", Serial: "USB-SERIAL", Major: 8, Minor: 32, Capacity: 65536 * 512, Mode: modeWrite}
-	if _, _, err := validateDeviceMetadata(req, class, real); err != nil {
+	disk := blockDevice{name: "sdc", link: class, real: sysfsPath(real)}
+	if err := validateDeviceMetadata(req, disk); err != nil {
 		t.Fatalf("matching physical USB serial rejected: %v", err)
 	}
 	req.Identity, req.Serial = "REPLACED", "REPLACED"
-	if _, _, err := validateDeviceMetadata(req, class, real); !errors.Is(err, ErrDeviceChanged) {
+	if err := validateDeviceMetadata(req, disk); !errors.Is(err, ErrDeviceChanged) {
 		t.Fatalf("replacement error = %v", err)
 	}
 }
@@ -75,14 +76,14 @@ func TestUdevPropertiesReadRuntimeDatabaseWithoutCLI(t *testing.T) {
 	b := &Backend{UdevDataRoot: root}
 	write(t, filepath.Join(root, "b8:16"), "I:ignored\nE:ID_BUS=usb\nE:ID_SERIAL_SHORT=SERIAL=WITH=EQUALS\nE:MALFORMED\n")
 
-	properties := b.udev(8, 16)
+	properties := b.udev(devNumber{8, 16})
 	if properties["ID_BUS"] != "usb" || properties["ID_SERIAL_SHORT"] != "SERIAL=WITH=EQUALS" {
 		t.Fatalf("udev properties = %#v", properties)
 	}
 	if _, ok := properties["I:ignored"]; ok {
 		t.Fatal("non-environment udev record was parsed as a property")
 	}
-	if got := b.udev(8, 99); len(got) != 0 {
+	if got := b.udev(devNumber{8, 99}); len(got) != 0 {
 		t.Fatalf("missing udev record = %#v, want empty supplementary metadata", got)
 	}
 }

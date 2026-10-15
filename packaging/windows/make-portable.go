@@ -19,131 +19,158 @@ var versionPattern = regexp.MustCompile(`^v?[0-9A-Za-z][0-9A-Za-z._-]*$`)
 
 var errUsage = errors.New("usage: go run ./packaging/windows --executable EXE --version VERSION --output DIR")
 
+// releaseVersion is a version string that matched versionPattern, so it is
+// safe to embed in file names and in README-Windows.txt.
+type releaseVersion string
+
+func parseReleaseVersion(s string) (releaseVersion, error) {
+	if !versionPattern.MatchString(s) {
+		return "", errUsage
+	}
+	return releaseVersion(s), nil
+}
+
+// artifactName is the shared base name of the stage directory and the ZIP.
+func (v releaseVersion) artifactName() string {
+	return "GoFlasher-" + string(v) + "-windows-amd64"
+}
+
+// portableFlags is the command line exactly as given, before validation.
+type portableFlags struct {
+	executable, version, output string
+}
+
+// portableLayout is one validated packaging run with every path resolved to
+// an absolute path.
+type portableLayout struct {
+	repo        string // repository root, source of README-Windows.txt
+	executable  string // signed GoFlasher executable to ship
+	output      string // directory holding the stage tree and the archive
+	stageDir    string // tree that becomes the ZIP contents
+	archivePath string // the portable ZIP
+	version     releaseVersion
+}
+
 func main() {
-	executable := flag.String("executable", "", "signed GoFlasher executable")
-	version := flag.String("version", "", "release version")
-	output := flag.String("output", "", "output directory")
+	var f portableFlags
+	flag.StringVar(&f.executable, "executable", "", "signed GoFlasher executable")
+	flag.StringVar(&f.version, "version", "", "release version")
+	flag.StringVar(&f.output, "output", "", "output directory")
 	flag.Parse()
-	if err := packagePortable(*executable, *version, *output); err != nil {
+	if err := packagePortable(f); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func packagePortable(executable, version, output string) error {
-	if err := checkFlags(executable, version, output); err != nil {
-		return err
-	}
-	repo, err := filepath.Abs(filepath.Join("packaging", "windows", "..", ".."))
+func packagePortable(f portableFlags) error {
+	l, err := newPortableLayout(f)
 	if err != nil {
 		return err
 	}
-	executable, err = filepath.Abs(executable)
-	if err != nil {
-		return err
-	}
-	output, err = filepath.Abs(output)
-	if err != nil {
-		return err
-	}
-	name := "GoFlasher-" + version + "-windows-amd64"
-	stage, archive := filepath.Join(output, name), filepath.Join(output, name+".zip")
-	if err := resetArtifacts(stage, archive); err != nil {
-		return err
-	}
-	if err := stageLayout(repo, stage, executable, version); err != nil {
-		return err
-	}
-	if err := zipTree(output, stage, archive); err != nil {
-		return err
-	}
-	return writeChecksum(archive)
+	return l.build()
 }
 
-// checkFlags rejects the flag combinations no layout can be built from.
-func checkFlags(executable, version, output string) error {
-	if executable == "" || output == "" {
-		return errUsage
+// newPortableLayout rejects the flag combinations no layout can be built from
+// and resolves the paths the run will touch.
+func newPortableLayout(f portableFlags) (portableLayout, error) {
+	if f.executable == "" || f.output == "" {
+		return portableLayout{}, errUsage
 	}
-	if !versionPattern.MatchString(version) {
-		return errUsage
+	version, err := parseReleaseVersion(f.version)
+	if err != nil {
+		return portableLayout{}, err
+	}
+	l := portableLayout{version: version}
+	for _, p := range []struct {
+		dst *string
+		src string
+	}{
+		{&l.repo, filepath.Join("packaging", "windows", "..", "..")},
+		{&l.executable, f.executable},
+		{&l.output, f.output},
+	} {
+		if *p.dst, err = filepath.Abs(p.src); err != nil {
+			return portableLayout{}, err
+		}
+	}
+	name := version.artifactName()
+	l.stageDir, l.archivePath = filepath.Join(l.output, name), filepath.Join(l.output, name+".zip")
+	return l, nil
+}
+
+func (l portableLayout) build() error {
+	for _, step := range []func() error{l.resetArtifacts, l.stage, l.zipStage, l.writeChecksum} {
+		if err := step(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// resetArtifacts discards any previous run and creates the empty stage tree.
-func resetArtifacts(stage, archive string) error {
-	if err := os.RemoveAll(stage); err != nil {
-		return err
-	}
-	_ = os.Remove(archive)
-	_ = os.Remove(archive + ".sha256")
-	return os.MkdirAll(stage, 0755)
+func (l portableLayout) checksumPath() string {
+	return l.archivePath + ".sha256"
 }
 
-// stageLayout fills the stage directory with everything the ZIP ships.
+// resetArtifacts discards any previous run and creates the empty stage tree.
+func (l portableLayout) resetArtifacts() error {
+	if err := os.RemoveAll(l.stageDir); err != nil {
+		return err
+	}
+	_ = os.Remove(l.archivePath)
+	_ = os.Remove(l.checksumPath())
+	return os.MkdirAll(l.stageDir, 0755)
+}
+
+// stage fills the stage directory with everything the ZIP ships.
 // License texts are not staged here: they are embedded in the executable by
 // internal/legal and shown under Settings, which is how they reach the user.
 // README-Windows.txt stays a file because it explains how to verify the ZIP
 // before running the executable, and that has to be readable without running
 // it.
-func stageLayout(repo, stage, executable, version string) error {
-	if err := copyFile(executable, filepath.Join(stage, "GoFlasher.exe")); err != nil {
+func (l portableLayout) stage() error {
+	if err := l.stageExecutable(); err != nil {
 		return err
 	}
-	return stageReadme(repo, stage, version)
+	return l.stageReadme()
+}
+
+func (l portableLayout) stageExecutable() error {
+	in, err := os.Open(l.executable)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(filepath.Join(l.stageDir, "GoFlasher.exe"))
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 // stageReadme copies README-Windows.txt with VERSION substituted.
-func stageReadme(repo, stage, version string) error {
-	readme, err := os.ReadFile(filepath.Join(repo, "packaging", "windows", "README-Windows.txt"))
+func (l portableLayout) stageReadme() error {
+	readme, err := os.ReadFile(filepath.Join(l.repo, "packaging", "windows", "README-Windows.txt"))
 	if err != nil {
 		return err
 	}
-	text := strings.ReplaceAll(string(readme), "VERSION", version)
-	return os.WriteFile(filepath.Join(stage, "README-Windows.txt"), []byte(text), 0644)
+	text := strings.ReplaceAll(string(readme), "VERSION", string(l.version))
+	return os.WriteFile(filepath.Join(l.stageDir, "README-Windows.txt"), []byte(text), 0644)
 }
 
-// writeChecksum writes the sha256sum-style companion file for the archive.
-func writeChecksum(archive string) error {
-	sum, err := fileSHA256(archive)
+func (l portableLayout) zipStage() error {
+	f, err := os.Create(l.archivePath)
 	if err != nil {
 		return err
 	}
-	line := sum + "  " + filepath.Base(archive) + "\n"
-	return os.WriteFile(archive+".sha256", []byte(line), 0644)
-}
-
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	h := sha256.New()
-	_, copyErr := io.Copy(h, f)
-	closeErr := f.Close()
-	if copyErr != nil {
-		return "", copyErr
-	}
-	if closeErr != nil {
-		return "", closeErr
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func zipTree(base, stage, destination string) error {
-	f, err := os.Create(destination)
-	if err != nil {
-		return err
-	}
-	zw := zip.NewWriter(f)
-	err = filepath.WalkDir(stage, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
-			return walkErr
-		}
-		return addZipEntry(zw, base, path, d)
-	})
-	if closeErr := zw.Close(); err == nil {
+	b := zipBuilder{zw: zip.NewWriter(f), base: l.output}
+	err = filepath.WalkDir(l.stageDir, b.addWalked)
+	if closeErr := b.zw.Close(); err == nil {
 		err = closeErr
 	}
 	if closeErr := f.Close(); err == nil {
@@ -152,9 +179,28 @@ func zipTree(base, stage, destination string) error {
 	return err
 }
 
-// addZipEntry writes one deflated file, named relative to base.
-func addZipEntry(zw *zip.Writer, base, path string, d os.DirEntry) error {
-	rel, err := filepath.Rel(base, path)
+// writeChecksum writes the sha256sum-style companion file for the archive.
+func (l portableLayout) writeChecksum() error {
+	h := sha256.New()
+	if err := copyInto(h, l.archivePath); err != nil {
+		return err
+	}
+	line := hex.EncodeToString(h.Sum(nil)) + "  " + filepath.Base(l.archivePath) + "\n"
+	return os.WriteFile(l.checksumPath(), []byte(line), 0644)
+}
+
+// zipBuilder writes deflated entries named relative to base.
+type zipBuilder struct {
+	zw   *zip.Writer
+	base string
+}
+
+// addWalked is a filepath.WalkDirFunc that adds every regular file it visits.
+func (b zipBuilder) addWalked(path string, d os.DirEntry, walkErr error) error {
+	if walkErr != nil || d.IsDir() {
+		return walkErr
+	}
+	rel, err := filepath.Rel(b.base, path)
 	if err != nil {
 		return err
 	}
@@ -168,7 +214,7 @@ func addZipEntry(zw *zip.Writer, base, path string, d os.DirEntry) error {
 	}
 	h.Name = filepath.ToSlash(rel)
 	h.Method = zip.Deflate
-	w, err := zw.CreateHeader(h)
+	w, err := b.zw.CreateHeader(h)
 	if err != nil {
 		return err
 	}
@@ -183,24 +229,6 @@ func copyInto(w io.Writer, path string) error {
 	}
 	_, copyErr := io.Copy(w, src)
 	closeErr := src.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
-}
-
-func copyFile(source, destination string) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(destination)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
 	if copyErr != nil {
 		return copyErr
 	}
