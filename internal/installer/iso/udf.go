@@ -5,11 +5,32 @@ package iso
 
 import "encoding/binary"
 
+// udfPartition is the sector where the one supported physical partition
+// starts; file entries and allocation descriptors address blocks relative to
+// it.
+type udfPartition uint32
+
+// logicalBlock is a UDF block number relative to the partition start.
+type logicalBlock uint32
+
+// at resolves a partition-relative block to an absolute sector. Both halves
+// are 32-bit, so the sum cannot overflow an lba.
+func (p udfPartition) at(b logicalBlock) lba { return lba(p) + lba(b) }
+
+// extent resolves an allocation descriptor to the byte range it covers.
+func (p udfPartition) extent(d allocDescriptor) (Extent, error) {
+	start := p.at(d.block())
+	if !start.addressable() {
+		return Extent{}, invalid("extent overflow")
+	}
+	return Extent{Offset: start.offset(), Length: d.length()}, nil
+}
+
 // udfLayout is what the volume descriptor sequence contributes: the physical
 // partition start and the file set descriptor location within it.
 type udfLayout struct {
-	partitionStart uint32
-	fsdBlock       uint32
+	partitionStart udfPartition
+	fsdBlock       logicalBlock
 }
 
 // readUDF implements the read-only ECMA-167 subset used by Windows mastering
@@ -20,7 +41,7 @@ func (r *Reader) readUDF() ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	layout, err := parseUDFDescriptorSequence(seq)
+	layout, err := seq.layout()
 	if err != nil {
 		return nil, err
 	}
@@ -28,14 +49,18 @@ func (r *Reader) readUDF() ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &udfWalker{r: r, part: layout.partitionStart, seen: map[uint32]bool{}}
-	if err := w.walk(root, "", 0); err != nil {
+	w := &udfWalker{r: r, part: layout.partitionStart, seen: map[logicalBlock]bool{}}
+	if err := w.walk(root, treePos{}); err != nil {
 		return nil, err
 	}
 	return w.out, nil
 }
 
-func (r *Reader) readUDFDescriptorSequence() ([]byte, error) {
+// descriptorSequence is the main volume descriptor sequence the anchor
+// points to.
+type descriptorSequence []byte
+
+func (r *Reader) readUDFDescriptorSequence() (descriptorSequence, error) {
 	anchor, err := r.sector(256)
 	if err != nil {
 		return nil, err
@@ -47,23 +72,24 @@ func (r *Reader) readUDFDescriptorSequence() ([]byte, error) {
 	if seqLen == 0 {
 		return nil, invalid("empty descriptor sequence")
 	}
-	return r.bytes(uint64(seqBlock)*uint64(sectorSize), uint64(seqLen))
+	b, err := r.bytes(Extent{Offset: lba(seqBlock).offset(), Length: uint64(seqLen)})
+	return descriptorSequence(b), err
 }
 
-func parseUDFDescriptorSequence(seq []byte) (udfLayout, error) {
+func (seq descriptorSequence) layout() (udfLayout, error) {
 	var layout udfLayout
 	havePartition, haveLVD := false, false
 	for off := 0; off+512 <= len(seq); off += int(sectorSize) {
 		d := seq[off:]
 		switch binary.LittleEndian.Uint16(d[:2]) {
 		case 5:
-			layout.partitionStart = binary.LittleEndian.Uint32(d[188:192])
+			layout.partitionStart = udfPartition(binary.LittleEndian.Uint32(d[188:192]))
 			havePartition = true
 		case 6:
 			if binary.LittleEndian.Uint32(d[212:216]) != uint32(sectorSize) {
 				return udfLayout{}, invalid("unsupported UDF block size")
 			}
-			layout.fsdBlock = binary.LittleEndian.Uint32(d[252:256])
+			layout.fsdBlock = logicalBlock(binary.LittleEndian.Uint32(d[252:256]))
 			haveLVD = true
 		case 8:
 			off = len(seq)
@@ -75,36 +101,67 @@ func parseUDFDescriptorSequence(seq []byte) (udfLayout, error) {
 	return layout, nil
 }
 
-func (r *Reader) udfRootBlock(layout udfLayout) (uint32, error) {
-	fsd, err := r.udfBlock(layout.partitionStart, layout.fsdBlock)
+func (r *Reader) udfRootBlock(layout udfLayout) (logicalBlock, error) {
+	fsd, err := r.sector(layout.partitionStart.at(layout.fsdBlock))
 	if err != nil {
 		return 0, err
 	}
 	if binary.LittleEndian.Uint16(fsd[:2]) != 256 {
 		return 0, invalid("missing file set descriptor")
 	}
-	return binary.LittleEndian.Uint32(fsd[404:408]), nil
+	return logicalBlock(binary.LittleEndian.Uint32(fsd[404:408])), nil
 }
 
-func (r *Reader) udfBlock(part, block uint32) ([]byte, error) {
-	off := uint64(part) + uint64(block)
-	if off > ^uint64(0)/uint64(sectorSize) {
-		return nil, invalid("UDF block overflow")
-	}
-	return r.sector(off)
-}
+// udfFileType is the ICB tag file type of a file entry.
+type udfFileType byte
 
 const (
-	udfFileTypeDirectory = 4
-	udfFileTypeSymlink   = 12
+	udfFileTypeDirectory udfFileType = 4
+	udfFileTypeSymlink   udfFileType = 12
 )
+
+// allocForm is the allocation descriptor form an ICB tag declares.
+type allocForm uint16
+
+const (
+	allocShort    allocForm = 0
+	allocLong     allocForm = 1
+	allocEmbedded allocForm = 3
+)
+
+// descriptorSize is the byte length of one allocation descriptor of this form.
+func (f allocForm) descriptorSize() (int, error) {
+	switch f {
+	case allocShort:
+		return 8, nil
+	case allocLong:
+		return 16, nil
+	case allocEmbedded:
+		return 0, invalid("embedded UDF data unsupported")
+	default:
+		return 0, invalid("unsupported UDF allocation")
+	}
+}
+
+// allocDescriptor is a short or long allocation descriptor. Both begin with
+// the extent length, whose top two bits hold the extent type, followed by the
+// partition-relative block.
+type allocDescriptor []byte
+
+func (d allocDescriptor) length() uint64 {
+	return uint64(binary.LittleEndian.Uint32(d[:4]) & 0x3fffffff)
+}
+
+func (d allocDescriptor) block() logicalBlock {
+	return logicalBlock(binary.LittleEndian.Uint32(d[4:8]))
+}
 
 // udfFileEntry is the parsed common subset of a File Entry (tag 261) and an
 // Extended File Entry (tag 266).
 type udfFileEntry struct {
-	fileType  byte
+	fileType  udfFileType
 	infoLen   uint64
-	allocType uint16
+	allocType allocForm
 	allocs    []byte
 }
 
@@ -112,7 +169,32 @@ func (e udfFileEntry) isDir() bool {
 	return e.fileType == udfFileTypeDirectory
 }
 
-func parseUDFFileEntry(b []byte) (udfFileEntry, error) {
+// extents resolves the entry's allocation descriptors within partition p.
+func (e udfFileEntry) extents(p udfPartition) ([]Extent, error) {
+	step, err := e.allocType.descriptorSize()
+	if err != nil {
+		return nil, err
+	}
+	var out []Extent
+	for b := e.allocs; len(b) >= step; b = b[step:] {
+		x, err := p.extent(allocDescriptor(b[:step]))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, nil
+}
+
+func (e udfFileEntry) data(p udfPartition) (extentData, error) {
+	exts, err := e.extents(p)
+	return extentData{extents: exts, size: e.infoLen}, err
+}
+
+// fileEntryBlock is the raw block holding a File Entry or Extended File Entry.
+type fileEntryBlock []byte
+
+func (b fileEntryBlock) parse() (udfFileEntry, error) {
 	var infoLen uint64
 	var ea, ad uint32
 	var start int
@@ -128,7 +210,7 @@ func parseUDFFileEntry(b []byte) (udfFileEntry, error) {
 	default:
 		return udfFileEntry{}, invalid("unsupported UDF file entry")
 	}
-	if b[27] == udfFileTypeSymlink {
+	if udfFileType(b[27]) == udfFileTypeSymlink {
 		return udfFileEntry{}, invalid("symlink-like entry")
 	}
 	if uint64(start)+uint64(ea)+uint64(ad) > uint64(len(b)) {
@@ -136,30 +218,48 @@ func parseUDFFileEntry(b []byte) (udfFileEntry, error) {
 	}
 	allocStart := start + int(ea)
 	return udfFileEntry{
-		fileType:  b[27],
+		fileType:  udfFileType(b[27]),
 		infoLen:   infoLen,
-		allocType: binary.LittleEndian.Uint16(b[34:36]) & 7,
+		allocType: allocForm(binary.LittleEndian.Uint16(b[34:36]) & 7),
 		allocs:    b[allocStart : allocStart+int(ad)],
 	}, nil
 }
 
-func (r *Reader) udfFileEntry(part, block uint32) (udfFileEntry, error) {
-	b, err := r.udfBlock(part, block)
-	if err != nil {
-		return udfFileEntry{}, err
+// ostaName is a UDF dstring in OSTA compressed Unicode: a compression ID byte
+// (8 or 16 bits per character) followed by the characters.
+type ostaName []byte
+
+func (b ostaName) decode() (entryName, error) {
+	if len(b) == 0 {
+		return "", invalid("empty UDF name")
 	}
-	return parseUDFFileEntry(b)
+	switch b[0] {
+	case 8:
+		return entryName(b[1:]), nil
+	case 16:
+		return entryName(ucs2BE(b[1:]).String()), nil
+	default:
+		return "", invalid("UDF name encoding")
+	}
 }
 
 type udfWalker struct {
 	r    *Reader
-	part uint32
-	seen map[uint32]bool
+	part udfPartition
+	seen map[logicalBlock]bool
 	out  []Entry
 }
 
-func (w *udfWalker) walk(block uint32, prefix string, depth int) error {
-	if err := w.enter(block, depth); err != nil {
+func (w *udfWalker) fileEntry(block logicalBlock) (udfFileEntry, error) {
+	b, err := w.r.sector(w.part.at(block))
+	if err != nil {
+		return udfFileEntry{}, err
+	}
+	return fileEntryBlock(b).parse()
+}
+
+func (w *udfWalker) walk(block logicalBlock, at treePos) error {
+	if err := w.enter(block, at); err != nil {
 		return err
 	}
 	defer w.leave(block)
@@ -167,11 +267,11 @@ func (w *udfWalker) walk(block uint32, prefix string, depth int) error {
 	if err != nil {
 		return err
 	}
-	return w.addChildren(fids, prefix, depth)
+	return w.addChildren(fids, at)
 }
 
-func (w *udfWalker) enter(block uint32, depth int) error {
-	if depth > maxDepth {
+func (w *udfWalker) enter(block logicalBlock, at treePos) error {
+	if at.tooDeep() {
 		return invalid("directory depth")
 	}
 	if w.seen[block] {
@@ -181,30 +281,30 @@ func (w *udfWalker) enter(block uint32, depth int) error {
 	return nil
 }
 
-func (w *udfWalker) leave(block uint32) { delete(w.seen, block) }
+func (w *udfWalker) leave(block logicalBlock) { delete(w.seen, block) }
 
-func (w *udfWalker) directoryIdentifiers(block uint32) ([]udfFID, error) {
-	fe, err := w.r.udfFileEntry(w.part, block)
+func (w *udfWalker) directoryIdentifiers(block logicalBlock) ([]udfFID, error) {
+	fe, err := w.fileEntry(block)
 	if err != nil {
 		return nil, err
 	}
-	exts, err := udfExtents(w.part, fe.allocs, fe.allocType)
+	d, err := fe.data(w.part)
 	if err != nil {
 		return nil, err
 	}
 	if !fe.isDir() {
 		return nil, invalid("root is not directory")
 	}
-	data, err := w.r.readExtents(exts, fe.infoLen)
+	data, err := w.r.readData(d)
 	if err != nil {
 		return nil, err
 	}
-	return parseUDFFileIdentifiers(data)
+	return fidStream(data).identifiers()
 }
 
-func (w *udfWalker) addChildren(fids []udfFID, prefix string, depth int) error {
+func (w *udfWalker) addChildren(fids []udfFID, at treePos) error {
 	for _, fid := range fids {
-		if err := w.addChild(fid, prefix, depth); err != nil {
+		if err := w.addChild(fid, at); err != nil {
 			return err
 		}
 	}
@@ -214,13 +314,16 @@ func (w *udfWalker) addChildren(fids []udfFID, prefix string, depth int) error {
 // udfFID is a File Identifier Descriptor (tag 257) reduced to what the walk
 // needs.
 type udfFID struct {
-	name  []byte
-	child uint32
+	name  ostaName
+	child logicalBlock
 }
 
-// parseUDFFileIdentifiers splits a directory's data into identifiers,
-// dropping deleted entries and parent links (flag bits 2 and 3).
-func parseUDFFileIdentifiers(data []byte) ([]udfFID, error) {
+// fidStream is a directory's data: a run of File Identifier Descriptors.
+type fidStream []byte
+
+// identifiers splits a directory's data into identifiers, dropping deleted
+// entries and parent links (flag bits 2 and 3).
+func (data fidStream) identifiers() ([]udfFID, error) {
 	var out []udfFID
 	pos := 0
 	for pos+38 <= len(data) {
@@ -234,7 +337,7 @@ func parseUDFFileIdentifiers(data []byte) ([]udfFID, error) {
 		if n <= 0 || pos+n > len(data) {
 			return nil, invalid("truncated file identifier")
 		}
-		fid := udfFID{name: data[pos+38+implLen : pos+38+implLen+nameLen], child: binary.LittleEndian.Uint32(data[pos+24 : pos+28])}
+		fid := udfFID{name: ostaName(data[pos+38+implLen : pos+38+implLen+nameLen]), child: logicalBlock(binary.LittleEndian.Uint32(data[pos+24 : pos+28]))}
 		pos += n
 		if flags&0x0c != 0 {
 			continue
@@ -244,16 +347,16 @@ func parseUDFFileIdentifiers(data []byte) ([]udfFID, error) {
 	return out, nil
 }
 
-func (w *udfWalker) addChild(fid udfFID, prefix string, depth int) error {
-	name, err := decodeOSTA(fid.name)
+func (w *udfWalker) addChild(fid udfFID, at treePos) error {
+	name, err := fid.name.decode()
 	if err != nil {
 		return err
 	}
-	p, err := normalize(prefix, name)
+	p, err := at.path.child(name)
 	if err != nil {
 		return err
 	}
-	ce, err := w.r.udfEntry(w.part, fid.child, p)
+	ce, err := w.entry(fid.child, p)
 	if err != nil {
 		return err
 	}
@@ -262,17 +365,17 @@ func (w *udfWalker) addChild(fid udfFID, prefix string, depth int) error {
 		return invalid("too many entries")
 	}
 	if ce.Type == Directory {
-		return w.walk(fid.child, p, depth+1)
+		return w.walk(fid.child, at.descend(p))
 	}
 	return nil
 }
 
-func (r *Reader) udfEntry(part, block uint32, p string) (Entry, error) {
-	fe, err := r.udfFileEntry(part, block)
+func (w *udfWalker) entry(block logicalBlock, p entryPath) (Entry, error) {
+	fe, err := w.fileEntry(block)
 	if err != nil {
 		return Entry{}, err
 	}
-	ex, err := udfExtents(part, fe.allocs, fe.allocType)
+	d, err := fe.data(w.part)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -280,32 +383,5 @@ func (r *Reader) udfEntry(part, block uint32, p string) (Entry, error) {
 	if fe.isDir() {
 		typ = Directory
 	}
-	return Entry{Path: p, Type: typ, Extents: ex, Size: fe.infoLen, DestinationFATPath: fatPath(p)}, nil
-}
-
-func udfExtents(part uint32, b []byte, t uint16) ([]Extent, error) {
-	var step, posoff int
-	switch t {
-	case 0:
-		step, posoff = 8, 4
-	case 1:
-		step, posoff = 16, 4
-	case 3:
-		return nil, invalid("embedded UDF data unsupported")
-	default:
-		return nil, invalid("unsupported UDF allocation")
-	}
-	var out []Extent
-	for len(b) >= step {
-		raw := binary.LittleEndian.Uint32(b[:4])
-		length := uint64(raw & 0x3fffffff)
-		block := binary.LittleEndian.Uint32(b[posoff : posoff+4])
-		offBlocks := uint64(part) + uint64(block)
-		if offBlocks > ^uint64(0)/uint64(sectorSize) {
-			return nil, invalid("extent overflow")
-		}
-		out = append(out, Extent{offBlocks * uint64(sectorSize), length})
-		b = b[step:]
-	}
-	return out, nil
+	return Entry{Path: string(p), Type: typ, Extents: d.extents, Size: d.size, DestinationFATPath: p.fatPath()}, nil
 }

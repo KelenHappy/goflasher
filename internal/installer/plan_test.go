@@ -88,19 +88,19 @@ func TestBuildPlanValidatesExistingSplitSet(t *testing.T) {
 }
 
 func TestSplitWIMStrategySizesOversizedInstallWIM(t *testing.T) {
-	files := map[string]installeriso.Entry{"sources/install.wim": {Size: maxFATFileSize + 1}}
-	strategy, size, parts, err := selectInstallStrategy(files, defaultSplitSize)
+	files := manifestFiles{keyInstallWIM: {Size: maxFATFileSize + 1}}
+	layout, err := selectInstallStrategy(files, defaultSplitSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strategy != SplitWIM {
-		t.Errorf("strategy = %s, want %s", strategy, SplitWIM)
+	if layout.strategy != SplitWIM {
+		t.Errorf("strategy = %s, want %s", layout.strategy, SplitWIM)
 	}
-	if size != maxFATFileSize+1 {
-		t.Errorf("size = %d, want %d", size, maxFATFileSize+1)
+	if layout.installSize != maxFATFileSize+1 {
+		t.Errorf("size = %d, want %d", layout.installSize, maxFATFileSize+1)
 	}
-	if parts != 2 {
-		t.Errorf("parts = %d, want 2", parts)
+	if layout.splitParts != 2 {
+		t.Errorf("parts = %d, want 2", layout.splitParts)
 	}
 }
 
@@ -108,13 +108,13 @@ func TestSplitWIMAccountsForAllocationAndTemporarySpace(t *testing.T) {
 	const (
 		size    = maxFATFileSize + 1
 		parts   = 2
-		cluster = uint64(4096)
+		cluster = clusterSize(4096)
 	)
-	allocated := ceilDiv(defaultSplitSize, cluster) + ceilDiv(size-defaultSplitSize, cluster)
-	if allocated*cluster < size {
+	allocated := splitPartSizes{uint64(defaultSplitSize), size - uint64(defaultSplitSize)}.clusters(cluster)
+	if allocated*uint64(cluster) < size {
 		t.Fatal("split allocation did not round each output to an allocation unit")
 	}
-	temporary, err := estimateSplitTemporarySpace(size, parts)
+	temporary, err := installLayout{strategy: SplitWIM, installSize: size, splitParts: parts}.splitTemporarySpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestSplitWIMAccountsForAllocationAndTemporarySpace(t *testing.T) {
 
 func TestSplitTemporarySpaceIncludesMaximumOutputAndFilesystemOverhead(t *testing.T) {
 	const source = uint64(5 << 30)
-	got, err := estimateSplitTemporarySpace(source, 2)
+	got, err := installLayout{strategy: SplitWIM, installSize: source, splitParts: 2}.splitTemporarySpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestSplitTemporarySpaceIncludesMaximumOutputAndFilesystemOverhead(t *testin
 	if got <= source+maximumOutput {
 		t.Fatalf("temporary bytes=%d, staged+outputs=%d", got, source+maximumOutput)
 	}
-	if _, err := estimateSplitTemporarySpace(math.MaxUint64, 2); !errors.Is(err, ErrUnsupported) {
+	if _, err := (installLayout{strategy: SplitWIM, installSize: math.MaxUint64, splitParts: 2}).splitTemporarySpace(); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("overflow error=%v", err)
 	}
 }

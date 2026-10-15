@@ -27,7 +27,7 @@ const (
 	logicalSectorSize     = uint64(512)
 	partitionStart        = uint64(1 << 20)
 	maxFATFileSize        = uint64(math.MaxUint32)
-	defaultSplitSize      = uint64(3800 << 20)
+	defaultSplitSize      = splitPolicy(3800 << 20)
 	splitTempBaseOverhead = uint64(64 << 20)
 )
 
@@ -124,7 +124,7 @@ type planBuilder struct {
 	sourceSize uint64
 	entries    []installeriso.Entry
 	options    PlanOptions
-	splitSize  uint64
+	splitSize  splitPolicy
 }
 
 type fileInspection struct {
@@ -152,61 +152,38 @@ func (p *BuildPlan) VerificationManifest() []VerificationEntry {
 // withPreparedSplitGeometry returns a new immutable plan whose FAT allocation
 // and part count come from the backend's already validated output, rather than
 // the source-size estimate used by Preview.
-func (p *BuildPlan) withPreparedSplitGeometry(sizes []uint64) (*BuildPlan, error) {
+func (p *BuildPlan) withPreparedSplitGeometry(sizes splitPartSizes) (*BuildPlan, error) {
 	if err := p.validatePreparedSplitSizes(sizes); err != nil {
 		return nil, err
 	}
 	wimEntry, _ := plannedBySource(p, "sources/install.wim")
-	actualClusters := splitFileClusters(sizes, p.fat.ClusterSize)
-	estimatedClusters := estimatedSplitFileClusters(wimEntry.source.Size, p.splitSize, p.splitParts, p.fat.ClusterSize)
+	estimate := installLayout{strategy: SplitWIM, installSize: wimEntry.source.Size, splitParts: p.splitParts}
 	q := p.clone()
 	q.splitParts = len(sizes)
-	q.adjustSplitFileClusters(actualClusters, estimatedClusters)
-	q.adjustSplitDirectorySize(len(sizes))
-	q.fat.AllocationBytes = (q.fat.FileClusters+q.fat.DirectoryClusters)*q.fat.ClusterSize + q.fat.FATBytes + 32*logicalSectorSize
+	q.adjustSplitFileClusters(sizes, estimate)
+	q.adjustSplitDirectorySize(sizes)
+	q.fat.AllocationBytes = q.fat.allocationBytes()
 	if q.fat.AllocationBytes > q.esp.Size {
 		return nil, fmt.Errorf("%w: %w: prepared split set needs %d bytes, ESP has %d", ErrNoSpace, ErrTargetTooSmall, q.fat.AllocationBytes, q.esp.Size)
 	}
 	return q, nil
 }
 
-func (p *BuildPlan) validatePreparedSplitSizes(sizes []uint64) error {
+func (p *BuildPlan) validatePreparedSplitSizes(sizes splitPartSizes) error {
 	if !p.acceptsPreparedSplit(sizes) {
 		return fmt.Errorf("%w: missing prepared split geometry", ErrVerification)
 	}
 	if _, ok := plannedBySource(p, "sources/install.wim"); !ok {
 		return fmt.Errorf("%w: planned WIM is missing", ErrVerification)
 	}
-	for _, size := range sizes {
-		if !p.validSplitPartSize(size) {
-			return fmt.Errorf("%w: invalid prepared split part size", ErrVerification)
-		}
+	if !splitPolicy(p.splitSize).admits(sizes) {
+		return fmt.Errorf("%w: invalid prepared split part size", ErrVerification)
 	}
 	return nil
 }
 
-func (p *BuildPlan) acceptsPreparedSplit(sizes []uint64) bool {
+func (p *BuildPlan) acceptsPreparedSplit(sizes splitPartSizes) bool {
 	return p != nil && p.strategy == SplitWIM && len(sizes) != 0
-}
-
-func (p *BuildPlan) validSplitPartSize(size uint64) bool {
-	return size != 0 && size <= p.splitSize && size <= maxFATFileSize
-}
-
-func splitFileClusters(sizes []uint64, clusterSize uint64) (clusters uint64) {
-	for _, size := range sizes {
-		clusters += ceilDiv(size, clusterSize)
-	}
-	return clusters
-}
-
-func estimatedSplitFileClusters(remaining, splitSize uint64, parts int, clusterSize uint64) (clusters uint64) {
-	for range parts {
-		size := min(remaining, splitSize)
-		clusters += ceilDiv(size, clusterSize)
-		remaining -= size
-	}
-	return clusters
 }
 
 func (p *BuildPlan) clone() *BuildPlan {
@@ -217,7 +194,12 @@ func (p *BuildPlan) clone() *BuildPlan {
 	return &q
 }
 
-func (p *BuildPlan) adjustSplitFileClusters(actualClusters, estimatedClusters uint64) {
+// adjustSplitFileClusters swaps the preview's estimated split allocation for
+// the clusters the actual parts occupy.
+func (p *BuildPlan) adjustSplitFileClusters(actual splitPartSizes, estimate installLayout) {
+	cluster := p.fat.cluster()
+	actualClusters := actual.clusters(cluster)
+	estimatedClusters := estimate.estimatedSplitClusters(splitPolicy(p.splitSize), cluster)
 	if actualClusters >= estimatedClusters {
 		p.fat.FileClusters += actualClusters - estimatedClusters
 	} else {
@@ -225,25 +207,105 @@ func (p *BuildPlan) adjustSplitFileClusters(actualClusters, estimatedClusters ui
 	}
 }
 
-func (p *BuildPlan) adjustSplitDirectorySize(parts int) {
-	oldEntryBytes := fatDirectoryEntryBytes("install.wim")
+func (p *BuildPlan) adjustSplitDirectorySize(sizes splitPartSizes) {
+	oldEntryBytes := fatName("install.wim").directoryEntryBytes()
 	var actualEntryBytes uint64
-	for i := range parts {
-		name := "install.swm"
-		if i > 0 {
-			name = "install" + strconv.Itoa(i+1) + ".swm"
-		}
-		actualEntryBytes += fatDirectoryEntryBytes(name)
+	for i := range sizes {
+		actualEntryBytes += fatName(splitPartName(i + 1)).directoryEntryBytes()
 	}
 	if actualEntryBytes > oldEntryBytes {
 		delta := actualEntryBytes - oldEntryBytes
 		p.fat.DirectoryBytes += delta
-		p.fat.DirectoryClusters += ceilDiv(delta, p.fat.ClusterSize)
+		p.fat.DirectoryClusters += p.fat.cluster().clusters(delta)
 	}
 }
 
-func fatDirectoryEntryBytes(name string) uint64 {
-	return uint64(32 * (2 + (len([]rune(name))+12)/13))
+// clusterSize is the FAT32 allocation unit in bytes.
+type clusterSize uint64
+
+// clusters is how many allocation units n bytes occupy.
+func (c clusterSize) clusters(n uint64) uint64 { return ceilDiv(n, uint64(c)) }
+
+func (f FATLayoutEstimate) cluster() clusterSize { return clusterSize(f.ClusterSize) }
+
+// allocationBytes is the space the data clusters, both FATs, and the reserved
+// region need on the ESP.
+func (f FATLayoutEstimate) allocationBytes() uint64 {
+	return (f.FileClusters+f.DirectoryClusters)*f.ClusterSize + f.FATBytes + 32*logicalSectorSize
+}
+
+func (l ESPLayout) clusterSize() clusterSize {
+	switch {
+	case l.Size <= 260<<20:
+		return 512
+	case l.Size <= 8<<30:
+		return 4096
+	case l.Size <= 16<<30:
+		return 8192
+	case l.Size <= 32<<30:
+		return 16384
+	default:
+		return 32768
+	}
+}
+
+func (l ESPLayout) fatBytes(cluster clusterSize) uint64 {
+	// FAT entries themselves consume volume space, so converge on the number
+	// of data clusters after both FAT copies and the reserved region.
+	fatSectors := uint64(1)
+	for {
+		available := l.Size/logicalSectorSize - 32 - 2*fatSectors
+		clusters := available / (uint64(cluster) / logicalSectorSize)
+		required := ceilDiv((clusters+2)*4, logicalSectorSize)
+		if required <= fatSectors {
+			return fatSectors * logicalSectorSize * 2
+		}
+		fatSectors = required
+	}
+}
+
+// fatName is one path component as it will be stored on the ESP.
+type fatName string
+
+// directoryEntryBytes is the directory space n occupies, long-name entries
+// included.
+func (n fatName) directoryEntryBytes() uint64 {
+	return uint64(32 * (2 + (len([]rune(n))+12)/13))
+}
+
+// splitPartSizes are the byte sizes of a split WIM's parts, in sequence order.
+type splitPartSizes []uint64
+
+func (s splitPartSizes) clusters(cluster clusterSize) (clusters uint64) {
+	for _, size := range s {
+		clusters += cluster.clusters(size)
+	}
+	return clusters
+}
+
+// splitPolicy is the largest SWM part a split may produce.
+type splitPolicy uint64
+
+func (s splitPolicy) valid() bool { return uint64(s) <= maxFATFileSize }
+
+// admits reports whether every part is non-empty and within both the policy
+// and the FAT32 file limit.
+func (s splitPolicy) admits(sizes splitPartSizes) bool {
+	for _, size := range sizes {
+		if size == 0 || size > uint64(s) || size > maxFATFileSize {
+			return false
+		}
+	}
+	return true
+}
+
+// wimLayout copies an install.wim FAT32 can hold and otherwise splits it into
+// policy-sized parts.
+func (s splitPolicy) wimLayout(wim installeriso.Entry) installLayout {
+	if wim.Size <= maxFATFileSize {
+		return installLayout{strategy: CopyWIM, installSize: wim.Size, splitParts: 1}
+	}
+	return installLayout{strategy: SplitWIM, installSize: wim.Size, splitParts: int(ceilDiv(wim.Size, uint64(s)))}
 }
 
 // NewBuildPlan performs the complete, non-destructive preflight. Input's source
@@ -257,34 +319,34 @@ func (b *planBuilder) build() (*BuildPlan, error) {
 	if err := b.validateInput(); err != nil {
 		return nil, err
 	}
-	sort.Slice(b.entries, func(i, j int) bool { return strings.ToLower(b.entries[i].Path) < strings.ToLower(b.entries[j].Path) })
+	sort.Slice(b.entries, func(i, j int) bool { return keyOf(b.entries[i]) < keyOf(b.entries[j]) })
 	planned, err := approveDestinations(b.entries)
 	if err != nil {
 		return nil, err
 	}
-	files := manifestFiles(b.entries)
-	if _, ok := files["efi/boot/bootx64.efi"]; !ok {
+	files := indexFiles(b.entries)
+	if !files.has(keyBootLoader) {
 		return nil, fmt.Errorf("%w: %w: efi/boot/bootx64.efi", ErrUnsupported, ErrMissingUEFILoader)
 	}
-	strategy, installSize, splitParts, err := selectInstallStrategy(files, b.splitSize)
+	layout, err := selectInstallStrategy(files, b.splitSize)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.preflightSplit(strategy); err != nil {
+	if err := b.preflightSplit(layout.strategy); err != nil {
 		return nil, err
 	}
-	return b.assemble(planned, strategy, installSize, splitParts)
+	return b.assemble(planned, layout)
 }
 
 func (b *planBuilder) validateInput() error {
 	if !b.hasRequiredInput() {
 		return fmt.Errorf("%w: incomplete preflight input", ErrUnsupported)
 	}
-	b.splitSize = b.options.SplitWIMPolicySize
+	b.splitSize = splitPolicy(b.options.SplitWIMPolicySize)
 	if b.splitSize == 0 {
 		b.splitSize = defaultSplitSize
 	}
-	if b.splitSize > maxFATFileSize {
+	if !b.splitSize.valid() {
 		return fmt.Errorf("%w: invalid split WIM policy", ErrUnsupported)
 	}
 	return nil
@@ -294,14 +356,65 @@ func (b *planBuilder) hasRequiredInput() bool {
 	return b.source != nil && b.sourceSize != 0 && b.options.SourceIdentity != "" && b.options.TargetSize != 0
 }
 
-func manifestFiles(entries []installeriso.Entry) map[string]installeriso.Entry {
-	files := make(map[string]installeriso.Entry)
+// manifestKey is a manifest path folded to lower case, the form install-image
+// and loader lookups compare against.
+type manifestKey string
+
+const (
+	keyBootLoader manifestKey = "efi/boot/bootx64.efi"
+	keyInstallWIM manifestKey = "sources/install.wim"
+	keyInstallESD manifestKey = "sources/install.esd"
+	keyFirstSWM   manifestKey = "sources/install.swm"
+)
+
+func keyOf(entry installeriso.Entry) manifestKey { return manifestKey(strings.ToLower(entry.Path)) }
+
+func (k manifestKey) looksLikeSWM() bool {
+	return strings.HasPrefix(string(k), "sources/install") && strings.HasSuffix(string(k), ".swm")
+}
+
+func (k manifestKey) isInstallImage() bool {
+	return k == keyInstallWIM || k == keyInstallESD || k.looksLikeSWM()
+}
+
+// swmSequence is the part number of an existing SWM name: install.swm is 1,
+// installN.swm is N for N >= 2 written without leading zeros.
+func (k manifestKey) swmSequence() (int, bool) {
+	if k == keyFirstSWM {
+		return 1, true
+	}
+	if !k.looksLikeSWM() {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(string(k), "sources/install"), ".swm"))
+	return n, err == nil && n >= 2 && string(k) == "sources/install"+strconv.Itoa(n)+".swm"
+}
+
+// parent is the key of the directory holding k; the root is "".
+func (k manifestKey) parent() manifestKey {
+	p := path.Dir(string(k))
+	if p == "." || p == "/" {
+		return ""
+	}
+	return manifestKey(p)
+}
+
+// manifestFiles indexes the manifest's regular files by manifestKey.
+type manifestFiles map[manifestKey]installeriso.Entry
+
+func indexFiles(entries []installeriso.Entry) manifestFiles {
+	files := make(manifestFiles)
 	for _, entry := range entries {
 		if entry.Type == installeriso.File {
-			files[strings.ToLower(entry.Path)] = entry
+			files[keyOf(entry)] = entry
 		}
 	}
 	return files
+}
+
+func (f manifestFiles) has(k manifestKey) bool {
+	_, ok := f[k]
+	return ok
 }
 
 func (b *planBuilder) preflightSplit(strategy InstallStrategy) error {
@@ -325,48 +438,214 @@ func defaultSplitPreflight(ctx context.Context) error {
 	return wim.Probe()
 }
 
-func (b *planBuilder) assemble(planned []plannedEntry, strategy InstallStrategy, installSize uint64, splitParts int) (*BuildPlan, error) {
-	if b.options.TargetSize <= partitionStart+33*logicalSectorSize {
-		return nil, errors.Join(ErrNoSpace, ErrTargetTooSmall)
-	}
-	espSize := b.options.TargetSize - partitionStart - 33*logicalSectorSize
-	clusterSize := fatClusterSize(espSize)
-	inspection, err := b.inspectFiles(clusterSize, installLayout{strategy, installSize, splitParts})
+func (b *planBuilder) assemble(planned []plannedEntry, layout installLayout) (*BuildPlan, error) {
+	esp, err := b.espLayout()
 	if err != nil {
 		return nil, err
 	}
-	dataClusters := inspection.fileClusters + inspection.directoryClusters
-	fatBytes := estimateFATBytes(espSize, clusterSize)
-	allocation := dataClusters*clusterSize + fatBytes + 32*logicalSectorSize
-	gptBytes := uint64(67) * logicalSectorSize // protective MBR, both headers, and both entry arrays
-	if allocation > espSize {
-		return nil, fmt.Errorf("%w: %w: need %d bytes, ESP has %d", ErrNoSpace, ErrTargetTooSmall, allocation, espSize)
+	cluster := esp.clusterSize()
+	inspection, err := b.inspectFiles(cluster, layout)
+	if err != nil {
+		return nil, err
 	}
-	temporary := uint64(0)
-	if strategy == SplitWIM {
-		temporary, err = estimateSplitTemporarySpace(installSize, splitParts)
-		if err != nil {
-			return nil, err
-		}
+	fat := FATLayoutEstimate{ClusterSize: uint64(cluster), FileClusters: inspection.fileClusters, DirectoryClusters: inspection.directoryClusters,
+		FATBytes: esp.fatBytes(cluster), DirectoryBytes: inspection.directoryBytes}
+	fat.AllocationBytes = fat.allocationBytes()
+	if fat.AllocationBytes > esp.Size {
+		return nil, fmt.Errorf("%w: %w: need %d bytes, ESP has %d", ErrNoSpace, ErrTargetTooSmall, fat.AllocationBytes, esp.Size)
+	}
+	temporary, err := layout.temporarySpace()
+	if err != nil {
+		return nil, err
 	}
 	if temporary > b.options.TemporarySpace {
 		return nil, fmt.Errorf("%w: %w: split WIM needs %d temporary bytes", ErrNoSpace, ErrTemporarySpace, temporary)
 	}
-	p := &BuildPlan{sourceIdentity: b.options.SourceIdentity, manifest: installeriso.Manifest{Entries: b.entries}, architecture: UEFIX64,
-		esp:          ESPLayout{logicalSectorSize, partitionStart, espSize, gptBytes},
-		fat:          FATLayoutEstimate{clusterSize, inspection.fileClusters, inspection.directoryClusters, fatBytes, inspection.directoryBytes, allocation},
-		regularBytes: inspection.regular, strategy: strategy, splitSize: b.splitSize, splitParts: splitParts, temporaryBytes: temporary, verification: inspection.verification, planned: planned}
-	sourceSHA256, err := hashRange(b.ctx, b.source, 0, b.sourceSize)
-	p.sourceSHA256 = sourceSHA256
+	sourceSHA256, err := b.hashSource()
 	if err != nil {
 		return nil, err
 	}
-	return p, nil
+	return &BuildPlan{sourceIdentity: b.options.SourceIdentity, sourceSHA256: sourceSHA256, manifest: installeriso.Manifest{Entries: b.entries}, architecture: UEFIX64,
+		esp: esp, fat: fat, regularBytes: inspection.regular, strategy: layout.strategy, splitSize: uint64(b.splitSize), splitParts: layout.splitParts,
+		temporaryBytes: temporary, verification: inspection.verification, planned: planned}, nil
 }
 
-// estimateSplitTemporarySpace reserves the simultaneously retained staged WIM,
-// the maximum accepted SWM output set, and conservative filesystem metadata.
-func estimateSplitTemporarySpace(sourceSize uint64, parts int) (uint64, error) {
+// espLayout places the ESP after the 1 MiB alignment gap and leaves the last
+// 33 sectors for the backup GPT.
+func (b *planBuilder) espLayout() (ESPLayout, error) {
+	reserved := partitionStart + 33*logicalSectorSize
+	if b.options.TargetSize <= reserved {
+		return ESPLayout{}, errors.Join(ErrNoSpace, ErrTargetTooSmall)
+	}
+	gptBytes := uint64(67) * logicalSectorSize // protective MBR, both headers, and both entry arrays
+	return ESPLayout{LogicalSectorSize: logicalSectorSize, StartOffset: partitionStart, Size: b.options.TargetSize - reserved, GPTMetadataBytes: gptBytes}, nil
+}
+
+func approveDestinations(entries []installeriso.Entry) ([]plannedEntry, error) {
+	approved := make([]plannedEntry, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		d, err := approveDestination(e)
+		if err != nil {
+			return nil, err
+		}
+		key := d.foldKey()
+		if seen[key] {
+			return nil, fmt.Errorf("%w: destination collision %q", ErrUnsupported, d)
+		}
+		seen[key] = true
+		approved = append(approved, plannedEntry{source: e, destination: string(d)})
+	}
+	return approved, nil
+}
+
+func approveDestination(entry installeriso.Entry) (destination, error) {
+	d := destinationOf(entry)
+	if d.unsafe() {
+		return "", fmt.Errorf("%w: unsafe destination path %q", ErrUnsupported, d)
+	}
+	return d, nil
+}
+
+// destination is a slash-separated path on the ESP, relative to its root.
+type destination string
+
+func destinationOf(entry installeriso.Entry) destination {
+	d := entry.DestinationFATPath
+	if d == "" {
+		d = entry.Path
+	}
+	return destination(strings.ReplaceAll(d, "\\", "/"))
+}
+
+func (d destination) clean() destination { return destination(path.Clean(string(d))) }
+
+func (d destination) unsafe() bool {
+	if d.nonCanonical() || d.clean().escapesRoot() {
+		return true
+	}
+	return strings.ContainsRune(string(d), 0)
+}
+
+// nonCanonical reports empty, absolute, or not already cleaned paths.
+func (d destination) nonCanonical() bool {
+	if d == "" || path.IsAbs(string(d)) {
+		return true
+	}
+	return d.clean() != d
+}
+
+func (d destination) escapesRoot() bool {
+	if d == "." || d == ".." {
+		return true
+	}
+	return strings.HasPrefix(string(d), "../")
+}
+
+// foldKey is the name FAT32 sees once case and Unicode normalization are
+// folded away.
+func (d destination) foldKey() string { return norm.NFC.String(cases.Fold().String(string(d))) }
+
+func selectInstallStrategy(files manifestFiles, policy splitPolicy) (installLayout, error) {
+	swm, err := files.existingSWM()
+	if err != nil {
+		return installLayout{}, err
+	}
+	if len(swm) != 0 {
+		return files.existingSWMLayout(swm)
+	}
+	return files.singleImageLayout(policy)
+}
+
+// swmSet maps each existing SWM part's sequence number to its entry.
+type swmSet map[int]installeriso.Entry
+
+func (s swmSet) contiguous() bool {
+	for i := 1; i <= len(s); i++ {
+		if _, ok := s[i]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (f manifestFiles) existingSWM() (swmSet, error) {
+	swm := swmSet{}
+	for key, e := range f {
+		if !key.looksLikeSWM() {
+			continue
+		}
+		n, ok := key.swmSequence()
+		if !ok {
+			return nil, fmt.Errorf("%w: invalid existing SWM name %q", ErrUnsupported, key)
+		}
+		if _, duplicate := swm[n]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate existing SWM sequence %d", ErrUnsupported, n)
+		}
+		swm[n] = e
+	}
+	return swm, nil
+}
+
+func (f manifestFiles) existingSWMLayout(swm swmSet) (installLayout, error) {
+	if f.has(keyInstallWIM) || f.has(keyInstallESD) {
+		return installLayout{}, fmt.Errorf("%w: existing SWM set cannot be mixed with WIM or ESD", ErrUnsupported)
+	}
+	if !swm.contiguous() {
+		return installLayout{}, fmt.Errorf("%w: existing SWM set is not contiguous", ErrUnsupported)
+	}
+	return installLayout{strategy: CopyExistingSWM, splitParts: len(swm)}, nil
+}
+
+func (f manifestFiles) singleImageLayout(policy splitPolicy) (installLayout, error) {
+	wim, hasWIM := f[keyInstallWIM]
+	esd, hasESD := f[keyInstallESD]
+	if hasWIM && hasESD {
+		return installLayout{}, fmt.Errorf("%w: multiple install images", ErrUnsupported)
+	}
+	if hasWIM {
+		return policy.wimLayout(wim), nil
+	}
+	if !hasESD {
+		return installLayout{strategy: NoInstallImage}, nil
+	}
+	if esd.Size > maxFATFileSize {
+		return installLayout{}, fmt.Errorf("%w: install.esd exceeds FAT32 file limit", ErrUnsupported)
+	}
+	return installLayout{strategy: CopyESD, installSize: esd.Size, splitParts: 1}, nil
+}
+
+// installLayout describes how the install image will be written to the ESP.
+type installLayout struct {
+	strategy    InstallStrategy
+	installSize uint64
+	splitParts  int
+}
+
+// estimatedSplitClusters is the allocation for cutting the install image into
+// splitParts pieces of at most policy bytes, before the real part sizes are
+// known.
+func (l installLayout) estimatedSplitClusters(policy splitPolicy, cluster clusterSize) (clusters uint64) {
+	remaining := l.installSize
+	for range l.splitParts {
+		size := min(remaining, uint64(policy))
+		clusters += cluster.clusters(size)
+		remaining -= size
+	}
+	return clusters
+}
+
+func (l installLayout) temporarySpace() (uint64, error) {
+	if l.strategy != SplitWIM {
+		return 0, nil
+	}
+	return l.splitTemporarySpace()
+}
+
+// splitTemporarySpace reserves the simultaneously retained staged WIM, the
+// maximum accepted SWM output set, and conservative filesystem metadata.
+func (l installLayout) splitTemporarySpace() (uint64, error) {
+	sourceSize, parts := l.installSize, l.splitParts
 	if sourceSize == 0 || parts <= 0 {
 		return 0, fmt.Errorf("%w: invalid split temporary-space input", ErrUnsupported)
 	}
@@ -395,150 +674,35 @@ func estimateSplitTemporarySpace(sourceSize uint64, parts int) (uint64, error) {
 	return total + filesystemOverhead, nil
 }
 
-func approveDestinations(entries []installeriso.Entry) ([]plannedEntry, error) {
-	approved := make([]plannedEntry, 0, len(entries))
-	seen := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		destination, err := approveDestination(e)
-		if err != nil {
-			return nil, err
-		}
-		key := norm.NFC.String(cases.Fold().String(destination))
-		if seen[key] {
-			return nil, fmt.Errorf("%w: destination collision %q", ErrUnsupported, destination)
-		}
-		seen[key] = true
-		approved = append(approved, plannedEntry{source: e, destination: destination})
-	}
-	return approved, nil
+// directorySizes accumulates the directory-entry bytes each ESP directory
+// needs, keyed by the directory's manifestKey; the root is "".
+type directorySizes map[manifestKey]uint64
+
+func newDirectorySizes() directorySizes { return directorySizes{"": 96} }
+
+func (d directorySizes) addDirectory(entry installeriso.Entry) {
+	d[keyOf(entry)] += 64
+	d.addChild(entry)
 }
 
-func approveDestination(entry installeriso.Entry) (string, error) {
-	destination := entry.DestinationFATPath
-	if destination == "" {
-		destination = entry.Path
-	}
-	destination = strings.ReplaceAll(destination, "\\", "/")
-	clean := path.Clean(destination)
-	if unsafeDestination(destination, clean) {
-		return "", fmt.Errorf("%w: unsafe destination path %q", ErrUnsupported, destination)
-	}
-	return destination, nil
+func (d directorySizes) addChild(entry installeriso.Entry) {
+	d[keyOf(entry).parent()] += fatName(path.Base(entry.Path)).directoryEntryBytes()
 }
 
-func unsafeDestination(destination, clean string) bool {
-	if nonCanonicalDestination(destination, clean) || escapesRoot(clean) {
-		return true
+func (d directorySizes) total(cluster clusterSize) (bytes, clusters uint64) {
+	for _, n := range d {
+		bytes += n
+		clusters += cluster.clusters(n)
 	}
-	return strings.ContainsRune(destination, 0)
+	return bytes, clusters
 }
 
-// nonCanonicalDestination reports empty, absolute, or not already cleaned paths.
-func nonCanonicalDestination(destination, clean string) bool {
-	if destination == "" || path.IsAbs(destination) {
-		return true
-	}
-	return clean != destination
-}
-
-func escapesRoot(clean string) bool {
-	if clean == "." || clean == ".." {
-		return true
-	}
-	return strings.HasPrefix(clean, "../")
-}
-
-func selectInstallStrategy(files map[string]installeriso.Entry, splitSize uint64) (InstallStrategy, uint64, int, error) {
-	_, hasWIM := files["sources/install.wim"]
-	_, hasESD := files["sources/install.esd"]
-	swm, err := collectExistingSWM(files)
-	if err != nil {
-		return "", 0, 0, err
-	}
-	if len(swm) != 0 {
-		return existingSWMStrategy(swm, hasWIM, hasESD)
-	}
-	return singleInstallImageStrategy(files, splitSize)
-}
-
-func collectExistingSWM(files map[string]installeriso.Entry) (map[int]installeriso.Entry, error) {
-	swm := map[int]installeriso.Entry{}
-	for name, e := range files {
-		if strings.HasPrefix(name, "sources/install") && strings.HasSuffix(name, ".swm") {
-			n, ok := swmSequence(name)
-			if !ok {
-				return nil, fmt.Errorf("%w: invalid existing SWM name %q", ErrUnsupported, name)
-			}
-			if _, duplicate := swm[n]; duplicate {
-				return nil, fmt.Errorf("%w: duplicate existing SWM sequence %d", ErrUnsupported, n)
-			}
-			swm[n] = e
-		}
-	}
-	return swm, nil
-}
-
-func existingSWMStrategy(swm map[int]installeriso.Entry, hasWIM, hasESD bool) (InstallStrategy, uint64, int, error) {
-	if hasWIM || hasESD {
-		return "", 0, 0, fmt.Errorf("%w: existing SWM set cannot be mixed with WIM or ESD", ErrUnsupported)
-	}
-	for i := 1; i <= len(swm); i++ {
-		if _, ok := swm[i]; !ok {
-			return "", 0, 0, fmt.Errorf("%w: existing SWM set is not contiguous", ErrUnsupported)
-		}
-	}
-	return CopyExistingSWM, 0, len(swm), nil
-}
-
-func singleInstallImageStrategy(files map[string]installeriso.Entry, splitSize uint64) (InstallStrategy, uint64, int, error) {
-	wim, hasWIM := files["sources/install.wim"]
-	esd, hasESD := files["sources/install.esd"]
-	if hasWIM && hasESD {
-		return "", 0, 0, fmt.Errorf("%w: multiple install images", ErrUnsupported)
-	}
-	if hasWIM {
-		return wimStrategy(wim, splitSize)
-	}
-	if !hasESD {
-		return NoInstallImage, 0, 0, nil
-	}
-	if esd.Size > maxFATFileSize {
-		return "", 0, 0, fmt.Errorf("%w: install.esd exceeds FAT32 file limit", ErrUnsupported)
-	}
-	return CopyESD, esd.Size, 1, nil
-}
-
-func wimStrategy(wim installeriso.Entry, splitSize uint64) (InstallStrategy, uint64, int, error) {
-	if wim.Size <= maxFATFileSize {
-		return CopyWIM, wim.Size, 1, nil
-	}
-	return SplitWIM, wim.Size, int((wim.Size + splitSize - 1) / splitSize), nil
-}
-
-func swmSequence(name string) (int, bool) {
-	if name == "sources/install.swm" {
-		return 1, true
-	}
-	if !strings.HasPrefix(name, "sources/install") || !strings.HasSuffix(name, ".swm") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "sources/install"), ".swm"))
-	return n, err == nil && n >= 2 && name == "sources/install"+strconv.Itoa(n)+".swm"
-}
-
-// installLayout describes how the install image will be written to the ESP.
-type installLayout struct {
-	strategy    InstallStrategy
-	installSize uint64
-	splitParts  int
-}
-
-func (b *planBuilder) inspectFiles(cluster uint64, layout installLayout) (fileInspection, error) {
+func (b *planBuilder) inspectFiles(cluster clusterSize, layout installLayout) (fileInspection, error) {
 	var result fileInspection
-	dirBytes := map[string]uint64{"": 96}
+	dirs := newDirectorySizes()
 	for _, entry := range b.entries {
 		if entry.Type == installeriso.Directory {
-			accountDirectoryEntry(dirBytes, entry)
+			dirs.addDirectory(entry)
 			continue
 		}
 		if entry.Type != installeriso.File {
@@ -547,50 +711,36 @@ func (b *planBuilder) inspectFiles(cluster uint64, layout installLayout) (fileIn
 		if err := validateFATFileSize(entry, layout.strategy); err != nil {
 			return fileInspection{}, err
 		}
-		lower := strings.ToLower(entry.Path)
-		if !isInstallImage(lower) {
+		if !keyOf(entry).isInstallImage() {
 			result.regular += entry.Size
 		}
-		result.fileClusters += b.entryClusters(entry, lower, cluster, layout)
-		dirBytes[parentKey(lower)] += fatDirectoryEntryBytes(path.Base(entry.Path))
+		result.fileClusters += b.entryClusters(entry, cluster, layout)
+		dirs.addChild(entry)
 		hash, err := b.hashExtents(entry)
 		if err != nil {
 			return fileInspection{}, err
 		}
 		result.verification = append(result.verification, VerificationEntry{verificationDestination(entry), entry.Size, hash})
 	}
-	for _, bytes := range dirBytes {
-		result.directoryBytes += bytes
-		result.directoryClusters += ceilDiv(bytes, cluster)
-	}
+	result.directoryBytes, result.directoryClusters = dirs.total(cluster)
 	return result, nil
-}
-
-func accountDirectoryEntry(dirBytes map[string]uint64, entry installeriso.Entry) {
-	lower := strings.ToLower(entry.Path)
-	dirBytes[lower] += 64
-	dirBytes[parentKey(lower)] += fatDirectoryEntryBytes(path.Base(entry.Path))
 }
 
 func validateFATFileSize(entry installeriso.Entry, strategy InstallStrategy) error {
 	if entry.Size <= maxFATFileSize {
 		return nil
 	}
-	if strategy == SplitWIM && strings.EqualFold(entry.Path, "sources/install.wim") {
+	if strategy == SplitWIM && strings.EqualFold(entry.Path, string(keyInstallWIM)) {
 		return nil
 	}
 	return fmt.Errorf("%w: %s exceeds FAT32 file limit", ErrUnsupported, entry.Path)
 }
 
-func isInstallImage(lower string) bool {
-	return lower == "sources/install.wim" || lower == "sources/install.esd" || strings.HasPrefix(lower, "sources/install") && strings.HasSuffix(lower, ".swm")
-}
-
-func (b *planBuilder) entryClusters(entry installeriso.Entry, lower string, cluster uint64, layout installLayout) uint64 {
-	if layout.strategy != SplitWIM || lower != "sources/install.wim" {
-		return ceilDiv(entry.Size, cluster)
+func (b *planBuilder) entryClusters(entry installeriso.Entry, cluster clusterSize, layout installLayout) uint64 {
+	if layout.strategy != SplitWIM || keyOf(entry) != keyInstallWIM {
+		return cluster.clusters(entry.Size)
 	}
-	return estimatedSplitFileClusters(layout.installSize, b.splitSize, layout.splitParts, cluster)
+	return layout.estimatedSplitClusters(b.splitSize, cluster)
 }
 
 func verificationDestination(entry installeriso.Entry) string {
@@ -605,6 +755,12 @@ func (b *planBuilder) hashExtents(e installeriso.Entry) (string, error) {
 	return h.sum(e)
 }
 
+// hashSource digests the whole source image as one extent.
+func (b *planBuilder) hashSource() (string, error) {
+	whole := installeriso.Entry{Path: "source image", Size: b.sourceSize, Extents: []installeriso.Extent{{Offset: 0, Length: b.sourceSize}}}
+	return b.hashExtents(whole)
+}
+
 type extentHasher struct {
 	builder *planBuilder
 	digest  hash.Hash
@@ -615,7 +771,7 @@ func (h *extentHasher) sum(entry installeriso.Entry) (string, error) {
 	remaining := entry.Size
 	for _, extent := range entry.Extents {
 		n := min(remaining, extent.Length)
-		if err := h.add(extent.Offset, n); err != nil {
+		if err := h.add(installeriso.Extent{Offset: extent.Offset, Length: n}); err != nil {
 			return "", err
 		}
 		remaining -= n
@@ -626,41 +782,23 @@ func (h *extentHasher) sum(entry installeriso.Entry) (string, error) {
 	return hex.EncodeToString(h.digest.Sum(nil)), nil
 }
 
-func (h *extentHasher) add(offset, size uint64) error {
-	if offset > h.builder.sourceSize || size > h.builder.sourceSize-offset {
+func (h *extentHasher) add(x installeriso.Extent) error {
+	if x.Offset > h.builder.sourceSize || x.Length > h.builder.sourceSize-x.Offset {
 		return fmt.Errorf("%w: extent out of bounds", ErrUnsupported)
 	}
 	done := uint64(0)
-	for done < size {
+	for done < x.Length {
 		if err := h.builder.ctx.Err(); err != nil {
 			return err
 		}
-		take := min(uint64(len(h.buffer)), size-done)
-		if _, err := h.builder.source.ReadAt(h.buffer[:take], int64(offset+done)); err != nil {
+		take := min(uint64(len(h.buffer)), x.Length-done)
+		if _, err := h.builder.source.ReadAt(h.buffer[:take], int64(x.Offset+done)); err != nil {
 			return err
 		}
 		_, _ = h.digest.Write(h.buffer[:take])
 		done += take
 	}
 	return nil
-}
-
-func hashRange(ctx context.Context, source io.ReaderAt, off, size uint64) (string, error) {
-	h := sha256.New()
-	buf := make([]byte, 1<<20)
-	done := uint64(0)
-	for done < size {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		n := min(uint64(len(buf)), size-done)
-		if _, err := source.ReadAt(buf[:n], int64(off+done)); err != nil {
-			return "", err
-		}
-		h.Write(buf[:n])
-		done += n
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func cloneManifest(m installeriso.Manifest) installeriso.Manifest {
@@ -671,45 +809,10 @@ func cloneManifest(m installeriso.Manifest) installeriso.Manifest {
 	}
 	return out
 }
-func parentKey(name string) string {
-	p := path.Dir(name)
-	if p == "." || p == "/" {
-		return ""
-	}
-	return p
-}
-func estimateFATBytes(volumeSize, clusterSize uint64) uint64 {
-	// FAT entries themselves consume volume space, so converge on the number
-	// of data clusters after both FAT copies and the reserved region.
-	fatSectors := uint64(1)
-	for {
-		available := volumeSize/logicalSectorSize - 32 - 2*fatSectors
-		clusters := available / (clusterSize / logicalSectorSize)
-		required := ceilDiv((clusters+2)*4, logicalSectorSize)
-		if required <= fatSectors {
-			return fatSectors * logicalSectorSize * 2
-		}
-		fatSectors = required
-	}
-}
-func fatClusterSize(size uint64) uint64 {
-	switch {
-	case size <= 260<<20:
-		return 512
-	case size <= 8<<30:
-		return 4096
-	case size <= 16<<30:
-		return 8192
-	case size <= 32<<30:
-		return 16384
-	default:
-		return 32768
-	}
-}
+
 func ceilDiv(n, d uint64) uint64 {
 	if n == 0 {
 		return 0
 	}
 	return 1 + (n-1)/d
 }
-func roundUp(n, unit uint64) uint64 { return ceilDiv(n, unit) * unit }

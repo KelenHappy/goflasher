@@ -26,7 +26,7 @@ func FuzzSWMPartName(f *testing.F) {
 		if len(name) > 1024 {
 			t.Skip()
 		}
-		n, ok := swmSequence(name)
+		n, ok := manifestKey(name).swmSequence()
 		if ok && n < 1 {
 			t.Fatalf("accepted invalid sequence %d", n)
 		}

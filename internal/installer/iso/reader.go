@@ -44,9 +44,32 @@ type Manifest struct{ Entries []Entry }
 
 type Reader struct {
 	source   io.ReaderAt
-	size     uint64
+	size     imageSize
 	retained io.Closer
 	manifest Manifest
+}
+
+// imageSize is the byte length of the source image; every extent the reader
+// touches or reports must lie within it.
+type imageSize uint64
+
+func (s imageSize) contains(x Extent) bool {
+	return x.Offset <= uint64(s) && x.Length <= uint64(s)-x.Offset
+}
+
+// lba is a 2048-byte logical sector number; ISO9660 and UDF both address the
+// image in these units.
+type lba uint64
+
+// addressable reports whether the sector's byte offset fits in a uint64.
+func (n lba) addressable() bool { return uint64(n) <= ^uint64(0)/uint64(sectorSize) }
+
+func (n lba) offset() uint64 { return uint64(n) * uint64(sectorSize) }
+
+// extentData is a file body: its extents in order and the bytes they hold.
+type extentData struct {
+	extents []Extent
+	size    uint64
 }
 
 func invalid(format string, args ...any) error {
@@ -56,10 +79,11 @@ func invalid(format string, args ...any) error {
 // New completely parses and validates the immutable manifest before returning.
 // retained pins the caller's source object for both parsing and later extraction.
 func New(source io.ReaderAt, size int64, retained io.Closer) (*Reader, error) {
-	if err := validateSource(source, size, retained); err != nil {
+	n, err := sourceSize(source, size, retained)
+	if err != nil {
 		return nil, err
 	}
-	r := &Reader{source: source, size: uint64(size), retained: retained}
+	r := &Reader{source: source, size: n, retained: retained}
 	entries, err := r.parse()
 	if err != nil {
 		_ = retained.Close()
@@ -69,17 +93,19 @@ func New(source io.ReaderAt, size int64, retained io.Closer) (*Reader, error) {
 	return r, nil
 }
 
-func validateSource(source io.ReaderAt, size int64, retained io.Closer) error {
+// sourceSize validates New's arguments and converts the caller's size into
+// the imageSize every later bounds check works against.
+func sourceSize(source io.ReaderAt, size int64, retained io.Closer) (imageSize, error) {
 	if source == nil {
-		return invalid("invalid source")
+		return 0, invalid("invalid source")
 	}
 	if retained == nil {
-		return invalid("invalid source")
+		return 0, invalid("invalid source")
 	}
 	if size < 0 {
-		return invalid("invalid source")
+		return 0, invalid("invalid source")
 	}
-	return nil
+	return imageSize(size), nil
 }
 
 // parse prefers UDF when the image carries it: Windows media ship a UDF
@@ -114,65 +140,53 @@ func (r *Reader) Manifest() Manifest {
 }
 func (r *Reader) ReadAt(p []byte, off int64) (int, error) { return r.source.ReadAt(p, off) }
 
-func (r *Reader) bytes(off, length uint64) ([]byte, error) {
-	if !r.validRead(off, length) {
+func (r *Reader) bytes(x Extent) ([]byte, error) {
+	if !r.validRead(x) {
 		return nil, invalid("extent out of bounds")
 	}
-	b := make([]byte, length)
-	if _, err := r.source.ReadAt(b, int64(off)); err != nil {
+	b := make([]byte, x.Length)
+	if _, err := r.source.ReadAt(b, int64(x.Offset)); err != nil {
 		return nil, invalid("truncated extent: %v", err)
 	}
 	return b, nil
 }
 
-func (r *Reader) validRead(off, length uint64) bool {
-	if length > maxRead || off > r.size {
-		return false
+func (r *Reader) validRead(x Extent) bool { return x.Length <= maxRead && r.size.contains(x) }
+
+func (r *Reader) sector(n lba) ([]byte, error) {
+	if !n.addressable() {
+		return nil, invalid("sector overflow")
 	}
-	return length <= r.size-off
+	return r.bytes(Extent{Offset: n.offset(), Length: uint64(sectorSize)})
 }
 
-func (r *Reader) sector(n uint64) ([]byte, error) {
-	return r.bytes(n*uint64(sectorSize), uint64(sectorSize))
-}
-
-func (r *Reader) readExtents(es []Extent, size uint64) ([]byte, error) {
-	if size > maxRead {
+func (r *Reader) readData(d extentData) ([]byte, error) {
+	if d.size > maxRead {
 		return nil, invalid("directory too large")
 	}
-	out := make([]byte, 0, size)
-	for _, e := range es {
-		n := min(e.Length, size-uint64(len(out)))
-		b, err := r.bytes(e.Offset, n)
+	out := make([]byte, 0, d.size)
+	for _, e := range d.extents {
+		n := min(e.Length, d.size-uint64(len(out)))
+		b, err := r.bytes(Extent{Offset: e.Offset, Length: n})
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, b...)
-		if uint64(len(out)) == size {
+		if uint64(len(out)) == d.size {
 			break
 		}
 	}
-	if uint64(len(out)) != size {
+	if uint64(len(out)) != d.size {
 		return nil, invalid("short directory")
 	}
 	return out, nil
 }
 
-func decodeOSTA(b []byte) (string, error) {
-	if len(b) == 0 {
-		return "", invalid("empty UDF name")
-	}
-	switch b[0] {
-	case 8:
-		return string(b[1:]), nil
-	case 16:
-		return decodeUCS2BE(b[1:]), nil
-	default:
-		return "", invalid("UDF name encoding")
-	}
-}
+// ucs2BE is UCS-2 big-endian text, used by Joliet and by UDF's 16-bit OSTA
+// compressed names.
+type ucs2BE []byte
 
-func decodeUCS2BE(b []byte) string {
+func (b ucs2BE) String() string {
 	u := make([]uint16, 0, len(b)/2)
 	for len(b) >= 2 {
 		u = append(u, binary.BigEndian.Uint16(b))
@@ -181,40 +195,57 @@ func decodeUCS2BE(b []byte) string {
 	return string(utf16.Decode(u))
 }
 
-func decodeName(b []byte, joliet bool) string {
-	if !joliet {
-		return string(b)
-	}
-	return decodeUCS2BE(b)
-}
+// entryName is one decoded path component as the filesystem recorded it,
+// before it is checked for traversal.
+type entryName string
 
-func normalize(parent, name string) (string, error) {
-	if unsafeName(name) {
-		return "", invalid("unsafe path")
-	}
-	p := name
-	if parent != "" {
-		p = parent + "/" + name
-	}
-	p = path.Clean(p)
-	if escapesRoot(p) {
-		return "", invalid("traversal")
-	}
-	return p, nil
-}
-
-func unsafeName(name string) bool {
-	if name == "." || name == ".." {
+func (n entryName) unsafe() bool {
+	if n == "." || n == ".." {
 		return true
 	}
-	return path.IsAbs(name) || strings.ContainsAny(name, "\x00/\\")
+	return path.IsAbs(string(n)) || strings.ContainsAny(string(n), "\x00/\\")
 }
 
-func escapesRoot(p string) bool {
-	return p == ".." || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/")
+// entryPath is a cleaned, slash-separated path relative to the image root;
+// the root itself is the empty path.
+type entryPath string
+
+// child joins name under p, rejecting names that could escape the root.
+func (p entryPath) child(name entryName) (entryPath, error) {
+	if name.unsafe() {
+		return "", invalid("unsafe path")
+	}
+	joined := string(name)
+	if p != "" {
+		joined = string(p) + "/" + joined
+	}
+	c := entryPath(path.Clean(joined))
+	if c.escapesRoot() {
+		return "", invalid("traversal")
+	}
+	return c, nil
 }
 
-func fatPath(p string) string { return strings.ReplaceAll(p, "/", "\\") }
+func (p entryPath) escapesRoot() bool {
+	return p == ".." || strings.HasPrefix(string(p), "../") || strings.HasPrefix(string(p), "/")
+}
+
+func (p entryPath) fatPath() string { return strings.ReplaceAll(string(p), "/", "\\") }
+
+// foldKey is the name FAT32 sees once case and Unicode normalization are
+// folded away.
+func (p entryPath) foldKey() string { return norm.NFC.String(cases.Fold().String(string(p))) }
+
+// treePos is the directory a walker is visiting and how deep it is nested.
+type treePos struct {
+	path  entryPath
+	depth int
+}
+
+func (t treePos) tooDeep() bool { return t.depth > maxDepth }
+
+// descend is the position of the subdirectory p one level below t.
+func (t treePos) descend(p entryPath) treePos { return treePos{path: p, depth: t.depth + 1} }
 
 // extentSpan is one occupied byte range and the path that owns it.
 type extentSpan struct {
@@ -223,14 +254,14 @@ type extentSpan struct {
 }
 
 type validator struct {
-	size  uint64
-	paths map[string]bool
-	fold  map[string]string
+	size  imageSize
+	paths map[entryPath]bool
+	fold  map[string]entryPath
 	spans []extentSpan
 }
 
 func (r *Reader) validate(es []Entry) error {
-	v := &validator{size: r.size, paths: map[string]bool{}, fold: map[string]string{}}
+	v := &validator{size: r.size, paths: map[entryPath]bool{}, fold: map[string]entryPath{}}
 	for _, e := range es {
 		if err := v.checkEntry(e); err != nil {
 			return err
@@ -240,7 +271,7 @@ func (r *Reader) validate(es []Entry) error {
 }
 
 func (v *validator) checkEntry(e Entry) error {
-	if err := v.checkPath(e.Path); err != nil {
+	if err := v.checkPath(entryPath(e.Path)); err != nil {
 		return err
 	}
 	if e.Type != File && e.Type != Directory {
@@ -258,12 +289,12 @@ func (v *validator) checkEntry(e Entry) error {
 
 // checkPath rejects exact duplicates and names that collide once case and
 // Unicode normalization are folded, since FAT32 cannot tell them apart.
-func (v *validator) checkPath(p string) error {
+func (v *validator) checkPath(p entryPath) error {
 	if p == "" || v.paths[p] {
 		return invalid("duplicate path")
 	}
 	v.paths[p] = true
-	k := norm.NFC.String(cases.Fold().String(p))
+	k := p.foldKey()
 	if old, ok := v.fold[k]; ok && old != p {
 		return invalid("case or Unicode collision")
 	}
@@ -274,7 +305,7 @@ func (v *validator) checkPath(p string) error {
 func (v *validator) collectExtents(e Entry) (uint64, error) {
 	var total uint64
 	for _, x := range e.Extents {
-		if !v.inBounds(x) || total > x.Length+total {
+		if !v.size.contains(x) || total > x.Length+total {
 			return 0, invalid("extent overflow")
 		}
 		total += x.Length
@@ -283,10 +314,6 @@ func (v *validator) collectExtents(e Entry) (uint64, error) {
 		}
 	}
 	return total, nil
-}
-
-func (v *validator) inBounds(x Extent) bool {
-	return x.Offset <= v.size && x.Length <= v.size-x.Offset
 }
 
 // checkSpans rejects two paths claiming partially overlapping bytes. A single
