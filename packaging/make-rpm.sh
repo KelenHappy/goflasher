@@ -22,9 +22,10 @@ case "$arch" in
 esac
 
 install -Dm755 "$binary" "$stage/usr/bin/goflasher"
-if [[ -n "${LIBWIM_LIBRARY:-}" ]]; then
-  install -Dm755 "$LIBWIM_LIBRARY" "$stage/usr/lib/goflasher/lib/wimlib/1.14.5/libwim.so.15"
-  "$root/packaging/legal/install-wimlib-record.sh" "$stage/usr/share/doc/goflasher/third-party/wimlib-1.14.5"
+libwim_legal=
+if "$root/packaging/legal/links-wimlib.sh" "$binary"; then
+  libwim_legal=/usr/share/doc/goflasher/third-party/wimlib-1.14.5
+  "$root/packaging/legal/install-wimlib-record.sh" "$stage$libwim_legal"
 fi
 go build -trimpath -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \
@@ -38,13 +39,6 @@ install -Dm644 "$root/packaging/org.goflasher.usbwriter.svg" \
 # a %license file, so this copyright text also ships as a file.
 install -Dm644 "$root/LICENSE" "$stage/usr/share/doc/goflasher/copyright"
 WIMLIB_COMPLIANCE_RECORD=${WIMLIB_COMPLIANCE_RECORD:-} "$root/packaging/legal/verify-release.sh" "$stage"
-libwim_file=
-libwim_legal=
-if [[ -n "${LIBWIM_LIBRARY:-}" ]]; then
-  libwim_file=/usr/lib/goflasher/lib/wimlib/1.14.5/libwim.so.15
-  libwim_legal=/usr/share/doc/goflasher/third-party/wimlib-1.14.5
-fi
-
 mkdir -p "$topdir/BUILD" "$topdir/BUILDROOT" "$topdir/RPMS" \
   "$topdir/SOURCES" "$topdir/SPECS" "$topdir/SRPMS" "$output"
 cat >"$topdir/SPECS/goflasher.spec" <<EOF_SPEC
@@ -73,7 +67,6 @@ cp -a $stage/. %{buildroot}/
 %files
 %license /usr/share/doc/goflasher/copyright
 /usr/bin/goflasher
-$libwim_file
 $libwim_legal
 /usr/libexec/goflasher-helper
 /usr/share/polkit-1/actions/org.goflasher.usbwriter.policy

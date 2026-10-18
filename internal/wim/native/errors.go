@@ -1,5 +1,5 @@
-// Package native contains the Unix bundled-libwim bridge's public errors.
-// Its loader implementation is excluded from Windows builds.
+// Package native contains the Unix wimlib bridge's public errors.
+// Its cgo implementation is excluded from Windows builds.
 package native
 
 import "errors"
@@ -12,6 +12,6 @@ const (
 var (
 	ErrUnsupported   = errors.New("bundled libwim is unavailable or incompatible")
 	ErrABIMismatch   = errors.New("bundled libwim ABI/version mismatch")
-	ErrInvalidPath   = errors.New("libwim path is not application-controlled")
+	ErrInvalidPath   = errors.New("libwim path argument contains NUL")
 	ErrLibraryClosed = errors.New("libwim library is closed")
 )

@@ -1,5 +1,6 @@
 // Package wim splits Windows images using the platform backend: trusted system
-// DISM on Windows and GoFlasher's bundled libwim on Linux and macOS.
+// DISM on Windows and the wimlib statically linked into GoFlasher on Linux
+// and macOS.
 package wim
 
 import (

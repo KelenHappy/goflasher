@@ -15,10 +15,9 @@ OUTPUT=$6
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
-# libwim is optional: without it the package remains raw-writer-only and the
-# Windows-installer builder fails closed. The release workflow passes it only
-# when the MACOS_WINDOWS_BUILDER_READY gate is approved.
-LIBWIM_DYLIB=${LIBWIM_DYLIB:-}
+# wimlib is optional: a GUI built without the wimlib tag is raw-writer-only and
+# the Windows-installer builder fails closed. The release workflow links it in
+# only when the MACOS_WINDOWS_BUILDER_READY gate is approved.
 WIMLIB_COMPLIANCE_RECORD=${WIMLIB_COMPLIANCE_RECORD:-}
 
 case "$ARCH" in
@@ -44,14 +43,12 @@ esac
   exit 66
 }
 
-if [[ -n "$LIBWIM_DYLIB" ]]; then
-  [[ -f "$LIBWIM_DYLIB" ]] || {
-    echo "libwim dylib not found: $LIBWIM_DYLIB" >&2
-    exit 66
-  }
+LINKED_WIMLIB=
+if "$ROOT/packaging/legal/links-wimlib.sh" "$GUI"; then
+  LINKED_WIMLIB=1
 
   [[ -n "$WIMLIB_COMPLIANCE_RECORD" && -d "$WIMLIB_COMPLIANCE_RECORD" ]] || {
-    echo "approved WIMLIB_COMPLIANCE_RECORD is required when bundling libwim" >&2
+    echo "approved WIMLIB_COMPLIANCE_RECORD is required when wimlib is linked in" >&2
     exit 65
   }
 fi
@@ -84,7 +81,6 @@ rm -rf "$APP"
 
 mkdir -p \
   "$CONTENTS/MacOS" \
-  "$CONTENTS/Frameworks" \
   "$CONTENTS/Library/HelperTools" \
   "$CONTENTS/Resources/legal"
 
@@ -104,74 +100,16 @@ install -m644 \
   "$CONTENTS/Resources/legal/LICENSE"
 
 #
-# Bundle libwim when provided.
+# Ship wimlib's notices and compliance record when it is linked in.
 #
 
-DYLIB="$CONTENTS/Frameworks/libwim.15.dylib"
-
-if [[ -n "$LIBWIM_DYLIB" ]]; then
-  install -m755 \
-    "$LIBWIM_DYLIB" \
-    "$DYLIB"
-
+if [[ -n "$LINKED_WIMLIB" ]]; then
   WIMLIB_COMPLIANCE_RECORD="$WIMLIB_COMPLIANCE_RECORD" \
     "$ROOT/packaging/legal/install-wimlib-record.sh" \
     "$CONTENTS/Resources/legal/wimlib-1.14.5"
-
-  #
-  # Validate architecture.
-  #
-
-  DYLIB_ARCHS=$(lipo -archs "$DYLIB")
-
-  if [[ " $DYLIB_ARCHS " != *" $PLIST_ARCH "* ]]; then
-    echo \
-      "libwim does not contain required architecture $PLIST_ARCH: $DYLIB_ARCHS" \
-      >&2
-    exit 65
-  fi
-
-  #
-  # Ensure a private bundle-relative install name.
-  #
-
-  install_name_tool \
-    -id '@rpath/libwim.15.dylib' \
-    "$DYLIB"
-
-  #
-  # Reject dependencies that could escape the application bundle.
-  #
-
-  while IFS= read -r dependency; do
-    case "$dependency" in
-      '@rpath/'* | '@loader_path/'* | /usr/lib/* | /System/Library/*)
-        ;;
-      *)
-        echo "unsafe libwim dependency: $dependency" >&2
-        exit 65
-        ;;
-    esac
-  done < <(
-    otool -L "$DYLIB" |
-      tail -n +2 |
-      awk '{print $1}'
-  )
-
-  #
-  # The executable must know where its bundled dylib lives.
-  #
-
-  if ! otool -l "$CONTENTS/MacOS/GoFlasher" |
-    grep -Fq '@executable_path/../Frameworks'; then
-
-    install_name_tool \
-      -add_rpath '@executable_path/../Frameworks' \
-      "$CONTENTS/MacOS/GoFlasher"
-  fi
 else
   echo \
-    "LIBWIM_DYLIB is empty; macOS Windows-installer building remains unavailable in this package" \
+    "GUI is built without wimlib; macOS Windows-installer building remains unavailable in this package" \
     >&2
 fi
 
@@ -232,11 +170,6 @@ WIMLIB_COMPLIANCE_RECORD="$WIMLIB_COMPLIANCE_RECORD" \
 #
 
 if [[ -n "$SIGN_ID" ]]; then
-  if [[ -n "$LIBWIM_DYLIB" ]]; then
-    codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$DYLIB"
-    codesign --verify --strict --verbose=2 "$DYLIB"
-  fi
-
   codesign --force --timestamp --options runtime --sign "$SIGN_ID" \
     "$CONTENTS/Library/HelperTools/org.goflasher.helper"
   codesign --verify --strict --verbose=2 \

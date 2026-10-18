@@ -9,4 +9,4 @@ WIMLIB_SOURCE_SHA256=84221a3abd5b91228f15f8e6065c335a336237b5738197b75bf419eea56
 LINUX_TOOLCHAIN=ubuntu-24.04-clang-18
 MACOS_TOOLCHAIN=xcode-16.4-apple-clang
 # Space-delimited long options; lock.sh validates and converts these to an array.
-CONFIGURE_FLAGS=--disable-static --enable-shared --without-ntfs-3g --without-fuse
+CONFIGURE_FLAGS=--enable-static --disable-shared --without-ntfs-3g --without-fuse

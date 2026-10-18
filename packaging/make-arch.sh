@@ -21,8 +21,7 @@ case "$arch" in
 esac
 
 install -Dm755 "$binary" "$stage/usr/bin/goflasher"
-if [[ -n "${LIBWIM_LIBRARY:-}" ]]; then
-  install -Dm755 "$LIBWIM_LIBRARY" "$stage/usr/lib/goflasher/lib/wimlib/1.14.5/libwim.so.15"
+if "$root/packaging/legal/links-wimlib.sh" "$binary"; then
   "$root/packaging/legal/install-wimlib-record.sh" "$stage/usr/share/doc/goflasher/third-party/wimlib-1.14.5"
 fi
 go build -trimpath -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"

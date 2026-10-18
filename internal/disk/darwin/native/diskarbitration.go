@@ -201,15 +201,17 @@ func (s *Session) emitDiagnostic(d descriptionDiagnostics) {
 	}
 }
 
+// goCString copies a NUL-terminated C string of at most maxCString bytes. It
+// reads one byte at a time so it never forms a slice past the string's
+// allocation.
 func goCString(p *byte) string {
 	if p == nil {
 		return ""
 	}
 	const maxCString = 4096
-	b := unsafe.Slice(p, maxCString)
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
+	for n := 0; n < maxCString; n++ {
+		if *(*byte)(unsafe.Add(unsafe.Pointer(p), n)) == 0 {
+			return string(unsafe.Slice(p, n))
 		}
 	}
 	return ""

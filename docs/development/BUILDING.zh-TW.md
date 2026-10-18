@@ -65,13 +65,11 @@ identity-bound的raw descriptor，並只透過in-process、partition-bounded FAT
 在authenticated helper/XPC接管destructive raw access並通過實體媒體gate以前，
 公開release不得宣稱或啟用此builder。
 
-可建立installer的app bundle必須以`LIBWIM_DYLIB`提供固定版本且architecture相符
-（或universal）的`libwim.15.dylib`。Packaging只把它放入`Contents/Frameworks`、
-設定`@rpath/libwim.15.dylib` install name、拒絕不安全的外部dependency，並依序簽署
-nested code與主app、notarize DMG及驗證staple。未提供library時，package只保留raw
-writer，WIM preflight會fail closed。
+可建立installer的app bundle會把固定版本的wimlib靜態連結進GUI執行檔（見下方
+「Linux與macOS的WIM分割」），bundle裡不放任何libwim檔案。未帶`wimlib` build tag
+編譯的GUI只保留raw writer，WIM preflight會fail closed。
 Code signing本身不會啟用builder；公開macOS workflow只在獨立的
-`MACOS_WINDOWS_BUILDER_READY`核准gate為true時傳入library。在authenticated helper/XPC
+`MACOS_WINDOWS_BUILDER_READY`核准gate為true時才連結wimlib。在authenticated helper/XPC
 與實體媒體驗收核准以前，signed release仍只提供raw writer。
 
 ## 從原始碼建置
@@ -93,6 +91,29 @@ sudo install -m 0644 packaging/org.goflasher.usbwriter.policy \
 ```
 
 開發時可執行 `go run -tags fyne ./cmd/usbwriter`；不要以root建置或執行Linux GUI。
+
+### Linux與macOS的WIM分割
+
+Linux與macOS以wimlib 1.14.5分割`install.wim`。GUI以`wimlib` build tag編譯時，
+wimlib會透過cgo靜態連結進執行檔（`internal/wim/native/link_wimlib.go`），執行時
+不載入任何libwim檔案。沒有這個tag時，`internal/wim/native`改編stub，installer
+builder回報無法使用，因此`go test ./...`與一般開發建置都不需要wimlib。
+
+建置設定固定在`packaging/wimlib/BUILD.lock`，只產生靜態的`libwim.a`，且可重現：
+同一份lock重複建置會得到相同的SHA-256。在固定的toolchain上建立可製作installer的GUI：
+
+```sh
+src=$(packaging/wimlib/fetch.sh /tmp/wimlib-src)
+packaging/wimlib/build.sh "$src" /tmp/wimlib
+CGO_CFLAGS=-I/tmp/wimlib/include CGO_LDFLAGS=-L/tmp/wimlib/lib \
+  go build -trimpath -tags fyne,no_emoji,wimlib -o dist/goflasher ./cmd/usbwriter
+```
+
+Release workflow只在`LINUX_WINDOWS_BUILDER_READY`或`MACOS_WINDOWS_BUILDER_READY`
+為true時這樣做，並要求repository variable `WIMLIB_COMPLIANCE_RECORD_PATH`（checkout
+內的路徑）；`libwim.a`的SHA-256不在該紀錄的`artifact.sha256`中就拒絕連結，並把紀錄
+安裝到應用程式旁。打包腳本以`packaging/legal/links-wimlib.sh`偵測執行檔是否連結
+wimlib，沒有紀錄就拒絕打包。
 
 Windows：
 

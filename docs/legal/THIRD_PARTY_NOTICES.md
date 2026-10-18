@@ -26,14 +26,12 @@ application bundle, package, or accompanying documentation.
 
 ## github.com/ebitengine/purego
 
-- Purpose: dynamic-library bridge for bundled libwim on Linux and macOS, and
-  bindings to documented macOS system frameworks without CGo
+- Purpose: bindings to documented macOS system frameworks without CGo
 - Version: v0.10.2 (from `go.mod`)
 - License: Apache License 2.0
 - Upstream: <https://github.com/ebitengine/purego>
 
-GoFlasher uses PureGo in both Linux and macOS libwim bridges and in its macOS
-native adapter. PureGo contains code derived from the Go runtime; those portions
+GoFlasher uses PureGo in its macOS native adapter. PureGo contains code derived from the Go runtime; those portions
 are covered by the Go project's BSD 3-Clause license.
 
 Builds containing PureGo must carry:
@@ -53,7 +51,8 @@ at `/usr/share/doc/goflasher/copyright`, Arch packages at
 ## wimlib / libwim — NOT YET CLEARED FOR RELEASE
 
 - Intended version: 1.14.5
-- Intended purpose: open and split WIM files through the PureGo bridge
+- Intended purpose: open and split WIM files; linked statically into the
+  Linux and macOS GUI executable through cgo
 - Library license: LGPL-2.1-or-later
 - Compatibility: compatible with distribution as part of GoFlasher under
   GPL-3.0, subject to the artifact-specific conditions below
@@ -66,13 +65,15 @@ source-header and license/notice file, build configuration, enabled optional
 features, and every linked or bundled native transitive dependency. Each
 transitive component retains its own license and obligations.
 
-The release record must also contain the source and binary SHA-256 values,
+The release record must also contain the source and static-archive
+(`libwim.a`) SHA-256 values,
 toolchain and linker versions, flags, downstream patches, dependency report,
 license texts, legal approval, and a tested Corresponding Source offer/location
 including build/install scripts and any material needed for relinking where
-applicable. The package must preserve LGPL notices and license text, permit
-replacement of the shared library, and must not prohibit reverse engineering
-for debugging modifications to the library. Until those facts and obligations
+applicable. The package must preserve LGPL notices and license text, provide what is
+needed to relink GoFlasher with a modified wimlib (the complete Corresponding
+Source and build scripts), and must not prohibit reverse engineering for
+debugging modifications to the library. Until those facts and obligations
 are verified against the actual release artifact, libwim distribution is
 blocked; GoFlasher must report the Windows builder as unavailable.
 

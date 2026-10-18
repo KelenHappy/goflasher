@@ -2,44 +2,41 @@
 
 // Package native is the Unix-only package that owns libwim native handles.
 //
-// Function declarations below are transcribed from the bundled wimlib 1.14.5
-// include/wimlib.h. C int and enum values are int32, uint64_t is uint64, and
-// WIMStruct pointers and TCHAR pointers are represented by uintptr.
+// wimlib 1.14.5 is linked statically through cgo when the binary is built
+// with the wimlib build tag; see link_wimlib.go. Without that tag Open
+// reports ErrUnsupported and the installer builder stays unavailable.
 package native
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
-
-	"github.com/ebitengine/purego"
 )
 
-const maxCStringResultSize = 4096
-
+// functions holds the wimlib entry points as Go values so the handle and
+// locking logic below can be tested without linking wimlib. WIMStruct
+// pointers are carried as uintptr and never dereferenced on the Go side.
 type functions struct {
 	// int wimlib_global_init(int)
 	globalInit func(int32) int32
 	// uint32_t wimlib_get_version(void)
 	getVersion func() uint32
 	// const tchar *wimlib_get_version_string(void)
-	getVersionString func() uintptr
+	getVersionString func() string
 	// int wimlib_open_wim(const tchar *, int, WIMStruct **)
-	openWIM func(uintptr, int32, *uintptr) int32
+	openWIM func(string, int32) (uintptr, int32)
 	// int wimlib_split(WIMStruct *, const tchar *, uint64_t, int)
-	split func(uintptr, uintptr, uint64, int32) int32
+	split func(uintptr, string, uint64, int32) int32
 	// void wimlib_free(WIMStruct *)
 	free func(uintptr)
 	// void wimlib_global_cleanup(void)
 	globalCleanup func()
 	// const tchar *wimlib_get_error_string(enum wimlib_error_code)
-	errorString func(int32) uintptr
+	errorString func(int32) string
 }
 
 type Library struct {
 	mu          sync.Mutex
-	handle      uintptr
 	fn          functions
 	initialized bool
 	closed      bool
@@ -56,100 +53,36 @@ type Image struct {
 	closed bool
 }
 
-// Open loads only a canonical absolute libraryPath contained by allowedRoot.
-// It never asks the dynamic loader to search cwd, LD_LIBRARY_PATH, or system
-// library directories.
-func Open(libraryPath, allowedRoot string) (*Library, error) {
-	canonical, err := controlledPath(libraryPath, allowedRoot)
+// Open initializes the wimlib linked into this binary and checks that it is
+// the reviewed release.
+func Open() (*Library, error) {
+	fn, err := linkedFunctions()
 	if err != nil {
 		return nil, err
 	}
-	handle, err := openLibrary(canonical)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnsupported, err)
-	}
-	l := &Library{handle: handle}
-	if err := l.bind(); err != nil {
-		_ = closeLibrary(handle)
-		return nil, err
-	}
+	l := &Library{fn: fn}
 	globalMu.Lock()
 	l.globalLock = true
 	if code := l.fn.globalInit(0); code != 0 {
 		initErr := l.nativeError("wimlib_global_init", code)
 		l.releaseGlobalLock()
-		_ = closeLibrary(handle)
 		return nil, initErr
 	}
 	l.initialized = true
 	versionCode := l.fn.getVersion()
-	versionString := goCString(l.fn.getVersionString())
+	versionString := l.fn.getVersionString()
 	if versionCode != BundledVersionCode || versionString != BundledVersion {
 		l.fn.globalCleanup()
 		l.releaseGlobalLock()
-		_ = closeLibrary(handle)
-		return nil, fmt.Errorf("%w: %w: got version %s (0x%x), need %s (0x%x)", ErrUnsupported, ErrABIMismatch, versionString, versionCode, BundledVersion, BundledVersionCode)
+		return nil, fmt.Errorf("%w: %w: %s reports version %s (0x%x), need %s (0x%x)", ErrUnsupported, ErrABIMismatch, linkage, versionString, versionCode, BundledVersion, BundledVersionCode)
 	}
 	return l, nil
 }
 
-func controlledPath(name, root string) (string, error) {
-	if !filepath.IsAbs(name) || !filepath.IsAbs(root) {
-		return "", ErrInvalidPath
-	}
-	resolvedRoot, err := resolvePath(root)
-	if err != nil {
-		return "", err
-	}
-	resolvedName, err := resolvePath(name)
-	if err != nil {
-		return "", err
-	}
-	if !containedBy(resolvedRoot, resolvedName) {
-		return "", ErrInvalidPath
-	}
-	return resolvedName, nil
-}
-
-// resolvePath cleans path and follows every symlink in it.
-func resolvePath(path string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidPath, err)
-	}
-	return resolved, nil
-}
-
-// containedBy reports whether path is root itself or lives beneath it. Both
-// arguments must already be resolved by resolvePath.
-func containedBy(root, path string) bool {
-	rel, err := filepath.Rel(root, path)
-	if err != nil || filepath.IsAbs(rel) {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func (l *Library) bind() error {
-	bindings := []struct {
-		name string
-		out  any
-	}{
-		{"wimlib_global_init", &l.fn.globalInit},
-		{"wimlib_get_version", &l.fn.getVersion},
-		{"wimlib_get_version_string", &l.fn.getVersionString},
-		{"wimlib_open_wim", &l.fn.openWIM},
-		{"wimlib_split", &l.fn.split},
-		{"wimlib_free", &l.fn.free},
-		{"wimlib_global_cleanup", &l.fn.globalCleanup},
-		{"wimlib_get_error_string", &l.fn.errorString},
-	}
-	for _, binding := range bindings {
-		address, err := lookupSymbol(l.handle, binding.name)
-		if err != nil || address == 0 {
-			return fmt.Errorf("%w: required symbol %s", ErrUnsupported, binding.name)
-		}
-		purego.RegisterFunc(binding.out, address)
+// checkPath rejects a path that C would silently truncate at an embedded NUL.
+func checkPath(path string) error {
+	if strings.ContainsRune(path, 0) {
+		return ErrInvalidPath
 	}
 	return nil
 }
@@ -160,13 +93,10 @@ func (l *Library) OpenWIM(path string) (*Image, error) {
 	if l.closed {
 		return nil, ErrLibraryClosed
 	}
-	cpath, err := makeNativeString(path)
-	if err != nil {
+	if err := checkPath(path); err != nil {
 		return nil, err
 	}
-	var handle uintptr
-	code := l.fn.openWIM(cpath.pointer, 0, &handle)
-	cpath.keepAlive()
+	handle, code := l.fn.openWIM(path, 0)
 	if code != 0 || handle == 0 {
 		return nil, l.nativeError("wimlib_open_wim", code)
 	}
@@ -185,13 +115,10 @@ func (i *Image) Split(output string, partSize uint64) error {
 	if i.lib.closed {
 		return ErrLibraryClosed
 	}
-	coutput, err := makeNativeString(output)
-	if err != nil {
+	if err := checkPath(output); err != nil {
 		return err
 	}
-	code := i.lib.fn.split(i.handle, coutput.pointer, partSize, 0)
-	coutput.keepAlive()
-	if code != 0 {
+	if code := i.lib.fn.split(i.handle, output, partSize, 0); code != 0 {
 		return i.lib.nativeError("wimlib_split", code)
 	}
 	return nil
@@ -231,11 +158,6 @@ func (l *Library) Close() error {
 		l.initialized = false
 	}
 	l.releaseGlobalLock()
-	if l.handle != 0 {
-		err := closeLibrary(l.handle)
-		l.handle = 0
-		return err
-	}
 	return nil
 }
 
@@ -249,7 +171,7 @@ func (l *Library) releaseGlobalLock() {
 func (l *Library) nativeError(operation string, code int32) error {
 	message := "unknown libwim error"
 	if l.fn.errorString != nil {
-		if value := goCString(l.fn.errorString(code)); value != "" {
+		if value := l.fn.errorString(code); value != "" {
 			message = value
 		}
 	}

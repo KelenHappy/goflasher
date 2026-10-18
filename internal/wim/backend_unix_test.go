@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/goflasher/goflasher/internal/wim/native"
 )
 
 type fakeLibrary struct {
@@ -48,14 +50,11 @@ func (f *fakeImage) Split(output string, _ uint64) error {
 }
 func (f *fakeImage) Close() error { f.closeCalls++; return nil }
 
-func withFakeNative(t *testing.T, fn func(string, string) (nativeLibrary, error)) {
+func withFakeNative(t *testing.T, fn func() (nativeLibrary, error)) {
 	t.Helper()
-	old, oldLocator := openNative, locateBundledLibrary
+	old := openNative
 	openNative = fn
-	locateBundledLibrary = func() (string, string, error) {
-		return filepath.Join(t.TempDir(), "libwim-test"), t.TempDir(), nil
-	}
-	t.Cleanup(func() { openNative, locateBundledLibrary = old, oldLocator })
+	t.Cleanup(func() { openNative = old })
 }
 func splitPaths(t *testing.T) (string, string) {
 	t.Helper()
@@ -71,37 +70,14 @@ func splitPaths(t *testing.T) (string, string) {
 	return source, output
 }
 
-func TestDarwinLibraryPathIsFixedInsideApplicationBundle(t *testing.T) {
-	path, root, err := bundledLibraryPathFor("/Applications/GoFlasher.app/Contents/MacOS/GoFlasher", "darwin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if path != "/Applications/GoFlasher.app/Contents/Frameworks/libwim.15.dylib" || root != "/Applications/GoFlasher.app/Contents" {
-		t.Fatalf("path=%q root=%q", path, root)
-	}
-	if _, _, err := bundledLibraryPathFor("/tmp/GoFlasher", "darwin"); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("unbundled path error=%v", err)
-	}
-}
-
-func TestPackagedLinuxLibraryPathIsPrivate(t *testing.T) {
-	path, root, err := bundledLibraryPathFor("/usr/bin/goflasher", "linux")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if path != "/usr/lib/goflasher/lib/wimlib/1.14.5/libwim.so.15" || root != "/usr/lib/goflasher" {
-		t.Fatalf("path=%q root=%q", path, root)
-	}
-}
-
-func TestSplitRejectsNativeInitializationAndMissingSymbols(t *testing.T) {
+func TestSplitRejectsUnavailableNativeLibrary(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		err  error
-	}{{"global init failure", errors.New("init")}, {"required symbol missing", errors.New("symbol")}} {
+	}{{"global init failure", errors.New("init")}, {"built without wimlib", native.ErrUnsupported}} {
 		t.Run(tt.name, func(t *testing.T) {
 			source, output := splitPaths(t)
-			withFakeNative(t, func(string, string) (nativeLibrary, error) { return nil, tt.err })
+			withFakeNative(t, func() (nativeLibrary, error) { return nil, tt.err })
 			if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024}); !errors.Is(err, ErrUnsupported) {
 				t.Fatalf("error=%v", err)
 			}
@@ -112,7 +88,7 @@ func TestSplitRejectsNativeInitializationAndMissingSymbols(t *testing.T) {
 func TestSplitOpenFailureCleansUpLibrary(t *testing.T) {
 	source, output := splitPaths(t)
 	lib := &fakeLibrary{openErr: errors.New("open")}
-	withFakeNative(t, func(string, string) (nativeLibrary, error) { return lib, nil })
+	withFakeNative(t, func() (nativeLibrary, error) { return lib, nil })
 	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024}); err == nil {
 		t.Fatal("Split succeeded")
 	}
@@ -125,7 +101,7 @@ func TestSplitFailureClosesObjectsAndRemovesPartialParts(t *testing.T) {
 	source, output := splitPaths(t)
 	image := &fakeImage{splitErr: errors.New("split")}
 	lib := &fakeLibrary{image: image}
-	withFakeNative(t, func(string, string) (nativeLibrary, error) { return lib, nil })
+	withFakeNative(t, func() (nativeLibrary, error) { return lib, nil })
 	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024}); err == nil {
 		t.Fatal("Split succeeded")
 	}
@@ -139,7 +115,7 @@ func TestSplitReturnsContiguousPartsAndSynchronousProgress(t *testing.T) {
 	source, output := splitPaths(t)
 	image := &fakeImage{}
 	lib := &fakeLibrary{image: image}
-	withFakeNative(t, func(string, string) (nativeLibrary, error) { return lib, nil })
+	withFakeNative(t, func() (nativeLibrary, error) { return lib, nil })
 	var progress [][2]uint64
 	record := func(done, total uint64) { progress = append(progress, [2]uint64{done, total}) }
 	parts, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024, Progress: record})

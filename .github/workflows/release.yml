@@ -104,11 +104,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev rpm zstd
+      - name: Build approved wimlib
+        # Links the Windows-installer builder in only once the reviewed
+        # compliance record exists; otherwise the packages stay raw-writer-only.
+        if: vars.LINUX_WINDOWS_BUILDER_READY == 'true'
+        env:
+          WIMLIB_COMPLIANCE_RECORD: ${{ github.workspace }}/${{ vars.WIMLIB_COMPLIANCE_RECORD_PATH }}
+        run: |
+          set -euo pipefail
+          test -n "${{ vars.WIMLIB_COMPLIANCE_RECORD_PATH }}"
+          sudo apt-get install -y clang-18 make pkg-config
+          source_path=$(packaging/wimlib/fetch.sh "$RUNNER_TEMP")
+          packaging/wimlib/build.sh "$source_path" "$RUNNER_TEMP/wimlib"
+          packaging/legal/check-wimlib-archive.sh "$RUNNER_TEMP/wimlib/lib/libwim.a"
+          packaging/wimlib/verify.sh "$RUNNER_TEMP/wimlib" linux amd64 \
+            "$(awk '{print $1}' "$RUNNER_TEMP/wimlib/SHA256SUMS")" "$RUNNER_TEMP/wimlib/smoke.wim"
+          {
+            echo "CGO_CFLAGS=-I$RUNNER_TEMP/wimlib/include"
+            echo "CGO_LDFLAGS=-L$RUNNER_TEMP/wimlib/lib"
+            echo "GO_BUILD_TAGS=fyne,no_emoji,wimlib"
+            echo "WIMLIB_COMPLIANCE_RECORD=$WIMLIB_COMPLIANCE_RECORD"
+          } >> "$GITHUB_ENV"
       - name: Test and build
         run: |
           go test ./...
           mkdir -p dist
-          go build -trimpath -tags fyne,no_emoji -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
+          go build -trimpath -tags "${GO_BUILD_TAGS:-fyne,no_emoji}" -ldflags "-s -w" -o dist/goflasher ./cmd/usbwriter
+          if [[ "${{ vars.LINUX_WINDOWS_BUILDER_READY }}" == "true" ]]; then
+            packaging/legal/links-wimlib.sh dist/goflasher
+          fi
           go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
       - name: Build Debian package
         run: packaging/make-deb.sh dist/goflasher "$VERSION" dist
@@ -198,16 +222,38 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security import "$certificate" -k build.keychain -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+      - name: Build approved wimlib
+        # Same gate as the Linux job, with its own approval switch.
+        if: vars.MACOS_WINDOWS_BUILDER_READY == 'true'
+        env:
+          WIMLIB_COMPLIANCE_RECORD: ${{ github.workspace }}/${{ vars.WIMLIB_COMPLIANCE_RECORD_PATH }}
+        run: |
+          set -euo pipefail
+          test -n "${{ vars.WIMLIB_COMPLIANCE_RECORD_PATH }}"
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          source_path=$(packaging/wimlib/fetch.sh "$RUNNER_TEMP")
+          packaging/wimlib/build.sh "$source_path" "$RUNNER_TEMP/wimlib"
+          packaging/legal/check-wimlib-archive.sh "$RUNNER_TEMP/wimlib/lib/libwim.a"
+          packaging/wimlib/verify.sh "$RUNNER_TEMP/wimlib" macos "${{ matrix.arch }}" \
+            "$(awk '{print $1}' "$RUNNER_TEMP/wimlib/SHA256SUMS")" "$RUNNER_TEMP/wimlib/smoke.wim"
+          {
+            echo "CGO_CFLAGS=-I$RUNNER_TEMP/wimlib/include"
+            echo "CGO_LDFLAGS=-L$RUNNER_TEMP/wimlib/lib"
+            echo "GO_BUILD_TAGS=fyne,no_emoji,wimlib"
+            echo "WIMLIB_COMPLIANCE_RECORD=$WIMLIB_COMPLIANCE_RECORD"
+          } >> "$GITHUB_ENV"
       - name: Build app and helper
         run: |
           set -euo pipefail
           mkdir -p dist
-          go build -trimpath -tags fyne,no_emoji -ldflags "-s -w" -o dist/GoFlasher ./cmd/usbwriter
+          go build -trimpath -tags "${GO_BUILD_TAGS:-fyne,no_emoji}" -ldflags "-s -w" -o dist/GoFlasher ./cmd/usbwriter
+          if [[ "${{ vars.MACOS_WINDOWS_BUILDER_READY }}" == "true" ]]; then
+            packaging/legal/links-wimlib.sh dist/GoFlasher
+          fi
           go build -trimpath -ldflags "-s -w" -o dist/goflasher-helper ./cmd/goflasher-helper
       - name: Package DMG
         env:
           SIGN_IDENTITY: ${{ vars.MACOS_PRODUCTION_READY == 'true' && secrets.MACOS_DEVELOPER_ID_APPLICATION || '' }}
-          LIBWIM_DYLIB: ${{ vars.MACOS_WINDOWS_BUILDER_READY == 'true' && vars.MACOS_LIBWIM_DYLIB_PATH || '' }}
           APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
@@ -230,9 +276,6 @@ jobs:
           test -x "$mount/GoFlasher.app/Contents/MacOS/GoFlasher"
           test -x "$mount/GoFlasher.app/Contents/Library/HelperTools/org.goflasher.helper"
           packaging/legal/verify-release.sh "$mount/GoFlasher.app"
-          if [[ "${{ vars.MACOS_WINDOWS_BUILDER_READY }}" == "true" ]]; then
-            test -x "$mount/GoFlasher.app/Contents/Frameworks/libwim.15.dylib"
-          fi
           plutil -lint "$mount/GoFlasher.app/Contents/Info.plist"
       - name: Generate checksum
         run: shasum -a 256 "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg" > "dist/GoFlasher-${VERSION}-${{ matrix.arch }}.dmg.sha256"

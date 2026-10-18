@@ -24,7 +24,8 @@ on Linux, Windows, and macOS.**
   disk with one FAT32 partition, an `install.wim` larger than 4 GiB split into
   `.swm` parts, and a file-by-file read-back verification. Windows hosts split
   with the system DISM; Linux and macOS packages offer the builder only when
-  they bundle the pinned libwim, and otherwise refuse before touching the disk.
+  they are built with the pinned wimlib linked in, and otherwise refuse before
+  touching the disk.
 - Show writing and verification progress, throughput, and estimated time.
 - Cancel an active operation.
 - Optionally power off the USB device after a successful write.

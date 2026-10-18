@@ -21,13 +21,12 @@
 
 ## github.com/ebitengine/purego
 
-- 用途：Linux及macOS bundled libwim dynamic-library bridge，以及不使用CGo的
-  macOS system framework binding
+- 用途：不使用CGo的macOS system framework binding
 - 版本：v0.10.2（來自 `go.mod`）
 - 授權：Apache License 2.0
 - 上游：<https://github.com/ebitengine/purego>
 
-GoFlasher在Linux與macOS libwim bridge及macOS native adapter使用PureGo。PureGo
+GoFlasher在macOS native adapter使用PureGo。PureGo
 包含衍生自Go runtime的程式碼；該部分適用Go專案BSD 3-Clause條款。
 
 包含 PureGo 的版本必須包含：
@@ -46,7 +45,7 @@ GoFlasher在Linux與macOS libwim bridge及macOS native adapter使用PureGo。Pur
 ## wimlib / libwim — 尚未核准發布
 
 - 預定版本：1.14.5
-- 預定用途：透過PureGo bridge開啟及分割WIM
+- 預定用途：開啟及分割WIM；透過cgo靜態連結進Linux與macOS的GUI執行檔
 - Library授權：LGPL-2.1-or-later
 - 相容性：可作為GoFlasher的一部分依GPL-3.0散布，但必須滿足下列artifact-specific條件
 
@@ -54,9 +53,9 @@ LGPL-2.1-or-later分類適用於wimlib 1.14.5 library，不會把GoFlasher、opt
 或native transitive dependency重新分類。發布前必須以實際bundled artifact核對精確source
 snapshot、全部適用source header與license/notice、build configuration、啟用的optional
 feature，以及每個實際link或bundle的native transitive dependency。Release record亦須保存
-source/binary SHA-256、toolchain/linker版本、flags、patch、dependency report、license text、
+source與靜態archive（`libwim.a`）的SHA-256、toolchain/linker版本、flags、patch、dependency report、license text、
 legal approval，以及已驗證可取得且包含build/install與適用relink材料的Corresponding
-Source。Package必須保留LGPL notice與license text、允許替換shared library，且不得禁止為
+Source。Package必須保留LGPL notice與license text、提供以修改版wimlib重新連結GoFlasher所需的材料（完整Corresponding Source與build script），且不得禁止為
 debug library修改而進行reverse engineering。在完成artifact-specific驗證前禁止散布libwim，
 Windows builder必須顯示unavailable。
 

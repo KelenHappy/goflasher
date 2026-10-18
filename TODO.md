@@ -39,10 +39,16 @@ Proposed fix (each part needs a security review):
 
 ### 2. Shipping the installer builder
 
-- [ ] Linux packages offer the builder only when `LIBWIM_LIBRARY` is bundled.
-      wimlib is still marked "NOT YET CLEARED FOR RELEASE"
+- [ ] wimlib is linked statically into the GUI (`wimlib` build tag), and the
+      Linux and macOS release jobs build it when `LINUX_WINDOWS_BUILDER_READY`
+      or `MACOS_WINDOWS_BUILDER_READY` is true. What is still missing is the
+      compliance record at `WIMLIB_COMPLIANCE_RECORD_PATH`: the approved
+      `libwim.a` hash, dependency report, Corresponding Source location and
+      legal approval. wimlib is still marked "NOT YET CLEARED FOR RELEASE"
       (`docs/legal/THIRD_PARTY_NOTICES.md`, `docs/legal/RELEASE-COMPLIANCE.md`).
-      Without it the builder refuses before touching the disk.
+- [ ] The static wimlib build is verified only on Linux (Ubuntu 24.04
+      container). Confirm that the macOS jobs in `wimlib.yml` pass and that
+      `ZERO_AR_DATE` makes `libwim.a` reproducible under Xcode 16.4.
 
 ### 3. FAT32 format sector-size check
 
@@ -63,7 +69,15 @@ Proposed fix (each part needs a security review):
       `-race` before any of the recent changes, because Fyne's test driver runs
       `fyne.Do` inline and does not serialize it. CI runs these tests without
       `-race`. Fix them or document why race checking is skipped here.
+
+## All platforms
+
 - [ ] `gofmt` reports `internal/legal/legal.go`.
+- [ ] The legal docs list purego v0.10.2, but `go.mod` pins v0.11.1
+      (`docs/legal/THIRD_PARTY_NOTICES.md`, its zh-TW copy, and
+      `docs/legal/RELEASE-COMPLIANCE.md`).
+- [ ] CI does not run `shellcheck`. The `packaging/` scripts have only been
+      checked with `bash -n`.
 
 ## Windows
 

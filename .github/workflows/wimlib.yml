@@ -6,6 +6,7 @@ on:
       - 'packaging/wimlib/**'
       - 'internal/wim/**'
       - 'cmd/wim-smoke/**'
+      - 'packaging/legal/links-wimlib.sh'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/wimlib.yml'
@@ -69,34 +70,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          lock=packaging/wimlib/BUILD.lock
-
-          # Parse BUILD.lock as data. Never source the lock file itself.
-          source packaging/wimlib/lock.sh
-          load_wimlib_lock "$lock"
-
-          source_path="$RUNNER_TEMP/$WIMLIB_SOURCE"
-
-          curl \
-            --fail \
-            --location \
-            --proto '=https' \
-            --tlsv1.2 \
-            "$WIMLIB_SOURCE_URL" \
-            -o "$source_path"
-
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual=$(sha256sum "$source_path" | awk '{print $1}')
-          else
-            actual=$(shasum -a 256 "$source_path" | awk '{print $1}')
-          fi
-
-          if [[ "$actual" != "$WIMLIB_SOURCE_SHA256" ]]; then
-            echo "wimlib source hash mismatch" >&2
-            echo "expected: $WIMLIB_SOURCE_SHA256" >&2
-            echo "actual:   $actual" >&2
-            exit 65
-          fi
+          source_path=$(packaging/wimlib/fetch.sh "$RUNNER_TEMP")
 
           printf 'WIMLIB_SOURCE_PATH=%s\n' \
             "$source_path" >> "$GITHUB_ENV"
@@ -115,31 +89,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          library=$(
-            find "$RUNNER_TEMP/wimlib-out" \
-              -maxdepth 1 \
-              -type f \
-              \( \
-                -name 'libwim.so.15' \
-                -o \
-                -name 'libwim.15.dylib' \
-              \) \
-              -print \
-              -quit
-          )
-
-          if [[ -z "$library" ]]; then
-            echo "libwim artifact not found" >&2
-            exit 65
-          fi
-
           hash=$(
             awk '{print $1}' \
               "$RUNNER_TEMP/wimlib-out/SHA256SUMS"
           )
 
           packaging/wimlib/verify.sh \
-            "$library" \
+            "$RUNNER_TEMP/wimlib-out" \
             '${{ matrix.os }}' \
             '${{ matrix.arch }}' \
             "$hash" \

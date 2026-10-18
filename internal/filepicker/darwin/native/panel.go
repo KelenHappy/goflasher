@@ -22,6 +22,7 @@ type objcAPI struct {
 	selector   func(*byte) uintptr
 	msg0       func(uintptr, uintptr) uintptr
 	msg1ptr    func(uintptr, uintptr, uintptr) uintptr
+	msg1UTF8   func(uintptr, uintptr, *byte) uintptr
 	msg1bool   func(uintptr, uintptr, bool)
 	msgUTF8    func(uintptr, uintptr) *byte
 	msgInteger func(uintptr, uintptr) int64
@@ -84,6 +85,7 @@ func loadObjC() (objcAPI, func(), error) {
 	// Objective-C's objc_msgSend ABI is registered with each signature used.
 	purego.RegisterLibFunc(&api.msg0, objc, "objc_msgSend")
 	purego.RegisterLibFunc(&api.msg1ptr, objc, "objc_msgSend")
+	purego.RegisterLibFunc(&api.msg1UTF8, objc, "objc_msgSend")
 	purego.RegisterLibFunc(&api.msg1bool, objc, "objc_msgSend")
 	purego.RegisterLibFunc(&api.msgUTF8, objc, "objc_msgSend")
 	purego.RegisterLibFunc(&api.msgInteger, objc, "objc_msgSend")
@@ -127,7 +129,9 @@ func newOpenPanel(api objcAPI, classes appKitClasses, title string) (uintptr, er
 	if title == "" {
 		return panel, nil
 	}
-	nsTitle := api.msg1ptr(classes.nsString, sel(api, "stringWithUTF8String:"), uintptr(unsafe.Pointer(cString(title))))
+	// The title is Go memory: passing it as *byte rather than uintptr keeps it
+	// alive until objc_msgSend returns.
+	nsTitle := api.msg1UTF8(classes.nsString, sel(api, "stringWithUTF8String:"), cString(title))
 	if nsTitle == 0 {
 		return 0, errors.New("convert file picker title to NSString")
 	}
@@ -159,12 +163,16 @@ func cString(value string) *byte {
 	return &b[0]
 }
 
+// goCString copies a NUL-terminated C string of at most maxPath bytes. It reads
+// one byte at a time so it never forms a slice past the string's allocation.
 func goCString(p *byte) string {
 	const maxPath = 1 << 20
-	b := unsafe.Slice(p, maxPath)
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
+	if p == nil {
+		return ""
+	}
+	for n := 0; n < maxPath; n++ {
+		if *(*byte)(unsafe.Add(unsafe.Pointer(p), n)) == 0 {
+			return string(unsafe.Slice(p, n))
 		}
 	}
 	return ""
