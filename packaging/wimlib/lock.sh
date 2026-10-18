@@ -13,6 +13,7 @@ load_wimlib_lock() {
   local seen_WIMLIB_SOURCE_SHA256=
   local seen_LINUX_TOOLCHAIN=
   local seen_MACOS_TOOLCHAIN=
+  local seen_WINDOWS_TOOLCHAIN=
   local seen_CONFIGURE_FLAGS=
 
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -77,6 +78,15 @@ load_wimlib_lock() {
         # shellcheck disable=SC2034 # read by callers that source this file
         MACOS_TOOLCHAIN=$value
         ;;
+      WINDOWS_TOOLCHAIN)
+        [[ -n "$seen_WINDOWS_TOOLCHAIN" ]] && {
+          echo "duplicate wimlib lock key: $key" >&2
+          return 65
+        }
+        seen_WINDOWS_TOOLCHAIN=1
+        # shellcheck disable=SC2034 # read by callers that source this file
+        WINDOWS_TOOLCHAIN=$value
+        ;;
       CONFIGURE_FLAGS)
         [[ -n "$seen_CONFIGURE_FLAGS" ]] && {
           echo "duplicate wimlib lock key: $key" >&2
@@ -99,6 +109,7 @@ load_wimlib_lock() {
     WIMLIB_SOURCE_SHA256 \
     LINUX_TOOLCHAIN \
     MACOS_TOOLCHAIN \
+    WINDOWS_TOOLCHAIN \
     CONFIGURE_FLAGS
   do
     eval "value=\${$key}"

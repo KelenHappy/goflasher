@@ -1,0 +1,27 @@
+Corresponding Source for wimlib 1.14.5 in GoFlasher
+
+GoFlasher's source repository at the release tag is the Corresponding Source
+of every GoFlasher package, including the statically linked libwim:
+
+  - wimlib source: wimlib-1.14.5.tar.gz from
+    https://wimlib.net/downloads/wimlib-1.14.5.tar.gz, verified against
+    source.sha256 (packaging/wimlib/fetch.sh downloads and checks it). The
+    same archive is attached to each GoFlasher release that links wimlib.
+  - build scripts: packaging/wimlib/BUILD.lock, fetch.sh, build.sh and
+    verify.sh, and .github/actions/setup-winlibs for the Windows toolchain.
+  - GoFlasher's own source, including the cgo bridge in internal/wim/native.
+
+Replacing or relinking libwim with a modified version:
+
+  1. Modify the wimlib source and build it with packaging/wimlib/build.sh (or
+     any configure/make producing a compatible static libwim.a). Remove the
+     version check in internal/wim/native/link_wimlib.go if the version
+     changes.
+  2. Rebuild GoFlasher against it:
+       CGO_CFLAGS=-I<out>/include CGO_LDFLAGS=-L<out>/lib \
+         go build -trimpath -tags fyne,no_emoji,wimlib ./cmd/usbwriter
+     On Windows, use the same WinLibs GCC for both steps and pass
+     Windows-style paths (cygpath -m) in CGO_CFLAGS/CGO_LDFLAGS.
+
+docs/development/BUILDING.md ("WIM splitting") describes the build in full.
+Reverse engineering GoFlasher for debugging such modifications is permitted.

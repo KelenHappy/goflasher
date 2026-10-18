@@ -1,3 +1,11 @@
 # Embedded license texts must stay byte-identical to the generator output
 # on every platform, so CI's regenerate-and-diff check passes on Windows.
 internal/legal/texts/** text eol=lf
+
+# Shell scripts and the data they parse run under bash on every host,
+# including Windows CI, where CRLF would corrupt every value they read.
+*.sh text eol=lf
+packaging/wimlib/BUILD.lock text eol=lf
+
+# The wimlib compliance record ships verbatim inside every package.
+docs/legal/wimlib-1.14.5/** text eol=lf

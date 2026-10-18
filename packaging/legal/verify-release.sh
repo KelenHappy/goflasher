@@ -13,16 +13,19 @@ fi
 find_one() { find "$payload" -type f -name "$1" -print -quit; }
 # The notices travel inside the executable (internal/legal) and are shown under
 # Settings, so assert the texts are actually compiled in rather than that a file
-# sits beside the binary. The project license still ships as a file because the
-# distribution policies require it.
-app=$(find "$payload" -type f \( -path '*/bin/goflasher' -o -path '*/MacOS/GoFlasher' \) -print -quit)
+# sits beside the binary. The Linux and macOS packages still ship the project
+# license as a file because their distribution policies require it; the Windows
+# portable ZIP carries it only inside the executable (packaging/windows).
+app=$(find "$payload" -type f \( -path '*/bin/goflasher' -o -path '*/MacOS/GoFlasher' -o -name 'GoFlasher.exe' \) -print -quit)
 test -n "$app" || { echo "no GoFlasher executable in payload" >&2; exit 65; }
 # LC_ALL=C makes grep match raw bytes: macOS grep under a UTF-8 locale fails to
 # find multibyte text in a binary full of invalid UTF-8 sequences.
 for notice in 'GNU GENERAL PUBLIC LICENSE' 'Third-party notices' '第三方軟體聲明'; do
   LC_ALL=C grep -qaF "$notice" "$app" || { echo "missing embedded notice: $notice" >&2; exit 65; }
 done
-test -n "$(find_one copyright)$(find_one LICENSE)" || { echo "missing project license file" >&2; exit 65; }
+if [[ "$app" != *.exe ]]; then
+  test -n "$(find_one copyright)$(find_one LICENSE)" || { echo "missing project license file" >&2; exit 65; }
+fi
 # UEFI is non-MVP. Inspect payload names, not user ISO contents processed later.
 if find "$payload" -type f \( -iname '*edk2*' -o -iname '*gnu-efi*' -o -iname '*uefi-shell*' -o -iname 'shim*.efi' \) -print -quit | grep -q .; then
   echo "prohibited UEFI component in release payload" >&2; exit 65
@@ -30,10 +33,10 @@ fi
 # wimlib is linked statically into the GUI executable, never shipped as a
 # shared library. The archive's hash is checked against the record before
 # linking (check-wimlib-archive.sh); here the record must travel with the app.
-if find "$payload" \( -name 'libwim.so*' -o -name 'libwim*.dylib' \) -print -quit | grep -q .; then
+if find "$payload" \( -name 'libwim.so*' -o -name 'libwim*.dylib' -o -iname 'libwim*.dll' \) -print -quit | grep -q .; then
   echo "shared libwim in release payload; wimlib must be linked statically" >&2; exit 65
 fi
-if LC_ALL=C grep -qaE 'libwim\.so\.[0-9]|libwim\.[0-9]+\.dylib' "$app"; then
+if LC_ALL=C grep -qaiE 'libwim\.so\.[0-9]|libwim\.[0-9]+\.dylib|libwim-[0-9]+\.dll' "$app"; then
   echo "GoFlasher executable loads a shared libwim" >&2; exit 65
 fi
 if "$(dirname "${BASH_SOURCE[0]}")/links-wimlib.sh" "$app"; then
@@ -46,6 +49,6 @@ if "$(dirname "${BASH_SOURCE[0]}")/links-wimlib.sh" "$app"; then
   grep -Fq 'LGPL-2.1-or-later' "$record/license-inventory.txt" || { echo "libwim LGPL-2.1-or-later classification missing" >&2; exit 65; }
   grep -Eiq 'replacement|relink' "$record/corresponding-source.txt" || { echo "libwim replacement/relink instructions missing" >&2; exit 65; }
   { test -d "$record/licenses" && test -n "$(find "$record/licenses" -type f -print -quit)"; } || { echo "libwim license payload missing" >&2; exit 65; }
-  packaged_licenses=$(find "$payload" -type f \( -path '*/Resources/legal/wimlib-*/*' -o -path '*/share/doc/goflasher/third-party/wimlib-*/*' \) -print -quit)
+  packaged_licenses=$(find "$payload" -type f \( -path '*/Resources/legal/wimlib-*/*' -o -path '*/share/doc/goflasher/third-party/wimlib-*/*' -o -path '*/legal/wimlib-*/*' \) -print -quit)
   test -n "$packaged_licenses" || { echo "libwim notices/licenses absent from final payload" >&2; exit 65; }
 fi

@@ -27,6 +27,33 @@ jobs:
           cache: true
       - name: Test Windows source set
         run: go test ./...
+      # libwim.a and the GUI must share one C runtime, so both are built with
+      # the pinned WinLibs GCC once the builder is enabled.
+      - name: Install pinned Windows toolchain
+        if: vars.WINDOWS_BUILDER_READY == 'true'
+        uses: ./.github/actions/setup-winlibs
+      - name: Build approved wimlib
+        # Links the Windows-installer builder in only once the reviewed
+        # compliance record exists; otherwise the ZIP stays raw-writer-only.
+        if: vars.WINDOWS_BUILDER_READY == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ vars.WIMLIB_COMPLIANCE_RECORD_PATH }}"
+          export WIMLIB_COMPLIANCE_RECORD="$PWD/${{ vars.WIMLIB_COMPLIANCE_RECORD_PATH }}"
+          source_path=$(packaging/wimlib/fetch.sh "$RUNNER_TEMP")
+          packaging/wimlib/build.sh "$source_path" "$RUNNER_TEMP/wimlib"
+          packaging/legal/check-wimlib-archive.sh "$RUNNER_TEMP/wimlib/lib/libwim.a"
+          packaging/wimlib/verify.sh "$RUNNER_TEMP/wimlib" windows amd64 \
+            "$(awk '{print $1}' "$RUNNER_TEMP/wimlib/SHA256SUMS")" "$RUNNER_TEMP/wimlib/smoke.wim"
+          # cgo's native gcc needs Windows paths.
+          wimlib=$(cygpath -m "$RUNNER_TEMP/wimlib")
+          {
+            echo "CGO_CFLAGS=-I$wimlib/include"
+            echo "CGO_LDFLAGS=-L$wimlib/lib"
+            echo "GO_BUILD_TAGS=fyne,no_emoji,wimlib"
+            echo "WIMLIB_COMPLIANCE_RECORD=$WIMLIB_COMPLIANCE_RECORD"
+          } >> "$GITHUB_ENV"
       - name: Embed UAC manifest and build portable executable
         shell: bash
         run: |
@@ -35,8 +62,11 @@ jobs:
           test -n "$windres"
           "$windres" --target=pe-x86-64 -I packaging/windows packaging/windows/goflasher.rc -O coff -o cmd/usbwriter/goflasher_windows_amd64.syso
           mkdir -p dist
-          go build -trimpath -tags fyne,no_emoji -ldflags "-s -w -H=windowsgui" -o dist/GoFlasher.exe ./cmd/usbwriter
+          go build -trimpath -tags "${GO_BUILD_TAGS:-fyne,no_emoji}" -ldflags "-s -w -H=windowsgui" -o dist/GoFlasher.exe ./cmd/usbwriter
           rm cmd/usbwriter/goflasher_windows_amd64.syso
+          if [[ "${{ vars.WINDOWS_BUILDER_READY }}" == "true" ]]; then
+            packaging/legal/links-wimlib.sh dist/GoFlasher.exe
+          fi
           mt=$(find '/c/Program Files (x86)/Windows Kits/10/bin' -path '*/x64/mt.exe' -print 2>/dev/null | sort -V | tail -1)
           test -n "$mt"
           exe_win=$(cygpath -w "$PWD/dist/GoFlasher.exe")
@@ -65,12 +95,16 @@ jobs:
           MSYS2_ARG_CONV_EXCL='*' "$signtool" verify /pa /all /v "$exe_win"
       - name: Build portable ZIP and checksum
         shell: bash
-        run: go run ./packaging/windows --executable dist/GoFlasher.exe --version "$VERSION" --output dist
+        run: go run ./packaging/windows --executable dist/GoFlasher.exe --version "$VERSION" --output dist ${WIMLIB_COMPLIANCE_RECORD:+--wimlib-record "$WIMLIB_COMPLIANCE_RECORD"}
       - name: Verify portable contents and secret exclusion
         shell: bash
+        env:
+          GOFLASHER_RELEASE_GATE: ${{ vars.RELEASE_COMPLIANCE_RECORD_PATH != '' && '1' || '0' }}
+          RELEASE_COMPLIANCE_RECORD: ${{ vars.RELEASE_COMPLIANCE_RECORD_PATH }}
         run: |
           set -euo pipefail
           root="dist/GoFlasher-$VERSION-windows-amd64"
+          WIMLIB_COMPLIANCE_RECORD=${WIMLIB_COMPLIANCE_RECORD:-} packaging/legal/verify-release.sh "$root"
           test -f "$root/GoFlasher.exe"
           test -f "$root/README-Windows.txt"
           # The GPL requires the license text to reach the user with the
@@ -299,12 +333,20 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      # Checked out before the download because checkout cleans the workspace.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: vars.LINUX_WINDOWS_BUILDER_READY == 'true' || vars.MACOS_WINDOWS_BUILDER_READY == 'true' || vars.WINDOWS_BUILDER_READY == 'true'
       - name: Download reviewed build outputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: goflasher-*
           path: dist
           merge-multiple: true
+      - name: Attach wimlib Corresponding Source
+        # Packages that link wimlib point to this archive
+        # (docs/legal/wimlib-1.14.5/corresponding-source.txt).
+        if: vars.LINUX_WINDOWS_BUILDER_READY == 'true' || vars.MACOS_WINDOWS_BUILDER_READY == 'true' || vars.WINDOWS_BUILDER_READY == 'true'
+        run: packaging/wimlib/fetch.sh dist
       - name: Publish GitHub release assets
         run: |
           set -euo pipefail

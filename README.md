@@ -22,10 +22,9 @@ on Linux, Windows, and macOS.**
 - Optionally read the written bytes back and compare their SHA-256 checksum.
 - Build UEFI x64 Windows installer media from an uncompressed Windows ISO: a GPT
   disk with one FAT32 partition, an `install.wim` larger than 4 GiB split into
-  `.swm` parts, and a file-by-file read-back verification. Windows hosts split
-  with the system DISM; Linux and macOS packages offer the builder only when
-  they are built with the pinned wimlib linked in, and otherwise refuse before
-  touching the disk.
+  `.swm` parts, and a file-by-file read-back verification. Packages offer the
+  builder only when they are built with the pinned wimlib linked in, and
+  otherwise refuse before touching the disk.
 - Show writing and verification progress, throughput, and estimated time.
 - Cancel an active operation.
 - Optionally power off the USB device after a successful write.

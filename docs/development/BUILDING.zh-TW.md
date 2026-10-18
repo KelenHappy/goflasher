@@ -52,9 +52,8 @@ process 執行。Windows 不設 privileged helper、service 或跨程序 IPC，b
 回讀並進行semantic verification。Raw disk handle只接受完整sector的請求，因此
 builder與verifier的所有I/O都會經過`internal/blockio`，在已驗證的磁碟大小內以
 read-modify-write補齊不完整的sector。Logical sector size不是512 bytes的磁碟會被
-拒絕。只有超過FAT32單檔上限的`install.wim`會呼叫外部程式：由`internal/wim`解析
-並驗證的系統`%SystemRoot%\System32\dism.exe /Split-Image`；建立媒體時不會執行
-其他指令。
+拒絕。建立媒體時不執行任何指令：超過FAT32單檔上限的`install.wim`由靜態連結的
+wimlib在程式內分割（見下方「WIM分割」）。
 
 ### macOS Windows installer builder邊界
 
@@ -66,7 +65,7 @@ identity-bound的raw descriptor，並只透過in-process、partition-bounded FAT
 公開release不得宣稱或啟用此builder。
 
 可建立installer的app bundle會把固定版本的wimlib靜態連結進GUI執行檔（見下方
-「Linux與macOS的WIM分割」），bundle裡不放任何libwim檔案。未帶`wimlib` build tag
+「WIM分割」），bundle裡不放任何libwim檔案。未帶`wimlib` build tag
 編譯的GUI只保留raw writer，WIM preflight會fail closed。
 Code signing本身不會啟用builder；公開macOS workflow只在獨立的
 `MACOS_WINDOWS_BUILDER_READY`核准gate為true時才連結wimlib。在authenticated helper/XPC
@@ -92,15 +91,18 @@ sudo install -m 0644 packaging/org.goflasher.usbwriter.policy \
 
 開發時可執行 `go run -tags fyne ./cmd/usbwriter`；不要以root建置或執行Linux GUI。
 
-### Linux與macOS的WIM分割
+### WIM分割
 
-Linux與macOS以wimlib 1.14.5分割`install.wim`。GUI以`wimlib` build tag編譯時，
+所有平台都以wimlib 1.14.5分割`install.wim`。GUI以`wimlib` build tag編譯時，
 wimlib會透過cgo靜態連結進執行檔（`internal/wim/native/link_wimlib.go`），執行時
 不載入任何libwim檔案。沒有這個tag時，`internal/wim/native`改編stub，installer
 builder回報無法使用，因此`go test ./...`與一般開發建置都不需要wimlib。
 
 建置設定固定在`packaging/wimlib/BUILD.lock`，只產生靜態的`libwim.a`，且可重現：
-同一份lock重複建置會得到相同的SHA-256。在固定的toolchain上建立可製作installer的GUI：
+同一份lock重複建置會得到相同的SHA-256。Windows上`build.sh`在Git Bash執行，`PATH`上
+需要WinLibs GCC 16.2.0 UCRT r2的`gcc`、`mingw32-make`與`pkg-config`（CI由
+`.github/actions/setup-winlibs`安裝固定版本）；GUI也必須用同一個WinLibs `gcc`
+建置，兩者才會共用UCRT C runtime。在固定的toolchain上建立可製作installer的GUI：
 
 ```sh
 src=$(packaging/wimlib/fetch.sh /tmp/wimlib-src)
@@ -109,11 +111,12 @@ CGO_CFLAGS=-I/tmp/wimlib/include CGO_LDFLAGS=-L/tmp/wimlib/lib \
   go build -trimpath -tags fyne,no_emoji,wimlib -o dist/goflasher ./cmd/usbwriter
 ```
 
-Release workflow只在`LINUX_WINDOWS_BUILDER_READY`或`MACOS_WINDOWS_BUILDER_READY`
-為true時這樣做，並要求repository variable `WIMLIB_COMPLIANCE_RECORD_PATH`（checkout
-內的路徑）；`libwim.a`的SHA-256不在該紀錄的`artifact.sha256`中就拒絕連結，並把紀錄
+Release workflow只在`LINUX_WINDOWS_BUILDER_READY`、`MACOS_WINDOWS_BUILDER_READY`或
+`WINDOWS_BUILDER_READY`為true時這樣做，並要求repository variable
+`WIMLIB_COMPLIANCE_RECORD_PATH`（checkout內的路徑；紀錄位於`docs/legal/wimlib-1.14.5`）；`libwim.a`的SHA-256不在該紀錄的`artifact.sha256`中就拒絕連結，並把紀錄
 安裝到應用程式旁。打包腳本以`packaging/legal/links-wimlib.sh`偵測執行檔是否連結
-wimlib，沒有紀錄就拒絕打包。
+wimlib，沒有紀錄就拒絕打包（Windows portable ZIP放在`legal/wimlib-1.14.5`），release
+也會附上wimlib原始碼archive。
 
 Windows：
 

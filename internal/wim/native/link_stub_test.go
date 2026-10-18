@@ -1,4 +1,4 @@
-//go:build (linux || darwin) && !wimlib
+//go:build !wimlib
 
 package native
 

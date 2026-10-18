@@ -1,0 +1,19 @@
+libwim.a native dependencies
+
+Optional wimlib features: ntfs-3g and FUSE are disabled at configure time, so
+no third-party library is linked into or bundled with libwim.a. The archive
+contains wimlib's own code only, including the MIT-licensed files listed in
+license-inventory.txt.
+
+At link time libwim.a uses only operating system libraries, which are not
+distributed with GoFlasher:
+
+  windows-amd64  ntdll.dll (cgo LDFLAGS -lntdll), KERNEL32.dll, ADVAPI32.dll
+                 and the Universal C Runtime (api-ms-win-crt-*.dll), all part
+                 of Windows 10 and later. Checked with objdump -p on the
+                 wimlib-tagged wim-smoke executable.
+  linux-amd64    glibc (libc, libpthread)
+  macos          libSystem
+
+No shared libwim is loaded at run time; packaging/wimlib/verify.sh and
+packaging/legal/verify-release.sh reject one.

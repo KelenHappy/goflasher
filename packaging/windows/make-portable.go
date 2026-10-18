@@ -3,6 +3,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -17,7 +18,16 @@ import (
 
 var versionPattern = regexp.MustCompile(`^v?[0-9A-Za-z][0-9A-Za-z._-]*$`)
 
-var errUsage = errors.New("usage: go run ./packaging/windows --executable EXE --version VERSION --output DIR")
+var errUsage = errors.New("usage: go run ./packaging/windows --executable EXE --version VERSION --output DIR [--wimlib-record DIR]")
+
+// wimlibMarker is the linkage constant in internal/wim/native/link_wimlib.go,
+// compiled in only with the wimlib build tag; packaging/legal/links-wimlib.sh
+// searches for the same text.
+var wimlibMarker = []byte("statically linked wimlib")
+
+// wimlibRecordItems are the compliance record files shipped beside the
+// executable, matching packaging/legal/install-wimlib-record.sh.
+var wimlibRecordItems = []string{"source.sha256", "artifact.sha256", "build-metadata.txt", "dependencies.txt", "license-inventory.txt", "corresponding-source.txt", "LEGAL_APPROVED"}
 
 // releaseVersion is a version string that matched versionPattern, so it is
 // safe to embed in file names and in README-Windows.txt.
@@ -37,7 +47,7 @@ func (v releaseVersion) artifactName() string {
 
 // portableFlags is the command line exactly as given, before validation.
 type portableFlags struct {
-	executable, version, output string
+	executable, version, output, wimlibRecord string
 }
 
 // portableLayout is one validated packaging run with every path resolved to
@@ -49,6 +59,9 @@ type portableLayout struct {
 	stageDir    string // tree that becomes the ZIP contents
 	archivePath string // the portable ZIP
 	version     releaseVersion
+	// wimlibRecord is the approved wimlib compliance record, or empty when
+	// none was given. It is required when the executable links wimlib.
+	wimlibRecord string
 }
 
 func main() {
@@ -56,6 +69,7 @@ func main() {
 	flag.StringVar(&f.executable, "executable", "", "signed GoFlasher executable")
 	flag.StringVar(&f.version, "version", "", "release version")
 	flag.StringVar(&f.output, "output", "", "output directory")
+	flag.StringVar(&f.wimlibRecord, "wimlib-record", "", "approved wimlib compliance record, required when the executable links wimlib")
 	flag.Parse()
 	if err := packagePortable(f); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -82,14 +96,21 @@ func newPortableLayout(f portableFlags) (portableLayout, error) {
 		return portableLayout{}, err
 	}
 	l := portableLayout{version: version}
-	for _, p := range []struct {
+	paths := []struct {
 		dst *string
 		src string
 	}{
 		{&l.repo, filepath.Join("packaging", "windows", "..", "..")},
 		{&l.executable, f.executable},
 		{&l.output, f.output},
-	} {
+	}
+	if f.wimlibRecord != "" {
+		paths = append(paths, struct {
+			dst *string
+			src string
+		}{&l.wimlibRecord, f.wimlibRecord})
+	}
+	for _, p := range paths {
 		if *p.dst, err = filepath.Abs(p.src); err != nil {
 			return portableLayout{}, err
 		}
@@ -129,28 +150,74 @@ func (l portableLayout) resetArtifacts() error {
 // before running the executable, and that has to be readable without running
 // it.
 func (l portableLayout) stage() error {
-	if err := l.stageExecutable(); err != nil {
-		return err
+	for _, step := range []func() error{l.stageExecutable, l.stageReadme, l.stageWimlibRecord} {
+		if err := step(); err != nil {
+			return err
+		}
 	}
-	return l.stageReadme()
+	return nil
 }
 
-func (l portableLayout) stageExecutable() error {
-	in, err := os.Open(l.executable)
+// stageWimlibRecord ships wimlib's licenses and compliance record under
+// legal/wimlib-1.14.5 when the executable links wimlib, and refuses to
+// package such an executable without the record.
+func (l portableLayout) stageWimlibRecord() error {
+	exe, err := os.ReadFile(l.executable)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.Create(filepath.Join(l.stageDir, "GoFlasher.exe"))
+	if !bytes.Contains(exe, wimlibMarker) {
+		return nil
+	}
+	if l.wimlibRecord == "" {
+		return errors.New("GoFlasher.exe links wimlib; --wimlib-record is required")
+	}
+	dest := filepath.Join(l.stageDir, "legal", "wimlib-1.14.5")
+	if err := copyTree(filepath.Join(l.wimlibRecord, "licenses"), filepath.Join(dest, "licenses")); err != nil {
+		return err
+	}
+	for _, item := range wimlibRecordItems {
+		if err := copyFile(filepath.Join(l.wimlibRecord, item), filepath.Join(dest, item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyTree copies every regular file under src to the same relative path
+// under dst.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		return copyFile(path, filepath.Join(dst, rel))
+	})
+}
+
+// copyFile copies src to dst, creating dst's parent directories.
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, in)
+	copyErr := copyInto(out, src)
 	closeErr := out.Close()
 	if copyErr != nil {
 		return copyErr
 	}
 	return closeErr
+}
+
+func (l portableLayout) stageExecutable() error {
+	return copyFile(l.executable, filepath.Join(l.stageDir, "GoFlasher.exe"))
 }
 
 // stageReadme copies README-Windows.txt with VERSION substituted.

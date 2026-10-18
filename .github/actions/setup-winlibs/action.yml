@@ -1,0 +1,35 @@
+name: Set up WinLibs GCC
+description: >
+  Installs the pinned WinLibs GCC UCRT toolchain (WINDOWS_TOOLCHAIN in
+  packaging/wimlib/BUILD.lock) and pkg-config, ahead of any other MinGW on
+  PATH. libwim.a and every executable it is linked into must use this one
+  toolchain so they share a C runtime.
+
+runs:
+  using: composite
+  steps:
+    - name: Install WinLibs GCC 16.2.0 UCRT r2
+      shell: bash
+      env:
+        WINLIBS_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r2.7z
+        WINLIBS_SHA256: 53fb6773fbdf87cdf22b69a6b2a07ee33d3ada413b42d83044bc7cc6481400d2
+      run: |
+        set -euo pipefail
+        archive="$RUNNER_TEMP/winlibs.7z"
+        curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+          "$WINLIBS_URL" -o "$archive"
+        echo "$WINLIBS_SHA256  $archive" | sha256sum --check --strict
+        7z x -y -bd -o"$(cygpath -w "$RUNNER_TEMP/winlibs")" "$(cygpath -w "$archive")" >/dev/null
+        rm -f "$archive"
+        cygpath -w "$RUNNER_TEMP/winlibs/mingw64/bin" >> "$GITHUB_PATH"
+
+    - name: Install pkg-config
+      shell: bash
+      run: choco install pkgconfiglite --version 0.28 --yes --no-progress
+
+    - name: Show toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v gcc mingw32-make pkg-config
+        gcc --version | head -1

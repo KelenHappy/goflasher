@@ -42,22 +42,22 @@ GoFlasher在macOS native adapter使用PureGo。PureGo
 `/usr/share/licenses/goflasher/LICENSE`，macOS bundle 置於
 `Contents/Resources/legal/LICENSE`。
 
-## wimlib / libwim — 尚未核准發布
+## wimlib / libwim
 
-- 預定版本：1.14.5
-- 預定用途：開啟及分割WIM；透過cgo靜態連結進Linux與macOS的GUI執行檔
-- Library授權：LGPL-2.1-or-later
-- 相容性：可作為GoFlasher的一部分依GPL-3.0散布，但必須滿足下列artifact-specific條件
+- 版本：1.14.5，以上游原始檔案未修改建置
+- 用途：開啟及分割WIM；透過cgo靜態連結進Linux、macOS與Windows的GUI執行檔
+- Library授權：GPL-3.0-or-later或LGPL-2.1-or-later雙授權（因建置排除ntfs-3g，可選
+  LGPL）；GoFlasher採用LGPL-2.1-or-later。部分library檔案為MIT授權（Eric Biggers；
+  Yuta Mori的libdivsufsort-lite）。
+- 上游：<https://wimlib.net>
+- Compliance record：`docs/legal/wimlib-1.14.5`（核准的archive hash、build metadata、
+  dependency report、授權清單與全文、Corresponding Source與relink說明、核准紀錄）
 
-LGPL-2.1-or-later分類適用於wimlib 1.14.5 library，不會把GoFlasher、optional component
-或native transitive dependency重新分類。發布前必須以實際bundled artifact核對精確source
-snapshot、全部適用source header與license/notice、build configuration、啟用的optional
-feature，以及每個實際link或bundle的native transitive dependency。Release record亦須保存
-source與靜態archive（`libwim.a`）的SHA-256、toolchain/linker版本、flags、patch、dependency report、license text、
-legal approval，以及已驗證可取得且包含build/install與適用relink材料的Corresponding
-Source。Package必須保留LGPL notice與license text、提供以修改版wimlib重新連結GoFlasher所需的材料（完整Corresponding Source與build script），且不得禁止為
-debug library修改而進行reverse engineering。在完成artifact-specific驗證前禁止散布libwim，
-Windows builder必須顯示unavailable。
+此分類不會把GoFlasher或libwim連結的作業系統library重新分類。連結wimlib的套件會在
+執行檔旁附上compliance record（含wimlib授權全文），其release也會附上wimlib原始碼
+archive。允許為debug對libwim的修改而reverse engineering GoFlasher。Release workflow只
+連結SHA-256列於record中的archive；未連結wimlib的建置會將Windows安裝媒體builder顯示為
+unavailable。
 
 ## UEFI component — 禁止進入release
 

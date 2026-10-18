@@ -85,6 +85,17 @@ case "$os" in
     esac
     ;;
 
+  windows)
+    symbol_prefix=
+    case "$arch" in
+      amd64) expected_arch="x86-64" ;;
+      *)
+        echo "unsupported Windows architecture: $arch" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+
   *)
     echo "unsupported verification OS: $os" >&2
     exit 64
@@ -119,9 +130,18 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+# Under Git Bash, cgo's native gcc needs Windows paths.
+if [[ "$os" == "windows" ]]; then
+  cgo_output=$(cygpath -m "$output")
+  smoke_exe="$work/wim-smoke.exe"
+else
+  cgo_output=$output
+  smoke_exe="$work/wim-smoke"
+fi
+
 export CGO_ENABLED=1
-export CGO_CFLAGS="-I$output/include"
-export CGO_LDFLAGS="-L$output/lib"
+export CGO_CFLAGS="-I$cgo_output/include"
+export CGO_LDFLAGS="-L$cgo_output/lib"
 
 echo "Running wimlib-tagged WIM package tests"
 
@@ -134,10 +154,10 @@ echo "Building statically linked libwim smoke executable"
 
 (
   cd "$root"
-  go build -tags wimlib -o "$work/wim-smoke" ./cmd/wim-smoke
+  go build -tags wimlib -o "$smoke_exe" ./cmd/wim-smoke
 )
 
-file_output=$(file "$work/wim-smoke")
+file_output=$(file "$smoke_exe")
 echo "$file_output"
 
 if ! printf '%s\n' "$file_output" | grep -F "$expected_arch" >/dev/null; then
@@ -147,11 +167,11 @@ fi
 
 echo "Verifying that libwim is not loaded dynamically"
 
-if [[ "$os" == "macos" ]]; then
-  dependencies=$(otool -L "$work/wim-smoke")
-else
-  dependencies=$(ldd "$work/wim-smoke")
-fi
+case "$os" in
+  macos) dependencies=$(otool -L "$smoke_exe") ;;
+  windows) dependencies=$(objdump -p "$smoke_exe" | grep -F 'DLL Name') ;;
+  *) dependencies=$(ldd "$smoke_exe") ;;
+esac
 
 printf '%s\n' "$dependencies"
 
@@ -160,13 +180,13 @@ if printf '%s\n' "$dependencies" | grep -F libwim >/dev/null; then
   exit 65
 fi
 
-if ! "$root/packaging/legal/links-wimlib.sh" "$work/wim-smoke"; then
+if ! "$root/packaging/legal/links-wimlib.sh" "$smoke_exe"; then
   echo "smoke executable lacks the linked-wimlib marker" >&2
   exit 65
 fi
 
 echo "Running libwim smoke test"
 
-"$work/wim-smoke" "$smoke"
+"$smoke_exe" "$smoke"
 
 echo "Bundled libwim verification completed successfully."

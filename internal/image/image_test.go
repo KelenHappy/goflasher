@@ -277,7 +277,7 @@ func inspectReplacementFixture(t *testing.T, symlink bool) (Info, string, []byte
 	if symlink {
 		selected = filepath.Join(dir, "selected.img")
 		if err := os.Symlink(original, selected); err != nil {
-			t.Fatal(err)
+			t.Skipf("symlinks unavailable: %v", err)
 		}
 	}
 	info, err := Inspect(Info{Path: selected, Compression: CompressionNone})

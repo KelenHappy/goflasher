@@ -1,5 +1,4 @@
-// Package native contains the Unix wimlib bridge's public errors.
-// Its cgo implementation is excluded from Windows builds.
+// Package native contains the wimlib bridge's public errors.
 package native
 
 import "errors"
