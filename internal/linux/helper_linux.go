@@ -517,6 +517,8 @@ type helperEnvironment struct {
 	SysDevBlock, SysClassBlock, MountInfo, Swaps, DevRoot string
 	openFile                                              func(string, int, os.FileMode) (*os.File, error)
 	fstat                                                 func(int, *syscall.Stat_t) error
+	// invalidateCache defaults to invalidateBlockCache.
+	invalidateCache func(*os.File) error
 }
 
 func realHelperEnvironment() helperEnvironment {
@@ -871,10 +873,18 @@ func (s *installerSession) performRead(command privilege.SessionCommand) error {
 	return err
 }
 
+// performFlush also drops the cached pages: read-back verification runs in a
+// second session that shares this block device's page cache, and must read
+// the media rather than what this session just wrote.
 func (s *installerSession) performFlush() error {
-	if err := s.syncTarget(); err != nil {
+	invalidate := s.env.invalidateCache
+	if invalidate == nil {
+		invalidate = invalidateBlockCache
+	}
+	if err := flushAndInvalidate(s.target, func() error { return invalidate(s.target) }); err != nil {
 		return err
 	}
+	s.unsynced = 0
 	return s.reply(privilege.SessionResponse{OK: true})
 }
 

@@ -22,8 +22,8 @@
 - 可選擇回讀已寫入的位元組，並比對 SHA-256 總和檢查碼。
 - 可從未壓縮的 Windows ISO 建立 UEFI x64 Windows 安裝媒體：建立含單一 FAT32
   分割區的 GPT 磁碟，將超過 4 GiB 的 `install.wim` 分割為 `.swm`，並逐檔回讀
-  驗證。Windows 主機使用系統內建的 DISM 分割；Linux 與 macOS 套件只有在建置時
-  連結了固定版本的 wimlib 才提供此功能，否則會在動到磁碟前拒絕執行。
+  驗證。套件只有在建置時連結了固定版本的 wimlib 才提供此功能，否則會在動到磁碟前
+  拒絕執行。
 - 顯示寫入與驗證進度、傳輸速度及預估剩餘時間。
 - 可取消進行中的操作。
 - 寫入成功後，可選擇關閉 USB 裝置電源。
@@ -67,8 +67,8 @@ polkit 呼叫由 root 擁有的專用權限提升輔助程式。
 
 這不表示所有平台都已完全不依賴主機指令。Linux 直接讀取 `/run/udev/data` 補充裝置
 分類，只以 `pkexec` 啟動權限提升輔助程式。Windows 的磁碟探索、身分驗證、raw I/O、
-volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動 CLI；唯一例外是
-建立 Windows 安裝媒體且 `install.wim` 需要分割時，會呼叫系統內建的 DISM；macOS 仍使用
+volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動 CLI；建立 Windows
+安裝媒體時，`install.wim` 也由連結進程式的 wimlib 在程式內分割；macOS 仍使用
 `diskutil` 管理裝置及 `osascript` 開啟原生選擇器，但格式化在程式內完成。三個平台的原生版本都會在 CI 中建置及測試，
 但 Windows/macOS 仍需要原生主機權限及實體媒體驗收才能發布。完整邊界及改用原生 API
 的方向請參閱 [BUILDING.md](../development/BUILDING.md#native-api-and-command-dependencies)。

@@ -1,0 +1,4 @@
+APPROVED
+Approved by: Kelen (GoFlasher maintainer), 2026-10-18
+Scope: wimlib 1.14.5 libwim.a artifacts listed in artifact.sha256, statically
+linked into the GoFlasher GUI under the terms in license-inventory.txt.

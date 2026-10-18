@@ -7,6 +7,7 @@ on:
       - 'internal/wim/**'
       - 'cmd/wim-smoke/**'
       - 'packaging/legal/links-wimlib.sh'
+      - '.github/actions/setup-winlibs/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/wimlib.yml'
@@ -40,6 +41,10 @@ jobs:
             os: macos
             arch: arm64
 
+          - runner: windows-latest
+            os: windows
+            arch: amd64
+
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -64,6 +69,10 @@ jobs:
 
           xcodebuild -version
           clang --version
+
+      - name: Install pinned Windows toolchain
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-winlibs
 
       - name: Fetch pinned wimlib source
         shell: bash

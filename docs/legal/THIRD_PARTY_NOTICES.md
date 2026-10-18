@@ -48,34 +48,28 @@ at `/usr/share/doc/goflasher/copyright`, Arch packages at
 `/usr/share/licenses/goflasher/LICENSE`, and the macOS bundle at
 `Contents/Resources/legal/LICENSE`.
 
-## wimlib / libwim — NOT YET CLEARED FOR RELEASE
+## wimlib / libwim
 
-- Intended version: 1.14.5
-- Intended purpose: open and split WIM files; linked statically into the
-  Linux and macOS GUI executable through cgo
-- Library license: LGPL-2.1-or-later
-- Compatibility: compatible with distribution as part of GoFlasher under
-  GPL-3.0, subject to the artifact-specific conditions below
+- Version: 1.14.5, built unmodified from the upstream archive
+- Purpose: open and split WIM files; linked statically into the Linux, macOS
+  and Windows GUI executable through cgo
+- Library license: dual GPL-3.0-or-later or LGPL-2.1-or-later (the LGPL option
+  applies because the build excludes ntfs-3g); GoFlasher uses the
+  LGPL-2.1-or-later option. Some library files are under the MIT license
+  (Eric Biggers; libdivsufsort-lite by Yuta Mori).
+- Upstream: <https://wimlib.net>
+- Compliance record: `docs/legal/wimlib-1.14.5` (approved archive hashes,
+  build metadata, dependency report, license inventory and texts,
+  Corresponding Source and relinking instructions, approval)
 
-The LGPL-2.1-or-later classification applies to the wimlib 1.14.5 library; it
-does not reclassify GoFlasher, optional wimlib components, or native transitive
-dependencies. Before a libwim artifact may ship, the release record must verify
-the exact bundled artifact against the exact source snapshot, every applicable
-source-header and license/notice file, build configuration, enabled optional
-features, and every linked or bundled native transitive dependency. Each
-transitive component retains its own license and obligations.
-
-The release record must also contain the source and static-archive
-(`libwim.a`) SHA-256 values,
-toolchain and linker versions, flags, downstream patches, dependency report,
-license texts, legal approval, and a tested Corresponding Source offer/location
-including build/install scripts and any material needed for relinking where
-applicable. The package must preserve LGPL notices and license text, provide what is
-needed to relink GoFlasher with a modified wimlib (the complete Corresponding
-Source and build scripts), and must not prohibit reverse engineering for
-debugging modifications to the library. Until those facts and obligations
-are verified against the actual release artifact, libwim distribution is
-blocked; GoFlasher must report the Windows builder as unavailable.
+The classification does not reclassify GoFlasher or the operating system
+libraries libwim links against. A package that links wimlib ships the
+compliance record, including wimlib's license texts, beside the executable,
+and its release attaches the wimlib source archive. Reverse engineering
+GoFlasher for debugging modifications to libwim is permitted. The release
+workflows link wimlib only into archives whose SHA-256 is listed in the
+record; a build without wimlib reports the Windows-installer builder as
+unavailable.
 
 ## UEFI components — PROHIBITED
 

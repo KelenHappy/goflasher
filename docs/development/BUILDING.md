@@ -76,10 +76,9 @@ structures itself, and reads them back through an independent handle for
 semantic verification. Raw disk handles accept only whole-sector requests, so
 all builder and verifier I/O passes through `internal/blockio`, which completes
 partial sectors with read-modify-write inside the validated disk size. Disks
-whose logical sector size is not 512 bytes are refused. Only an `install.wim`
-larger than the FAT32 file limit invokes a program: the system
-`%SystemRoot%\System32\dism.exe /Split-Image`, resolved and validated by
-`internal/wim`; no other command runs while building media.
+whose logical sector size is not 512 bytes are refused. No command runs while
+building media: an `install.wim` larger than the FAT32 file limit is split in
+process by the statically linked wimlib (see "WIM splitting" below).
 
 ### macOS Windows-installer builder boundary
 
@@ -92,7 +91,7 @@ must not advertise or enable this builder until destructive raw access is owned
 by an authenticated helper/XPC protocol and the physical-media gate passes.
 
 Installer-capable app bundles link the pinned wimlib statically into the GUI
-executable (see "WIM splitting on Linux and macOS" below); no libwim file ships
+executable (see "WIM splitting" below); no libwim file ships
 in the bundle. A GUI built without the `wimlib` tag is raw-writer-only and WIM
 preflight fails closed.
 Code signing alone never enables the builder: public macOS workflows link
@@ -100,9 +99,9 @@ wimlib in only when the independent `MACOS_WINDOWS_BUILDER_READY` approval gate
 is true. Until authenticated helper/XPC access and physical-media acceptance are
 approved, signed releases remain raw-writer-only.
 
-### WIM splitting on Linux and macOS
+### WIM splitting
 
-Linux and macOS split `install.wim` with wimlib 1.14.5, linked statically into
+Every platform splits `install.wim` with wimlib 1.14.5, linked statically into
 the GUI executable through cgo when it is built with the `wimlib` build tag
 (`internal/wim/native/link_wimlib.go`). The application never loads a libwim
 file at run time. Without the tag, `internal/wim/native` compiles a stub and the
@@ -110,11 +109,15 @@ installer builder reports itself unavailable, so `go test ./...` and ordinary
 development builds need no wimlib.
 
 The native build recipe is locked in `packaging/wimlib/BUILD.lock`: wimlib
-1.14.5, Ubuntu 24.04/Clang 18 or Xcode 16.4 Apple Clang, and the recorded
-configure flags, which build only the static `libwim.a`. The archive is
-reproducible: repeated builds from the same lock produce the same SHA-256.
-CI builds Linux amd64 and both macOS architectures (Linux arm64 is not
-currently a release target), then checks the archive SHA-256 and symbols, runs
+1.14.5, Ubuntu 24.04/Clang 18, Xcode 16.4 Apple Clang, or WinLibs GCC 16.2.0
+UCRT r2, and the recorded configure flags, which build only the static
+`libwim.a`. The archive is reproducible: repeated builds from the same lock
+produce the same SHA-256. On Windows, `build.sh` runs under Git Bash and needs
+WinLibs' `gcc` and `mingw32-make` plus `pkg-config` on `PATH`
+(`.github/actions/setup-winlibs` installs the pinned set in CI); the GUI must
+then be built with the same WinLibs `gcc` so both share the UCRT C runtime.
+CI builds Linux amd64, both macOS architectures, and Windows amd64 (Linux arm64
+is not currently a release target), then checks the archive SHA-256 and symbols, runs
 the `wimlib`-tagged `internal/wim` tests, and links and runs a real open/split
 smoke fixture that must not depend on a shared libwim.
 
@@ -127,13 +130,16 @@ CGO_CFLAGS=-I/tmp/wimlib/include CGO_LDFLAGS=-L/tmp/wimlib/lib \
   go build -trimpath -tags fyne,no_emoji,wimlib -o dist/goflasher ./cmd/usbwriter
 ```
 
-Release workflows do this only when `LINUX_WINDOWS_BUILDER_READY` or
-`MACOS_WINDOWS_BUILDER_READY` is true. They then require the repository
-variable `WIMLIB_COMPLIANCE_RECORD_PATH` (a path inside the checkout),
+Release workflows do this only when `LINUX_WINDOWS_BUILDER_READY`,
+`MACOS_WINDOWS_BUILDER_READY` or `WINDOWS_BUILDER_READY` is true. They then
+require the repository variable `WIMLIB_COMPLIANCE_RECORD_PATH` (a path inside
+the checkout; the record is `docs/legal/wimlib-1.14.5`),
 refuse an archive whose SHA-256 is not listed in that record's
 `artifact.sha256`, and install the record next to the application. The packaging
 scripts detect a wimlib-linked executable with
-`packaging/legal/links-wimlib.sh` and refuse to package it without the record.
+`packaging/legal/links-wimlib.sh` and refuse to package it without the record
+(the Windows portable ZIP stores it under `legal/wimlib-1.14.5`), and the
+release attaches the wimlib source archive.
 
 Build on (or cross-compile specifically for) every target OS and architecture;
 one binary cannot run unchanged on Linux, Windows, and macOS. Fyne's desktop

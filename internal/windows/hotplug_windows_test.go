@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"context"
 	"testing"
 	"unsafe"
 )
@@ -16,6 +17,21 @@ func TestCMNotifyFilterMatchesCLayout(t *testing.T) {
 	}
 	if got := unsafe.Offsetof(filter.classGUID); got != 16 {
 		t.Fatalf("offsetof(u.DeviceInterface.ClassGuid)=%d, want 16", got)
+	}
+}
+
+// Registration needs no device or elevation, so the real cfgmgr32 calls run
+// here; only the arrival and removal callbacks need hardware.
+func TestWatchDevicesRegistersAndUnregisters(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := new(Backend).WatchDevices(ctx, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	var registered int
+	hotplugWatchers.Range(func(any, any) bool { registered++; return true })
+	if registered != 0 {
+		t.Fatalf("watchers left registered=%d, want 0", registered)
 	}
 }
 

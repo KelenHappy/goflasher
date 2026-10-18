@@ -33,6 +33,8 @@ func installerSessionFixture(t *testing.T) (*backendFixture, helperEnvironment, 
 		st.Rdev = unix.Mkdev(8, 16)
 		return nil
 	}
+	// The fixture device is a regular file, which rejects BLKFLSBUF.
+	env.invalidateCache = func(*os.File) error { return nil }
 	target, err := os.OpenFile(filepath.Join(f.DevRoot, "sdb"), os.O_RDWR, 0)
 	requireNoError(t, err)
 	req := privilegedRequest{Version: privilege.ProtocolVersion, Identity: "FLASH123", Serial: "FLASH123", Major: 8, Minor: 16, Capacity: 65536 * 512, Mode: modeInstallerSession, LogicalSectorSize: 512}
@@ -73,6 +75,42 @@ func TestInstallerSessionUsesBoundedRandomAccessAndStructuredReplies(t *testing.
 		if !response.OK || response.Version != privilege.ProtocolVersion {
 			t.Fatalf("response=%+v", response)
 		}
+	}
+}
+
+func TestInstallerSessionFlushInvalidatesBlockCache(t *testing.T) {
+	_, env, req, target := installerSessionFixture(t)
+	defer target.Close()
+	var invalidated int
+	env.invalidateCache = func(f *os.File) error {
+		if f != target {
+			t.Errorf("invalidated %v, want the session target", f.Name())
+		}
+		invalidated++
+		return nil
+	}
+	input := encodeSessionCommands(t, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionFlush}, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionClose})
+	var output bytes.Buffer
+	if err := runInstallerSession(installerSession{request: req, target: target, input: bufio.NewReader(input), output: &output, env: env}); err != nil {
+		t.Fatal(err)
+	}
+	if invalidated != 1 {
+		t.Fatalf("cache invalidations=%d, want 1", invalidated)
+	}
+}
+
+func TestInstallerSessionFlushReportsInvalidationFailure(t *testing.T) {
+	_, env, req, target := installerSessionFixture(t)
+	defer target.Close()
+	env.invalidateCache = func(*os.File) error { return errors.New("BLKFLSBUF denied") }
+	input := encodeSessionCommands(t, privilege.SessionCommand{Version: privilege.ProtocolVersion, Kind: privilege.SessionFlush})
+	var output bytes.Buffer
+	if err := runInstallerSession(installerSession{request: req, target: target, input: bufio.NewReader(input), output: &output, env: env}); err == nil {
+		t.Fatal("flush succeeded without invalidating the cache")
+	}
+	replies := decodeSessionReplies(t, &output)
+	if len(replies) != 1 || replies[0].OK || replies[0].Code != string(failOperationFailed) {
+		t.Fatalf("replies=%+v", replies)
 	}
 }
 

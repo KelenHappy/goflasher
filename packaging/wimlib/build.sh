@@ -57,6 +57,11 @@ fi
 
 host_os=$(uname -s)
 
+# Git Bash reports e.g. MINGW64_NT-10.0-26100.
+case "$host_os" in
+  MINGW64_NT-*) host_os=Windows ;;
+esac
+
 case "$host_os" in
   Linux)
     if [[ ! -f /etc/os-release ]]; then
@@ -123,6 +128,31 @@ case "$host_os" in
     fi
     ;;
 
+  Windows)
+    # libwim.a and the GUI must share one C runtime, so this is the exact
+    # WinLibs UCRT release CI installs (WINDOWS_TOOLCHAIN in BUILD.lock).
+    for tool in gcc mingw32-make pkg-config; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "$tool not found" >&2
+        exit 69
+      fi
+    done
+
+    gcc_version=$(gcc --version | head -1)
+
+    echo "Detected compiler: $gcc_version"
+
+    case "$gcc_version" in
+      *"(MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r2) 16.2.0")
+        ;;
+      *)
+        echo "unsupported gcc: $gcc_version" >&2
+        echo "expected WinLibs GCC 16.2.0 UCRT r2" >&2
+        exit 65
+        ;;
+    esac
+    ;;
+
   *)
     echo "unsupported build host: $host_os" >&2
     exit 65
@@ -146,7 +176,7 @@ case "$host_os" in
     tar --no-same-owner -xf "$source_tar" -C "$work"
     ;;
 
-  Darwin)
+  Darwin | Windows)
     tar -xf "$source_tar" -C "$work"
     ;;
 esac
@@ -167,20 +197,43 @@ fi
 # ZERO_AR_DATE makes Apple's archiver omit member timestamps, so the archive
 # hash depends on the source, toolchain, and flags only.
 #
+# On Windows the compiler sees native paths, so the prefix map uses those.
+# MinGW's make expands $(SHELL) to the unquoted "C:/Program Files/Git/..."
+# path, which breaks automake's $(LIBTOOL), so libtool runs through the sh on
+# PATH instead. WinLibs' binutils do not default to deterministic archives,
+# so ar and ranlib get D to zero the member timestamps.
+#
+
+case "$host_os" in
+  Windows)
+    cc=gcc
+    compiler_src=$(cygpath -m "$src")
+    make_cmd=(mingw32-make "LIBTOOL=sh ./libtool")
+    export AR_FLAGS=crD RANLIB="ranlib -D"
+    exe=.exe
+    ;;
+  *)
+    cc=clang
+    compiler_src=$src
+    make_cmd=(make)
+    exe=
+    ;;
+esac
 
 echo "Configuring wimlib $WIMLIB_VERSION"
 
 (
   cd "$src"
 
-  CC=clang \
-  CFLAGS="-g -O2 -ffile-prefix-map=$src=wimlib-$WIMLIB_VERSION" \
+  CC=$cc \
+  MAKE=${make_cmd[0]} \
+  CFLAGS="-g -O2 -ffile-prefix-map=$compiler_src=wimlib-$WIMLIB_VERSION" \
   ./configure \
     --prefix=/usr \
     "${WIMLIB_CONFIGURE_FLAGS[@]}"
 
   echo "Building wimlib $WIMLIB_VERSION"
-  ZERO_AR_DATE=1 make -j2
+  ZERO_AR_DATE=1 "${make_cmd[@]}" -j2
 )
 
 #
@@ -211,7 +264,7 @@ printf '%s\n' \
   'GoFlasher libwim smoke fixture' \
   >"$smoke_root/file.txt"
 
-wimlib_imagex="$src/wimlib-imagex"
+wimlib_imagex="$src/wimlib-imagex$exe"
 
 if [[ ! -x "$wimlib_imagex" ]]; then
   echo "wimlib-imagex was not built: $wimlib_imagex" >&2

@@ -1,68 +1,59 @@
 # TODO
 
-Open work for Linux and Windows. macOS is deferred (see the end).
+Open work for Linux and Windows. macOS is deferred (see the end). Checks
+that need physical hardware are not tracked here.
+
+## Open a PR to confirm CI
+
+The changes below pass locally (Windows: `go test -race ./...`, `go vet`,
+`build.sh`/`verify.sh`, the release packaging and legal gate; Linux: every
+package's tests on a real kernel under WSL Fedora 44). These need a CI run:
+
+- [ ] `wimlib.yml`: the new Windows job (`setup-winlibs` with the pinned
+      WinLibs `.7z` SHA-256 and `choco install pkgconfiglite --version 0.28`,
+      then `build.sh`/`verify.sh` on `windows-latest`), and the existing Linux
+      and macOS jobs. Check that CI's windows-amd64 `libwim.a` hash matches
+      the recorded `2831866f…6db721`, and that `ZERO_AR_DATE` makes the macOS
+      archives reproducible under Xcode 16.4.
+- [ ] Add the linux-amd64, macos-amd64 and macos-arm64 `libwim.a` hashes
+      printed by those jobs to `docs/legal/wimlib-1.14.5/artifact.sha256` and
+      `build-metadata.txt`. Until then `check-wimlib-archive.sh` refuses them.
+- [ ] `ci.yml`: the GUI tests now run with `-race` on Windows as well as
+      macOS; confirm the `windows-latest` runner's MinGW passes.
+
+## Turning the installer builder on in releases
+
+- [ ] Set the repository variables `WIMLIB_COMPLIANCE_RECORD_PATH` to
+      `docs/legal/wimlib-1.14.5`, and `WINDOWS_BUILDER_READY` (and, once their
+      hashes are recorded, `LINUX_WINDOWS_BUILDER_READY` /
+      `MACOS_WINDOWS_BUILDER_READY`) to `true`. Until then every release is
+      raw-writer-only; Windows used DISM before.
+
+The record (`docs/legal/wimlib-1.14.5`) is approved: source and archive
+hashes, build metadata, dependency report, license inventory (dual
+GPL-3.0-or-later / LGPL-2.1-or-later, MIT files inside) with the license
+texts, Corresponding Source and relinking instructions, and `LEGAL_APPROVED`.
+Packages ship it beside the executable (the Windows ZIP under
+`legal/wimlib-1.14.5`, staged by `packaging/windows --wimlib-record`), and the
+publish job attaches the wimlib source archive.
 
 ## Linux
 
-### 1. Installer build performance
+- [ ] Optional hardening from the helper security review: open the installer
+      session descriptor with `O_EXCL`. The kernel would then refuse mounts and
+      swapon on the target for the whole session, instead of the bounded full
+      revalidation (1 s / 64 MiB) catching them afterwards. Needs a check that
+      nothing on a desktop (udisks, blkid) holds an exclusive claim that would
+      make the open fail with `EBUSY`.
 
-The round-trip fixes are in: `fat32.File` writes whole contiguous cluster runs
-and zeroes only the unwritten tail of a run's last cluster, the helper fully
-revalidates at most once per second or 64 MiB and checks the descriptor
-(fstat rdev) for every command, the session descriptor is no longer `O_SYNC`
-(the helper syncs every 32 MiB and on `SessionFlush`), and `hashFile` reads
-contiguous clusters together (up to 1 MiB). With the executor's 1 MiB copy
-buffer, a ~5 GB `install.wim` now takes about 5,000 helper round trips instead
-of about 1.3 million.
-
-- [ ] Security review of the helper changes in `internal/linux/helper_linux.go`:
-      the bounded full revalidation (`fullRevalidationInterval`,
-      `fullRevalidationBytes`) and the dropped `O_SYNC`
-      (`unsyncedWriteLimit`).
-- [ ] Time a full build on physical media and compare it with a build from
-      before these changes.
-
-### 2. Shipping the installer builder
-
-- [ ] wimlib is linked statically into the GUI (`wimlib` build tag), and the
-      Linux and macOS release jobs build it when `LINUX_WINDOWS_BUILDER_READY`
-      or `MACOS_WINDOWS_BUILDER_READY` is true. What is still missing is the
-      compliance record at `WIMLIB_COMPLIANCE_RECORD_PATH`: the approved
-      `libwim.a` hash, dependency report, Corresponding Source location and
-      legal approval. wimlib is still marked "NOT YET CLEARED FOR RELEASE"
-      (`docs/legal/THIRD_PARTY_NOTICES.md`, `docs/legal/RELEASE-COMPLIANCE.md`).
-- [ ] The static wimlib build is verified only on Linux (Ubuntu 24.04
-      container). Confirm that the macOS jobs in `wimlib.yml` pass and that
-      `ZERO_AR_DATE` makes `libwim.a` reproducible under Xcode 16.4.
-      `verify.sh` now also requires `wimlib_register_progress_function`, and
-      `wim-smoke` checks that split progress reaches its total.
-
-## Linux and Windows
-
-- [ ] **Hotplug on real hardware.** The GUI rescans 750 ms after the backend
-      reports a change, and defers the rescan while an operation runs. Linux
-      follows UDisks2 `InterfacesAdded`/`InterfacesRemoved` (checked against
-      the system bus with a loop device only); Windows uses
-      `CM_Register_Notification` for the disk interface class, which has not
-      run yet. Plug and unplug a stick on both, including during a write.
-- [ ] **DISM progress on real hardware.** The split progress parser expects
-      DISM's `[====  25.0%  ]` bar on redirected output. Confirm the bar is
-      printed when stdout is a pipe; otherwise the split stage shows only its
-      start and end.
-
-## Windows
-
-- [ ] **Hardware validation of the new paths** with
-      `docs/development/HARDWARE-TESTING.md`:
-  - installer builder (`OpenInstallerTarget`/`OpenInstallerReader`)
-  - DISM split of an `install.wim` larger than 4 GiB
-  - raw write and read-back of an image whose size is not a multiple of 512
-- [ ] Confirm that a 4Kn USB disk is refused for installer builds
-      (`ErrUnsupportedSectorSize`).
-- [ ] Check raw-write throughput: `blockio.Aligned` forwards at most 1 MiB per
-      request, where the old path issued 4 MiB writes.
-- [ ] The GUI tests run without `-race` on Windows CI (macOS runs them with
-      it). Enable it if the runner's cgo toolchain supports the race detector.
+Review outcome for the bounded revalidation and the dropped `O_SYNC`: every
+command still checks the descriptor's rdev, and a replaced device leaves the
+open descriptor dead rather than redirected, so the window only delays
+noticing a mount or swap on the target itself; `SessionFlush` stays the
+durability point. The review found that `SessionFlush` did not invalidate the
+block cache, so installer read-back verification (a second session on the
+same device) could read cached pages instead of the media. It now syncs and
+then issues `BLKFLSBUF`, like the raw writer's flush.
 
 ## Deferred: macOS
 

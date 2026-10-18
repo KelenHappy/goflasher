@@ -1,0 +1,29 @@
+wimlib 1.14.5 license inventory
+
+libwim (the library portion of wimlib) is dual-licensed (licenses/COPYING):
+  - GPL-3.0-or-later (licenses/COPYING.GPLv3), or
+  - LGPL-2.1-or-later (licenses/COPYING.LGPL), available because this build
+    does not link libntfs-3g (--without-ntfs-3g).
+
+GoFlasher is GPL-3.0 and is distributed with libwim under the
+LGPL-2.1-or-later option; the GPL-3.0-or-later option is equally compatible.
+The LGPL terms GoFlasher honours: LGPL notices and license texts ship with
+every package, the complete Corresponding Source and the material needed to
+relink GoFlasher with a modified libwim are provided (corresponding-source.txt),
+and reverse engineering for debugging such modifications is not prohibited.
+
+Files under the MIT license, compiled into libwim.a:
+  Copyright 2022-2023 Eric Biggers (licenses/MIT-eric-biggers.txt):
+    src/avl_tree.c src/compress_common.c src/cpu_features.c
+    src/decompress_common.c src/lcpit_matchfinder.c src/sha1.c
+    include/wimlib/avl_tree.h include/wimlib/bitops.h
+    include/wimlib/bt_matchfinder.h include/wimlib/compiler.h
+    include/wimlib/decompress_common.h include/wimlib/endianness.h
+    include/wimlib/hc_matchfinder.h include/wimlib/lcpit_matchfinder.h
+    include/wimlib/matchfinder_common.h include/wimlib/security_descriptor.h
+    include/wimlib/sha1.h include/wimlib/unaligned.h include/wimlib/wof.h
+  Copyright (c) 2003-2008 Yuta Mori (licenses/MIT-divsufsort.txt):
+    src/divsufsort.c
+
+All other library sources carry the LGPL-2.1-or-later header, or the wimlib
+project license in licenses/COPYING.

@@ -1,6 +1,4 @@
-//go:build linux || darwin
-
-// Package native is the Unix-only package that owns libwim native handles.
+// Package native owns libwim native handles.
 //
 // wimlib 1.14.5 is linked statically through cgo when the binary is built
 // with the wimlib build tag; see link_wimlib.go. Without that tag Open
