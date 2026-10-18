@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -47,9 +48,8 @@ func TestBuilderCreatesParseableTreeAndChains(t *testing.T) {
 	if d.synced < 2 { // format and final sync
 		t.Fatalf("sync count=%d", d.synced)
 	}
-	boot := d.b[:512]
-	assertFATMirrors(t, d.b, boot)
-	assertTree(t, d.b, boot, want)
+	assertFATMirrors(t, d.b)
+	assertTree(t, d.b, want)
 	assertFSInfo(t, d.b, b)
 }
 
@@ -71,16 +71,22 @@ func writeFile(t *testing.T, b *Builder, name string, data []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, e := f.Write(data); e != nil || n != len(data) {
-		t.Fatalf("Write=%d, %v", n, e)
-	}
+	mustWrite(t, f, data)
 	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func assertFATMirrors(t *testing.T, image, boot []byte) {
+func mustWrite(t *testing.T, f *File, data []byte) {
 	t.Helper()
+	if n, err := f.Write(data); err != nil || n != len(data) {
+		t.Fatalf("Write=%d, %v", n, err)
+	}
+}
+
+func assertFATMirrors(t *testing.T, image []byte) {
+	t.Helper()
+	boot := image[:512]
 	fatOff := int(binary.LittleEndian.Uint16(boot[14:16])) * 512
 	fatBytes := int(binary.LittleEndian.Uint32(boot[36:40])) * 512
 	if !bytes.Equal(image[fatOff:fatOff+fatBytes], image[fatOff+fatBytes:fatOff+2*fatBytes]) {
@@ -88,26 +94,26 @@ func assertFATMirrors(t *testing.T, image, boot []byte) {
 	}
 }
 
-func assertTree(t *testing.T, image, boot, want []byte) {
+func assertTree(t *testing.T, image, want []byte) {
 	t.Helper()
-	efiData := readChain(t, image, boot, entryCluster(findEntry(t, readChain(t, image, boot, 2), "EFI")))
+	efiData := readChain(t, image, entryCluster(findEntry(t, readChain(t, image, 2), "EFI")))
 	if string(efiData[:1]) != "." || string(efiData[32:34]) != ".." {
 		t.Fatal("missing dot entries")
 	}
-	longData := readChain(t, image, boot, entryCluster(findEntry(t, efiData, "啟動工具")))
-	assertFileContents(t, image, boot, findEntry(t, longData, "Very Long Boot Filename.bin"), want)
+	longData := readChain(t, image, entryCluster(findEntry(t, efiData, "啟動工具")))
+	assertFileContents(t, image, findEntry(t, longData, "Very Long Boot Filename.bin"), want)
 	emptyEntry := findEntry(t, efiData, "empty.txt")
 	if entryCluster(emptyEntry) != 0 || entryFileSize(emptyEntry) != 0 {
 		t.Fatal("empty file allocated a cluster")
 	}
 }
 
-func assertFileContents(t *testing.T, image, boot, entry, want []byte) {
+func assertFileContents(t *testing.T, image, entry, want []byte) {
 	t.Helper()
 	if got := entryFileSize(entry); got != uint32(len(want)) {
 		t.Fatalf("size=%d", got)
 	}
-	if got := readChain(t, image, boot, entryCluster(entry))[:len(want)]; !bytes.Equal(got, want) {
+	if got := readChain(t, image, entryCluster(entry))[:len(want)]; !bytes.Equal(got, want) {
 		t.Fatal("cross-cluster contents differ")
 	}
 }
@@ -142,14 +148,15 @@ func TestBuilderDeviceFullFinalizesPartialFile(t *testing.T) {
 	if err = b.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	e := findEntry(t, readChain(t, d.b, d.b[:512], 2), "partial.bin")
+	e := findEntry(t, readChain(t, d.b, 2), "partial.bin")
 	if entryFileSize(e) != uint32(n) {
 		t.Fatal("partial size not finalized")
 	}
 }
 
-func readChain(t *testing.T, image, boot []byte, cluster uint32) []byte {
+func readChain(t *testing.T, image []byte, cluster uint32) []byte {
 	t.Helper()
+	boot := image[:512]
 	spc := uint32(boot[13])
 	reserved := uint32(binary.LittleEndian.Uint16(boot[14:16]))
 	fs := binary.LittleEndian.Uint32(boot[36:40])
@@ -247,6 +254,15 @@ func newDirtyBuilder(t *testing.T) (*recordingDevice, *Builder) {
 	return d, b
 }
 
+// assertWrites checks the WriteAt sizes recorded since the last check and clears them.
+func assertWrites(t *testing.T, d *recordingDevice, want ...int) {
+	t.Helper()
+	if !slices.Equal(d.writes, want) {
+		t.Fatalf("writes=%v, want %v", d.writes, want)
+	}
+	d.writes = nil
+}
+
 func TestBuilderWritesContiguousClustersInOneRequest(t *testing.T) {
 	d, b := newDirtyBuilder(t)
 	cs := b.clusterSize()
@@ -254,19 +270,10 @@ func TestBuilderWritesContiguousClustersInOneRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.Write(bytes.Repeat([]byte{1}, 64*cs)); err != nil {
-		t.Fatal(err)
-	}
-	if len(d.writes) != 1 || d.writes[0] != 64*cs {
-		t.Fatalf("aligned writes=%v, want one of %d bytes", d.writes, 64*cs)
-	}
-	d.writes = nil
-	if _, err = f.Write(bytes.Repeat([]byte{2}, 3*cs+5)); err != nil {
-		t.Fatal(err)
-	}
-	if want := []int{3*cs + 5, cs - 5}; len(d.writes) != 2 || d.writes[0] != want[0] || d.writes[1] != want[1] {
-		t.Fatalf("unaligned writes=%v, want %v (data, zero tail)", d.writes, want)
-	}
+	mustWrite(t, f, bytes.Repeat([]byte{1}, 64*cs))
+	assertWrites(t, d, 64*cs)
+	mustWrite(t, f, bytes.Repeat([]byte{2}, 3*cs+5))
+	assertWrites(t, d, 3*cs+5, cs-5) // data, then the zeroed tail of its last cluster
 	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -282,9 +289,7 @@ func TestBuilderZeroesUnwrittenTailOnDirtyMedia(t *testing.T) {
 	}
 	for i, n := range []int{cs/2 + 7, cs + 3, 11} {
 		chunk := bytes.Repeat([]byte{byte(i + 1)}, n)
-		if _, err = f.Write(chunk); err != nil {
-			t.Fatal(err)
-		}
+		mustWrite(t, f, chunk)
 		want = append(want, chunk...)
 	}
 	if err = f.Close(); err != nil {
@@ -293,10 +298,9 @@ func TestBuilderZeroesUnwrittenTailOnDirtyMedia(t *testing.T) {
 	if err = b.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	boot := d.b[:512]
-	e := findEntry(t, readChain(t, d.b, boot, 2), "odd.bin")
-	chain := readChain(t, d.b, boot, entryCluster(e))
-	assertFileContents(t, d.b, boot, e, want)
+	e := findEntry(t, readChain(t, d.b, 2), "odd.bin")
+	chain := readChain(t, d.b, entryCluster(e))
+	assertFileContents(t, d.b, e, want)
 	if tail := chain[len(want):]; !bytes.Equal(tail, make([]byte, len(tail))) {
 		t.Fatal("stale media data left in the last cluster")
 	}
@@ -313,15 +317,12 @@ func TestBuilderSplitsRunsAroundUsedClusters(t *testing.T) {
 		want[i] = byte(i / cs)
 	}
 	writeFile(t, b, "split.bin", want)
-	if len(d.writes) != 2 || d.writes[0] != 2*cs || d.writes[1] != 3*cs {
-		t.Fatalf("writes=%v, want runs of 2 and 3 clusters", d.writes)
-	}
+	assertWrites(t, d, 2*cs, 3*cs) // runs of 2 and 3 clusters on either side of used
 	if err := b.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	boot := d.b[:512]
-	e := findEntry(t, readChain(t, d.b, boot, 2), "split.bin")
-	assertFileContents(t, d.b, boot, e, want)
+	e := findEntry(t, readChain(t, d.b, 2), "split.bin")
+	assertFileContents(t, d.b, e, want)
 	for c := entryCluster(e); !isChainEnd(c); c = b.fat[c] {
 		if c == used {
 			t.Fatal("file chain took a used cluster")

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -15,16 +16,16 @@ import (
 )
 
 type linuxManager struct {
-	sysClassBlock string
-	mountInfo     string
-	swaps         string
+	sysClassBlock blockClassDir
+	mountInfo     mountInfoFile
+	swaps         swapsFile
 	devRoot       string
 	udisks        udisks.Client
 }
 
 type linuxDiskState struct {
-	mounts map[[2]uint64][]string
-	swaps  map[string]bool
+	mounts mountTable
+	swaps  swapSet
 }
 
 // NewManager returns the native Linux implementation without exposing it in
@@ -39,6 +40,121 @@ func NewManager() Manager {
 	}
 }
 
+// deviceNumber is a block device's major:minor pair.
+type deviceNumber struct{ major, minor uint64 }
+
+func (n deviceNumber) String() string { return fmt.Sprintf("%d:%d", n.major, n.minor) }
+
+func parseDeviceNumber(value string) (deviceNumber, bool) {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) != 2 {
+		return deviceNumber{}, false
+	}
+	major, err1 := strconv.ParseUint(parts[0], 10, 32)
+	minor, err2 := strconv.ParseUint(parts[1], 10, 32)
+	return deviceNumber{major, minor}, err1 == nil && err2 == nil
+}
+
+// blockName is a kernel block device name such as sdb or sdb1.
+type blockName string
+
+// sysfsAttr is a file inside a block device's sysfs directory.
+type sysfsAttr string
+
+const (
+	attrDev       sysfsAttr = "dev"
+	attrPartition sysfsAttr = "partition"
+	attrSize      sysfsAttr = "size"
+	attrRemovable sysfsAttr = "removable"
+	attrVendor    sysfsAttr = "device/vendor"
+	attrModel     sysfsAttr = "device/model"
+	attrSerial    sysfsAttr = "device/serial"
+)
+
+// blockClassDir is the /sys/class/block directory, which links every disk
+// and partition name to its sysfs device directory.
+type blockClassDir string
+
+func (d blockClassDir) entry(name blockName) blockClass {
+	return blockClass(filepath.Join(string(d), string(name)))
+}
+
+// parentOf names the whole disk that owns the device number: the device
+// itself when it is not a partition.
+func (d blockClassDir) parentOf(number deviceNumber) blockName {
+	entries, err := os.ReadDir(string(d))
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		name := blockName(entry.Name())
+		class := d.entry(name)
+		if !class.hasNumber(number) {
+			continue
+		}
+		if !class.isPartition() {
+			return name
+		}
+		if parent, ok := class.parent(); ok {
+			return parent
+		}
+	}
+	return ""
+}
+
+// wholeDisk names the disk that name belongs to: name itself for a disk, or
+// the disk a partition sits under.
+func (d blockClassDir) wholeDisk(name blockName) blockName {
+	class := d.entry(name)
+	if !class.exists() {
+		return ""
+	}
+	if !class.isPartition() {
+		return name
+	}
+	parent, _ := class.parent()
+	return parent
+}
+
+// blockClass is one /sys/class/block entry.
+type blockClass string
+
+func (c blockClass) attrPath(a sysfsAttr) string { return filepath.Join(string(c), string(a)) }
+func (c blockClass) attr(a sysfsAttr) string     { return readText(c.attrPath(a)) }
+func (c blockClass) uintAttr(a sysfsAttr) uint64 {
+	value, _ := strconv.ParseUint(c.attr(a), 10, 64)
+	return value
+}
+func (c blockClass) exists() bool      { return pathExists(string(c)) }
+func (c blockClass) isPartition() bool { return pathExists(c.attrPath(attrPartition)) }
+
+func (c blockClass) deviceNumber() (deviceNumber, bool) { return parseDeviceNumber(c.attr(attrDev)) }
+
+// hasNumber reports whether the entry's dev file holds the given major:minor pair.
+func (c blockClass) hasNumber(number deviceNumber) bool {
+	n, ok := c.deviceNumber()
+	return ok && n == number
+}
+
+// resolve follows the class symlink to the physical sysfs device directory.
+func (c blockClass) resolve() (string, error) { return filepath.EvalSymlinks(string(c)) }
+
+// parent names the disk whose sysfs directory holds this partition.
+func (c blockClass) parent() (blockName, bool) {
+	real, err := c.resolve()
+	if err != nil {
+		return "", false
+	}
+	return blockName(filepath.Base(filepath.Dir(real))), true
+}
+
+// blockEntry is a whole-disk class entry with its symlink resolved.
+type blockEntry struct {
+	name  blockName
+	class blockClass
+	real  string
+}
+
 // entryOutcome separates entries that were never disks from disks that could
 // not be read. Only the latter is reported: partitions are filtered on every
 // healthy system and would drown the count in noise.
@@ -51,15 +167,15 @@ const (
 )
 
 func (m *linuxManager) List(ctx context.Context) ([]Disk, int, error) {
-	entries, err := os.ReadDir(m.sysClassBlock)
+	entries, err := os.ReadDir(string(m.sysClassBlock))
 	if err != nil {
 		return nil, 0, err
 	}
-	mounts, err := linuxMounts(m.mountInfo)
+	mounts, err := m.mountInfo.mounts()
 	if err != nil {
 		return nil, 0, err
 	}
-	swaps, err := linuxSwaps(m.swaps)
+	swaps, err := m.swaps.devices()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -70,7 +186,7 @@ func (m *linuxManager) List(ctx context.Context) ([]Disk, int, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		disk, outcome := m.diskFromEntry(entry.Name(), state)
+		disk, outcome := m.diskFromEntry(blockName(entry.Name()), state)
 		switch outcome {
 		case entryDisk:
 			result = append(result, disk)
@@ -81,49 +197,53 @@ func (m *linuxManager) List(ctx context.Context) ([]Disk, int, error) {
 	return result, skipped, nil
 }
 
-func (m *linuxManager) diskFromEntry(name string, state linuxDiskState) (Disk, entryOutcome) {
-	class := filepath.Join(m.sysClassBlock, name)
-	if pathExists(filepath.Join(class, "partition")) {
+func (m *linuxManager) diskFromEntry(name blockName, state linuxDiskState) (Disk, entryOutcome) {
+	class := m.sysClassBlock.entry(name)
+	if class.isPartition() {
 		return Disk{}, entryNotADisk
 	}
-	real, err := filepath.EvalSymlinks(class)
+	real, err := class.resolve()
 	if err != nil {
 		return Disk{}, entrySkipped
 	}
-	major, minor, ok := linuxDeviceNumber(readText(filepath.Join(class, "dev")))
+	number, ok := class.deviceNumber()
 	if !ok {
 		return Disk{}, entrySkipped
 	}
-	disk := m.readDisk(class, name, real)
-	disk.MountPoints = m.diskMountPoints(name, [2]uint64{major, minor}, state.mounts)
+	disk := m.readDisk(blockEntry{name: name, class: class, real: real})
+	disk.MountPoints = m.diskMountPoints(name, number, state.mounts)
 	disk.Mounted = len(disk.MountPoints) != 0
 	disk.System = systemMountPointPresent(disk.MountPoints) || m.diskUsedForSwap(name, state.swaps)
 	if disk.ID == "" {
-		disk.ID = fmt.Sprintf("%d:%d@%s", major, minor, real)
+		disk.ID = fmt.Sprintf("%s@%s", number, real)
 	}
 	return disk, entryDisk
 }
 
-func (m *linuxManager) readDisk(class, name, real string) Disk {
-	serial := readText(filepath.Join(class, "device/serial"))
-	disk := Disk{Device: filepath.Join(m.devRoot, name), Vendor: readText(filepath.Join(class, "device/vendor")), Model: readText(filepath.Join(class, "device/model")), Serial: serial, ID: serial, Size: readUint(filepath.Join(class, "size")) * 512, Removable: readText(filepath.Join(class, "removable")) == "1", External: strings.Contains(real, "/usb")}
+func (m *linuxManager) readDisk(e blockEntry) Disk {
+	serial := e.class.attr(attrSerial)
+	disk := Disk{Device: m.devicePath(e.name), Vendor: e.class.attr(attrVendor), Model: e.class.attr(attrModel), Serial: serial, ID: serial, Size: e.class.uintAttr(attrSize) * 512, Removable: e.class.attr(attrRemovable) == "1", External: strings.Contains(e.real, "/usb")}
 	if disk.External {
 		disk.Bus = "usb"
 	}
 	return disk
 }
 
-func (m *linuxManager) diskMountPoints(name string, deviceNumber [2]uint64, mounts map[[2]uint64][]string) []string {
+func (m *linuxManager) devicePath(name blockName) string {
+	return filepath.Join(m.devRoot, string(name))
+}
+
+// diskMountPoints collects the mount points of the disk and of its partitions,
+// sorted and without duplicates.
+func (m *linuxManager) diskMountPoints(name blockName, number deviceNumber, mounts mountTable) []string {
 	var result []string
-	for number, points := range mounts {
-		if number != deviceNumber && linuxParent(m.sysClassBlock, number) != name {
-			continue
-		}
-		for _, point := range points {
-			result = appendUnique(result, point)
+	for n, points := range mounts {
+		if n == number || m.sysClassBlock.parentOf(n) == name {
+			result = append(result, points...)
 		}
 	}
-	return result
+	slices.Sort(result)
+	return slices.Compact(result)
 }
 
 func systemMountPointPresent(points []string) bool {
@@ -136,9 +256,9 @@ func systemMountPointPresent(points []string) bool {
 	return false
 }
 
-func (m *linuxManager) diskUsedForSwap(name string, swaps map[string]bool) bool {
+func (m *linuxManager) diskUsedForSwap(name blockName, swaps swapSet) bool {
 	for swap := range swaps {
-		if linuxWholeName(m.sysClassBlock, filepath.Base(swap)) == name {
+		if m.sysClassBlock.wholeDisk(blockName(filepath.Base(swap))) == name {
 			return true
 		}
 	}
@@ -166,12 +286,12 @@ func (m *linuxManager) Unmount(ctx context.Context, selected Disk) error {
 	if err := m.unmountPoints(ctx, fresh.MountPoints); err != nil {
 		return err
 	}
-	return m.verifyUnmounted(ctx, fresh.ID)
+	return m.verifyUnmounted(ctx, fresh)
 }
 
 func (m *linuxManager) unmountPoints(ctx context.Context, points []string) error {
 	for _, point := range points {
-		source := linuxMountSource(m.mountInfo, point)
+		source := m.mountInfo.sourceOf(point)
 		if source == "" {
 			return fmt.Errorf("%w: mount source for %s not found", ErrUnmountFailed, point)
 		}
@@ -182,8 +302,8 @@ func (m *linuxManager) unmountPoints(ctx context.Context, points []string) error
 	return nil
 }
 
-func (m *linuxManager) verifyUnmounted(ctx context.Context, id string) error {
-	again, err := m.Refresh(ctx, id)
+func (m *linuxManager) verifyUnmounted(ctx context.Context, disk Disk) error {
+	again, err := m.Refresh(ctx, disk.ID)
 	if err != nil {
 		return fmt.Errorf("%w: refresh after unmount: %v", ErrUnmountFailed, err)
 	}
@@ -245,38 +365,95 @@ func (m *linuxManager) revalidate(ctx context.Context, selected Disk) (Disk, err
 	return fresh, nil
 }
 
-func linuxMounts(path string) (map[[2]uint64][]string, error) {
-	f, err := os.Open(path)
+// mountInfoFile is a file in /proc/self/mountinfo format.
+type mountInfoFile string
+
+// mountTable lists the mount points of each mounted device number.
+type mountTable map[deviceNumber][]string
+
+// mountInfoLine is the whitespace-separated fields of one mountinfo line.
+type mountInfoLine []string
+
+// lines returns every line read before the end of the file or the first error.
+func (f mountInfoFile) lines() ([]mountInfoLine, error) {
+	file, err := os.Open(string(f))
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	result := make(map[[2]uint64][]string)
-	scanner := bufio.NewScanner(f)
+	defer file.Close()
+	var lines []mountInfoLine
+	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 5 {
-			continue
-		}
-		major, minor, ok := linuxDeviceNumber(fields[2])
-		if ok {
-			result[[2]uint64{major, minor}] = append(result[[2]uint64{major, minor}], fields[4])
-		}
+		lines = append(lines, strings.Fields(scanner.Text()))
 	}
-	return result, scanner.Err()
+	return lines, scanner.Err()
 }
 
-func linuxSwaps(path string) (map[string]bool, error) {
-	result := make(map[string]bool)
-	if path == "" {
-		return result, nil
-	}
-	f, err := os.Open(path)
+func (f mountInfoFile) mounts() (mountTable, error) {
+	lines, err := f.lines()
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
+	result := make(mountTable)
+	for _, l := range lines {
+		if number, ok := l.deviceNumber(); ok {
+			result[number] = append(result[number], l.mountPoint())
+		}
+	}
+	return result, nil
+}
+
+// sourceOf returns the device mounted at point, or "" when none is found.
+func (f mountInfoFile) sourceOf(point string) string {
+	lines, _ := f.lines()
+	for _, l := range lines {
+		if source, ok := l.sourceFor(point); ok {
+			return source
+		}
+	}
+	return ""
+}
+
+func (l mountInfoLine) mountPoint() string { return l[4] }
+
+func (l mountInfoLine) deviceNumber() (deviceNumber, bool) {
+	if len(l) < 5 {
+		return deviceNumber{}, false
+	}
+	return parseDeviceNumber(l[2])
+}
+
+// sourceFor returns the mount source when the line mounts point. The source
+// follows the filesystem type after the "-" separator.
+func (l mountInfoLine) sourceFor(point string) (string, bool) {
+	if len(l) < 10 || l.mountPoint() != point {
+		return "", false
+	}
+	separator := slices.Index(l, "-")
+	if separator < 0 || separator+2 >= len(l) {
+		return "", false
+	}
+	return l[separator+2], true
+}
+
+// swapsFile is a file in /proc/swaps format: a header line, then one swap
+// device path per line.
+type swapsFile string
+
+// swapSet holds the device paths in use as swap.
+type swapSet map[string]bool
+
+func (f swapsFile) devices() (swapSet, error) {
+	result := make(swapSet)
+	if f == "" {
+		return result, nil
+	}
+	file, err := os.Open(string(f))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
 	first := true
 	for scanner.Scan() {
 		if first {
@@ -291,109 +468,8 @@ func linuxSwaps(path string) (map[string]bool, error) {
 	return result, scanner.Err()
 }
 
-func linuxMountSource(path, point string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		if source, ok := mountSourceForPoint(strings.Fields(scanner.Text()), point); ok {
-			return source
-		}
-	}
-	return ""
-}
-
-func mountSourceForPoint(fields []string, point string) (string, bool) {
-	if len(fields) < 10 || fields[4] != point {
-		return "", false
-	}
-	separator := indexOf(fields, "-")
-	if separator < 0 || separator+2 >= len(fields) {
-		return "", false
-	}
-	return fields[separator+2], true
-}
-
-func indexOf(values []string, target string) int {
-	for i, value := range values {
-		if value == target {
-			return i
-		}
-	}
-	return -1
-}
-
-func linuxDeviceNumber(value string) (uint64, uint64, bool) {
-	parts := strings.Split(strings.TrimSpace(value), ":")
-	if len(parts) != 2 {
-		return 0, 0, false
-	}
-	major, err1 := strconv.ParseUint(parts[0], 10, 32)
-	minor, err2 := strconv.ParseUint(parts[1], 10, 32)
-	return major, minor, err1 == nil && err2 == nil
-}
-
-func linuxParent(root string, number [2]uint64) string {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return ""
-	}
-	for _, entry := range entries {
-		class := filepath.Join(root, entry.Name())
-		if !linuxClassHasNumber(class, number) {
-			continue
-		}
-		if !pathExists(filepath.Join(class, "partition")) {
-			return entry.Name()
-		}
-		real, err := filepath.EvalSymlinks(class)
-		if err == nil {
-			return filepath.Base(filepath.Dir(real))
-		}
-	}
-	return ""
-}
-
-// linuxClassHasNumber reports whether the sysfs block class entry's dev file
-// holds the given major:minor pair.
-func linuxClassHasNumber(class string, number [2]uint64) bool {
-	major, minor, ok := linuxDeviceNumber(readText(filepath.Join(class, "dev")))
-	return ok && [2]uint64{major, minor} == number
-}
-
-func linuxWholeName(root, name string) string {
-	class := filepath.Join(root, name)
-	if !pathExists(class) {
-		return ""
-	}
-	if !pathExists(filepath.Join(class, "partition")) {
-		return name
-	}
-	real, err := filepath.EvalSymlinks(class)
-	if err != nil {
-		return ""
-	}
-	return filepath.Base(filepath.Dir(real))
-}
-
-func appendUnique(values []string, value string) []string {
-	for _, existing := range values {
-		if existing == value {
-			return values
-		}
-	}
-	return append(values, value)
-}
-
 func readText(path string) string {
 	data, _ := os.ReadFile(path)
 	return strings.TrimSpace(string(data))
-}
-func readUint(path string) uint64 {
-	value, _ := strconv.ParseUint(readText(path), 10, 64)
-	return value
 }
 func pathExists(path string) bool { _, err := os.Stat(path); return err == nil }

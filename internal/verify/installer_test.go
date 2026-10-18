@@ -30,10 +30,7 @@ func (installerDisk) Sync() error { return nil }
 func buildInstallerDisk(t *testing.T, split bool) (installerDisk, []installer.VerificationEntry) {
 	t.Helper()
 	d, b := newInstallerBuilder(t)
-	var manifest []installer.VerificationEntry
-	for name, data := range installerFiles(split) {
-		manifest = append(manifest, writeInstallerFile(t, b, name, data))
-	}
+	manifest := writeInstallerFiles(t, b, installerFiles(split))
 	if err := b.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -75,22 +72,52 @@ func installerFiles(split bool) map[string][]byte {
 	return files
 }
 
+// writeInstallerFiles stores every file and returns their manifest entries.
+func writeInstallerFiles(t *testing.T, b *fat32.Builder, files map[string][]byte) []installer.VerificationEntry {
+	t.Helper()
+	var manifest []installer.VerificationEntry
+	for name, data := range files {
+		manifest = append(manifest, writeInstallerFile(t, b, name, data))
+	}
+	return manifest
+}
+
 // writeInstallerFile stores data at name and returns its manifest entry.
 func writeInstallerFile(t *testing.T, b *fat32.Builder, name string, data []byte) installer.VerificationEntry {
 	t.Helper()
 	if err := b.MkdirAll(directory(name)); err != nil {
 		t.Fatal(err)
 	}
+	f := mustCreate(t, b, name)
+	mustWrite(t, f, data)
+	mustClose(t, f)
+	return manifestEntry(name, data)
+}
+
+func mustCreate(t *testing.T, b *fat32.Builder, name string) *fat32.File {
+	t.Helper()
 	f, err := b.Create(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.Write(data); err != nil {
+	return f
+}
+
+func mustWrite(t *testing.T, f *fat32.File, data []byte) {
+	t.Helper()
+	if _, err := f.Write(data); err != nil {
 		t.Fatal(err)
 	}
-	if err = f.Close(); err != nil {
+}
+
+func mustClose(t *testing.T, f *fat32.File) {
+	t.Helper()
+	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func manifestEntry(name string, data []byte) installer.VerificationEntry {
 	sum := sha256.Sum256(data)
 	return installer.VerificationEntry{Path: name, Size: uint64(len(data)), SHA256: fmt.Sprintf("%x", sum)}
 }
@@ -165,8 +192,11 @@ func TestVerifyInstallerReportsHashedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls == 0 || last != want || total != want {
-		t.Fatalf("calls=%d last=%d total=%d, want %d", calls, last, total, want)
+	if calls == 0 {
+		t.Fatal("progress was never reported")
+	}
+	if last != want || total != want {
+		t.Fatalf("last=%d total=%d, want %d", last, total, want)
 	}
 }
 
@@ -185,10 +215,7 @@ func TestVerifyInstallerReadsContiguousClustersTogether(t *testing.T) {
 	d, b := newInstallerBuilder(t)
 	files := installerFiles(false)
 	files["sources/boot.wim"] = bytes.Repeat([]byte("LARGE-BOOT-WIM!!"), (4<<20)/16)
-	var manifest []installer.VerificationEntry
-	for name, data := range files {
-		manifest = append(manifest, writeInstallerFile(t, b, name, data))
-	}
+	manifest := writeInstallerFiles(t, b, files)
 	if err := b.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -204,35 +231,23 @@ func TestVerifyInstallerReadsContiguousClustersTogether(t *testing.T) {
 
 func TestVerifyInstallerHashesInterleavedChains(t *testing.T) {
 	d, b := newInstallerBuilder(t)
-	var manifest []installer.VerificationEntry
-	for name, data := range installerFiles(false) {
-		manifest = append(manifest, writeInstallerFile(t, b, name, data))
-	}
+	manifest := writeInstallerFiles(t, b, installerFiles(false))
 	// Alternate cluster-sized writes so neither chain is contiguous.
 	const cluster = 4096
 	names := []string{"sources/a.bin", "sources/b.bin"}
 	data := [][]byte{bytes.Repeat([]byte("A"), 5*cluster+17), bytes.Repeat([]byte("B"), 5*cluster+9)}
 	var open [2]*fat32.File
 	for i, name := range names {
-		f, err := b.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		open[i] = f
+		open[i] = mustCreate(t, b, name)
 	}
 	for off := 0; off < len(data[0]); off += cluster {
 		for i, f := range open {
-			if _, err := f.Write(data[i][off:min(off+cluster, len(data[i]))]); err != nil {
-				t.Fatal(err)
-			}
+			mustWrite(t, f, data[i][off:min(off+cluster, len(data[i]))])
 		}
 	}
 	for i, f := range open {
-		if err := f.Close(); err != nil {
-			t.Fatal(err)
-		}
-		sum := sha256.Sum256(data[i])
-		manifest = append(manifest, installer.VerificationEntry{Path: names[i], Size: uint64(len(data[i])), SHA256: fmt.Sprintf("%x", sum)})
+		mustClose(t, f)
+		manifest = append(manifest, manifestEntry(names[i], data[i]))
 	}
 	if err := b.Sync(); err != nil {
 		t.Fatal(err)

@@ -46,21 +46,80 @@ type RawTarget struct {
 
 func (t RawTarget) valid() bool { return t.Reader != nil && t.Size >= 512 }
 
-type fatVolume struct {
-	fatGeometry
-	r          io.ReaderAt
-	base, size uint64
-	fat        []byte
-	owners     map[uint32]string
-	files      map[string]fatFile
-}
-type fatFile struct {
-	path    string
-	size    uint64
-	cluster uint32
+// lba is the index of a 512-byte logical block on the raw target.
+type lba uint64
+
+func (l lba) offset() uint64 { return uint64(l) * 512 }
+
+// lbaRange is an inclusive span of logical blocks.
+type lbaRange struct{ first, last lba }
+
+// within reports whether r is a non-empty span inside outer.
+func (r lbaRange) within(outer lbaRange) bool {
+	return r.first >= outer.first && r.last <= outer.last && r.first <= r.last
 }
 
-var requiredInstallerFiles = []string{"efi/boot/bootx64.efi", "sources/boot.wim"}
+func (r lbaRange) size() uint64 { return uint64(r.last-r.first+1) * 512 }
+
+// volumePath is a FAT path in the form the verifier compares: lower case,
+// slash separated, and relative to the root directory.
+type volumePath string
+
+func manifestPath(p string) volumePath {
+	return volumePath(strings.ToLower(strings.ReplaceAll(p, "\\", "/")))
+}
+
+func (p volumePath) child(name string) volumePath {
+	name = strings.ToLower(name)
+	if p == "" {
+		return volumePath(name)
+	}
+	return p + "/" + volumePath(name)
+}
+
+// chainOwner names the directory or file a cluster chain belongs to. The
+// directory walk and hashing both claim a file's chain, so they must name the
+// same owner or the cross-link check rejects it.
+type chainOwner string
+
+func (p volumePath) dirOwner() chainOwner  { return chainOwner("dir:" + p) }
+func (p volumePath) fileOwner() chainOwner { return chainOwner("file:" + p) }
+
+// cluster is a FAT32 cluster number; data clusters start at 2.
+type cluster uint32
+
+const (
+	fatEndOfChain cluster = 0x0ffffff8
+	fatEntryMask          = 0x0fffffff
+)
+
+// fatRegion is the byte range of the raw target that holds the FAT32 volume.
+type fatRegion struct {
+	r          io.ReaderAt
+	base, size uint64
+}
+
+func newFATRegion(r io.ReaderAt, extent lbaRange) fatRegion {
+	return fatRegion{r: r, base: extent.first.offset(), size: extent.size()}
+}
+
+func (p fatRegion) read(off, n uint64) ([]byte, error)  { return readAt(p.r, p.base+off, n) }
+func (p fatRegion) readFull(off uint64, b []byte) error { return readFullAt(p.r, p.base+off, b) }
+
+type fatVolume struct {
+	fatRegion
+	fatGeometry
+	fat    []byte
+	owners map[cluster]chainOwner
+	files  map[volumePath]fatFile
+}
+type fatFile struct {
+	path  volumePath
+	size  uint64
+	first cluster
+}
+
+var requiredInstallerFiles = []volumePath{"efi/boot/bootx64.efi", "sources/boot.wim"}
 
 // VerifyInstaller rereads GPT, FAT metadata, directory trees, and file data
 // exclusively from the raw target. It does not trust Builder state.
@@ -95,11 +154,11 @@ func VerifyInstaller(ctx context.Context, target RawTarget, manifest []installer
 }
 
 func openInstallerVolume(ctx context.Context, target RawTarget) (*fatVolume, error) {
-	start, end, err := verifyGPT(target.Reader, target.Size)
+	esp, err := verifyGPT(target)
 	if err != nil {
 		return nil, errors.Join(ErrGPTLayout, err)
 	}
-	v, err := openFAT(target.Reader, start*512, (end-start+1)*512)
+	v, err := openFAT(newFATRegion(target.Reader, esp))
 	if err != nil {
 		return nil, errors.Join(ErrFAT32Filesystem, err)
 	}
@@ -109,10 +168,10 @@ func openInstallerVolume(ctx context.Context, target RawTarget) (*fatVolume, err
 	return v, nil
 }
 
-func indexManifest(manifest []installer.VerificationEntry) (map[string]installer.VerificationEntry, error) {
-	expected := make(map[string]installer.VerificationEntry, len(manifest))
+func indexManifest(manifest []installer.VerificationEntry) (map[volumePath]installer.VerificationEntry, error) {
+	expected := make(map[volumePath]installer.VerificationEntry, len(manifest))
 	for _, e := range manifest {
-		key := strings.ToLower(strings.ReplaceAll(e.Path, "\\", "/"))
+		key := manifestPath(e.Path)
 		if _, ok := expected[key]; ok {
 			return nil, semantic("duplicate manifest path %s", e.Path)
 		}
@@ -143,7 +202,7 @@ func (m *verifyMeter) add(n uint64) {
 	}
 }
 
-func (v *fatVolume) verifyManifest(ctx context.Context, expected map[string]installer.VerificationEntry, meter *verifyMeter) (int, error) {
+func (v *fatVolume) verifyManifest(ctx context.Context, expected map[volumePath]installer.VerificationEntry, meter *verifyMeter) (int, error) {
 	verified := 0
 	for key, e := range expected {
 		if err := v.verifyEntry(ctx, key, e, meter); err != nil {
@@ -154,7 +213,7 @@ func (v *fatVolume) verifyManifest(ctx context.Context, expected map[string]inst
 	return verified, nil
 }
 
-func (v *fatVolume) verifyEntry(ctx context.Context, key string, e installer.VerificationEntry, meter *verifyMeter) error {
+func (v *fatVolume) verifyEntry(ctx context.Context, key volumePath, e installer.VerificationEntry, meter *verifyMeter) error {
 	actual, ok := v.files[key]
 	if !ok {
 		return semantic("manifest path missing: %s", e.Path)
@@ -172,7 +231,7 @@ func (v *fatVolume) verifyEntry(ctx context.Context, key string, e installer.Ver
 	return nil
 }
 
-func verifyInstallerLayout(files map[string]fatFile, options InstallerOptions) error {
+func verifyInstallerLayout(files map[volumePath]fatFile, options InstallerOptions) error {
 	for _, required := range requiredInstallerFiles {
 		if _, ok := files[required]; !ok {
 			return semantic("required installer file missing: %s", required)
@@ -184,149 +243,120 @@ func verifyInstallerLayout(files map[string]fatFile, options InstallerOptions) e
 	return nil
 }
 
+// sector is one raw sector read from the target.
+type sector []byte
+
+func readSector(r io.ReaderAt, at lba) (sector, error) { return readAt(r, at.offset(), 512) }
+
+func (s sector) hasBootSignature() bool { return s[510] == 0x55 && s[511] == 0xaa }
+func (s sector) isProtectiveMBR() bool  { return s.hasBootSignature() && s[450] == 0xee }
+func (s sector) isFAT32Boot() bool {
+	return s.hasBootSignature() && string(s[82:90]) == "FAT32   "
+}
+
+func (s sector) isFSInfo() bool {
+	const lead, structural, trail = 0x41615252, 0x61417272, 0xaa550000
+	if binary.LittleEndian.Uint32(s[:4]) != lead {
+		return false
+	}
+	if binary.LittleEndian.Uint32(s[484:488]) != structural {
+		return false
+	}
+	return binary.LittleEndian.Uint32(s[508:512]) == trail
+}
+
 // gptHeaders holds the primary and backup header sectors, which verifyGPT
 // validates independently before comparing them with each other.
 type gptHeaders struct {
-	primary, backup []byte
-	totalSectors    uint64
+	primary, backup gptHeader
+	totalSectors    lba
 }
 
-func verifyGPT(r io.ReaderAt, size uint64) (uint64, uint64, error) {
-	if err := verifyProtectiveMBR(r); err != nil {
-		return 0, 0, err
+func verifyGPT(target RawTarget) (lbaRange, error) {
+	if err := verifyProtectiveMBR(target.Reader); err != nil {
+		return lbaRange{}, err
 	}
-	h, err := readGPTHeaders(r, size)
+	h, err := readGPTHeaders(target)
 	if err != nil {
-		return 0, 0, err
+		return lbaRange{}, err
 	}
-	entries, entrySize, err := readGPTArray(r, h)
+	array, err := readGPTArray(target.Reader, h)
 	if err != nil {
-		return 0, 0, err
+		return lbaRange{}, err
 	}
-	return findSingleESP(h.primary, entries, entrySize)
+	return array.singleESP(h.primary.usable())
 }
 
 func verifyProtectiveMBR(r io.ReaderAt) error {
-	mbr, err := readAt(r, 0, 512)
+	mbr, err := readSector(r, 0)
 	if err != nil {
 		return err
 	}
-	if !validProtectiveMBR(mbr) {
+	if !mbr.isProtectiveMBR() {
 		return semantic("invalid protective MBR")
 	}
 	return nil
 }
 
-func validProtectiveMBR(mbr []byte) bool {
-	return hasBootSignature(mbr) && mbr[450] == 0xee
-}
-
-func hasBootSignature(sector []byte) bool {
-	return sector[510] == 0x55 && sector[511] == 0xaa
-}
-
-func readGPTHeaders(r io.ReaderAt, size uint64) (gptHeaders, error) {
-	total := size / 512
+func readGPTHeaders(target RawTarget) (gptHeaders, error) {
+	total := lba(target.Size / 512)
 	if total < 68 {
 		return gptHeaders{}, semantic("target too small for GPT")
 	}
-	primary, err := readAt(r, 512, 512)
+	primary, err := readGPTHeader(target.Reader, 1, total-1)
 	if err != nil {
 		return gptHeaders{}, err
 	}
-	backup, err := readAt(r, (total-1)*512, 512)
+	backup, err := readGPTHeader(target.Reader, total-1, 1)
 	if err != nil {
 		return gptHeaders{}, err
 	}
-	if err = verifyGPTHeader(primary, 1, total-1); err != nil {
-		return gptHeaders{}, err
-	}
-	if err = verifyGPTHeader(backup, total-1, 1); err != nil {
-		return gptHeaders{}, err
-	}
-	if !sameGPTMetadata(primary, backup) {
+	if !primary.sameMetadata(backup) {
 		return gptHeaders{}, semantic("primary and backup GPT metadata differ")
 	}
 	return gptHeaders{primary: primary, backup: backup, totalSectors: total}, nil
 }
 
-// sameGPTMetadata compares the disk GUID and the usable LBA range, which must
-// agree between the primary and backup headers.
-func sameGPTMetadata(primary, backup []byte) bool {
-	if !bytes.Equal(primary[56:72], backup[56:72]) {
-		return false
-	}
-	return bytes.Equal(primary[40:56], backup[40:56])
-}
-
-func readGPTArray(r io.ReaderAt, h gptHeaders) ([]byte, uint64, error) {
-	count, entrySize := binary.LittleEndian.Uint32(h.primary[80:84]), binary.LittleEndian.Uint32(h.primary[84:88])
-	if !validGPTEntryGeometry(count, entrySize) {
-		return nil, 0, semantic("invalid GPT entry geometry")
-	}
-	arrayBytes := uint64(count) * uint64(entrySize)
-	primary, err := readVerifiedGPTArray(r, h.primary, arrayBytes)
-	if err != nil {
-		return nil, 0, err
-	}
-	backup, err := readVerifiedGPTArray(r, h.backup, arrayBytes)
-	if err != nil {
-		return nil, 0, err
-	}
-	if !bytes.Equal(primary, backup) {
-		return nil, 0, semantic("primary and backup GPT arrays differ")
-	}
-	return primary, uint64(entrySize), nil
-}
-
-func validGPTEntryGeometry(count, entrySize uint32) bool {
-	if count == 0 || entrySize < 128 {
-		return false
-	}
-	return uint64(count)*uint64(entrySize) <= 64<<20
-}
-
-func readVerifiedGPTArray(r io.ReaderAt, header []byte, arrayBytes uint64) ([]byte, error) {
-	array, err := readAt(r, binary.LittleEndian.Uint64(header[72:80])*512, arrayBytes)
+// readGPTHeader reads the header at the given LBA and checks that it names
+// itself and its alternate correctly.
+func readGPTHeader(r io.ReaderAt, at, alternate lba) (gptHeader, error) {
+	s, err := readSector(r, at)
 	if err != nil {
 		return nil, err
 	}
-	if crc32.ChecksumIEEE(array) != binary.LittleEndian.Uint32(header[88:92]) {
-		return nil, semantic("GPT partition array CRC mismatch")
+	h := gptHeader(s)
+	if err = h.verify(at, alternate); err != nil {
+		return nil, err
 	}
-	return array, nil
+	return h, nil
 }
 
-func findSingleESP(primary, entries []byte, entrySize uint64) (uint64, uint64, error) {
-	var found int
-	var start, end uint64
-	for off := uint64(0); off < uint64(len(entries)); off += entrySize {
-		e := entries[off : off+entrySize]
-		if bytes.Equal(e[:16], make([]byte, 16)) {
-			continue
-		}
-		found++
-		if !bytes.Equal(e[:16], gpt.EFITypeGUID.MarshalBinary()) {
-			return 0, 0, semantic("non-ESP GPT partition")
-		}
-		start, end = binary.LittleEndian.Uint64(e[32:40]), binary.LittleEndian.Uint64(e[40:48])
-	}
-	first, last := binary.LittleEndian.Uint64(primary[40:48]), binary.LittleEndian.Uint64(primary[48:56])
-	if found != 1 || !withinUsableLBAs(start, end, first, last) {
-		return 0, 0, semantic("invalid single ESP bounds")
-	}
-	return start, end, nil
+// gptHeader is a raw GPT header sector.
+type gptHeader []byte
+
+func (h gptHeader) usable() lbaRange {
+	return lbaRange{lba(binary.LittleEndian.Uint64(h[40:48])), lba(binary.LittleEndian.Uint64(h[48:56]))}
+}
+func (h gptHeader) arrayStart() lba  { return lba(binary.LittleEndian.Uint64(h[72:80])) }
+func (h gptHeader) arrayCRC() uint32 { return binary.LittleEndian.Uint32(h[88:92]) }
+func (h gptHeader) entryGeometry() gptEntryGeometry {
+	return gptEntryGeometry{count: binary.LittleEndian.Uint32(h[80:84]), size: binary.LittleEndian.Uint32(h[84:88])}
 }
 
-func withinUsableLBAs(start, end, first, last uint64) bool {
-	return start >= first && end <= last && start <= end
+// sameMetadata compares the disk GUID and the usable LBA range, which must
+// agree between the primary and backup headers.
+func (h gptHeader) sameMetadata(other gptHeader) bool {
+	if !bytes.Equal(h[56:72], other[56:72]) {
+		return false
+	}
+	return bytes.Equal(h[40:56], other[40:56])
 }
 
-func verifyGPTHeader(h []byte, current, alternate uint64) error {
+func (h gptHeader) verify(current, alternate lba) error {
 	if string(h[:8]) != "EFI PART" {
 		return semantic("invalid GPT header")
 	}
-	if binary.LittleEndian.Uint64(h[24:32]) != current || binary.LittleEndian.Uint64(h[32:40]) != alternate {
+	if lba(binary.LittleEndian.Uint64(h[24:32])) != current || lba(binary.LittleEndian.Uint64(h[32:40])) != alternate {
 		return semantic("invalid GPT header")
 	}
 	n := binary.LittleEndian.Uint32(h[12:16])
@@ -342,6 +372,87 @@ func verifyGPTHeader(h []byte, current, alternate uint64) error {
 	return nil
 }
 
+// readArray reads the partition entry array the header points to and checks
+// it against the header's CRC.
+func (h gptHeader) readArray(r io.ReaderAt, g gptEntryGeometry) ([]byte, error) {
+	array, err := readAt(r, h.arrayStart().offset(), g.bytes())
+	if err != nil {
+		return nil, err
+	}
+	if crc32.ChecksumIEEE(array) != h.arrayCRC() {
+		return nil, semantic("GPT partition array CRC mismatch")
+	}
+	return array, nil
+}
+
+// gptEntryGeometry is the partition entry count and size a GPT header declares.
+type gptEntryGeometry struct{ count, size uint32 }
+
+func (g gptEntryGeometry) bytes() uint64 { return uint64(g.count) * uint64(g.size) }
+
+func (g gptEntryGeometry) valid() bool {
+	if g.count == 0 || g.size < 128 {
+		return false
+	}
+	return g.bytes() <= 64<<20
+}
+
+func readGPTArray(r io.ReaderAt, h gptHeaders) (gptArray, error) {
+	g := h.primary.entryGeometry()
+	if !g.valid() {
+		return gptArray{}, semantic("invalid GPT entry geometry")
+	}
+	primary, err := h.primary.readArray(r, g)
+	if err != nil {
+		return gptArray{}, err
+	}
+	backup, err := h.backup.readArray(r, g)
+	if err != nil {
+		return gptArray{}, err
+	}
+	if !bytes.Equal(primary, backup) {
+		return gptArray{}, semantic("primary and backup GPT arrays differ")
+	}
+	return gptArray{entries: primary, entrySize: uint64(g.size)}, nil
+}
+
+// gptArray is a verified partition entry array.
+type gptArray struct {
+	entries   []byte
+	entrySize uint64
+}
+
+// singleESP returns the extent of the array's only partition, which must be
+// an ESP inside the usable LBAs.
+func (a gptArray) singleESP(usable lbaRange) (lbaRange, error) {
+	var found int
+	var esp lbaRange
+	for off := uint64(0); off < uint64(len(a.entries)); off += a.entrySize {
+		e := gptEntry(a.entries[off : off+a.entrySize])
+		if e.unused() {
+			continue
+		}
+		found++
+		if !e.isESP() {
+			return lbaRange{}, semantic("non-ESP GPT partition")
+		}
+		esp = e.extent()
+	}
+	if found != 1 || !esp.within(usable) {
+		return lbaRange{}, semantic("invalid single ESP bounds")
+	}
+	return esp, nil
+}
+
+// gptEntry is one raw partition entry.
+type gptEntry []byte
+
+func (e gptEntry) unused() bool { return bytes.Equal(e[:16], make([]byte, 16)) }
+func (e gptEntry) isESP() bool  { return bytes.Equal(e[:16], gpt.EFITypeGUID.MarshalBinary()) }
+func (e gptEntry) extent() lbaRange {
+	return lbaRange{lba(binary.LittleEndian.Uint64(e[32:40])), lba(binary.LittleEndian.Uint64(e[40:48]))}
+}
+
 // fatGeometry is the subset of the BPB the verifier relies on.
 type fatGeometry struct {
 	bytesPerSector, sectorsPerCluster, reserved, fatSectors, totalSectors uint64
@@ -349,7 +460,7 @@ type fatGeometry struct {
 	backupSector, fsInfoSector                                            uint64
 }
 
-func parseFATGeometry(boot []byte) fatGeometry {
+func parseFATGeometry(boot sector) fatGeometry {
 	return fatGeometry{
 		bytesPerSector:    uint64(binary.LittleEndian.Uint16(boot[11:13])),
 		sectorsPerCluster: uint64(boot[13]),
@@ -362,7 +473,9 @@ func parseFATGeometry(boot []byte) fatGeometry {
 	}
 }
 
-func (g fatGeometry) valid(volumeSize uint64) bool {
+// valid reports whether the geometry is one the verifier supports and fits
+// inside the region it was read from.
+func (g fatGeometry) valid(p fatRegion) bool {
 	if g.bytesPerSector != 512 || g.fats != 2 {
 		return false
 	}
@@ -372,91 +485,81 @@ func (g fatGeometry) valid(volumeSize uint64) bool {
 	if g.reserved < 2 || g.fatSectors == 0 {
 		return false
 	}
-	return g.totalSectors*512 <= volumeSize
+	return g.totalSectors*512 <= p.size
 }
 
 func isPowerOfTwo(v uint64) bool { return v&(v-1) == 0 }
 
-func (g fatGeometry) sectorOffset(base, sector uint64) uint64 { return base + sector*g.bytesPerSector }
-func (g fatGeometry) fatBytes() uint64                        { return g.fatSectors * g.bytesPerSector }
+func (g fatGeometry) sectorOffset(s uint64) uint64 { return s * g.bytesPerSector }
+func (g fatGeometry) fatBytes() uint64             { return g.fatSectors * g.bytesPerSector }
 
-func openFAT(r io.ReaderAt, base, size uint64) (*fatVolume, error) {
-	boot, g, err := readFATBootSector(r, base, size)
+func openFAT(p fatRegion) (*fatVolume, error) {
+	boot, g, err := readFATBootSector(p)
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyFATBackupSector(r, base, g, boot); err != nil {
+	v := &fatVolume{fatRegion: p, fatGeometry: g, owners: map[cluster]chainOwner{}, files: map[volumePath]fatFile{}}
+	if err = v.verifyBackupBoot(boot); err != nil {
 		return nil, err
 	}
-	if err := verifyFSInfo(r, base, g); err != nil {
+	if err = v.verifyFSInfo(); err != nil {
 		return nil, err
 	}
-	fat, err := readFATMirrors(r, base, g)
-	if err != nil {
+	if v.fat, err = v.readFATMirrors(); err != nil {
 		return nil, err
 	}
-	return &fatVolume{r: r, base: base, size: size, fatGeometry: g, fat: fat, owners: map[uint32]string{}, files: map[string]fatFile{}}, nil
+	return v, nil
 }
 
-func readFATBootSector(r io.ReaderAt, base, size uint64) ([]byte, fatGeometry, error) {
-	boot, err := readAt(r, base, 512)
+func readFATBootSector(p fatRegion) (sector, fatGeometry, error) {
+	b, err := p.read(0, 512)
 	if err != nil {
 		return nil, fatGeometry{}, err
 	}
-	if !validFATBootSector(boot) {
+	boot := sector(b)
+	if !boot.isFAT32Boot() {
 		return nil, fatGeometry{}, semantic("invalid FAT32 boot sector")
 	}
 	g := parseFATGeometry(boot)
-	if !g.valid(size) {
+	if !g.valid(p) {
 		return nil, fatGeometry{}, semantic("invalid FAT32 BPB")
 	}
 	return boot, g, nil
 }
 
-func validFATBootSector(boot []byte) bool {
-	return hasBootSignature(boot) && string(boot[82:90]) == "FAT32   "
+func (v *fatVolume) readSector(s uint64) (sector, error) {
+	return v.read(v.sectorOffset(s), v.bytesPerSector)
 }
 
-func verifyFATBackupSector(r io.ReaderAt, base uint64, g fatGeometry, boot []byte) error {
-	backup, err := readAt(r, g.sectorOffset(base, g.backupSector), g.bytesPerSector)
+func (v *fatVolume) verifyBackupBoot(boot sector) error {
+	backup, err := v.readSector(v.backupSector)
 	if err != nil || !bytes.Equal(boot, backup) {
 		return semantic("FAT32 backup boot sector mismatch")
 	}
 	return nil
 }
 
-func verifyFSInfo(r io.ReaderAt, base uint64, g fatGeometry) error {
-	info, err := readAt(r, g.sectorOffset(base, g.fsInfoSector), g.bytesPerSector)
+func (v *fatVolume) verifyFSInfo() error {
+	info, err := v.readSector(v.fsInfoSector)
 	if err != nil {
 		return err
 	}
-	if !validFSInfo(info) {
+	if !info.isFSInfo() {
 		return semantic("invalid FAT32 FSInfo")
 	}
-	backupInfo, err := readAt(r, g.sectorOffset(base, g.backupSector+g.fsInfoSector), g.bytesPerSector)
+	backupInfo, err := v.readSector(v.backupSector + v.fsInfoSector)
 	if err != nil || !bytes.Equal(info, backupInfo) {
 		return semantic("FAT32 backup FSInfo mismatch")
 	}
 	return nil
 }
 
-func validFSInfo(info []byte) bool {
-	const lead, structural, trail = 0x41615252, 0x61417272, 0xaa550000
-	if binary.LittleEndian.Uint32(info[:4]) != lead {
-		return false
-	}
-	if binary.LittleEndian.Uint32(info[484:488]) != structural {
-		return false
-	}
-	return binary.LittleEndian.Uint32(info[508:512]) == trail
-}
-
-func readFATMirrors(r io.ReaderAt, base uint64, g fatGeometry) ([]byte, error) {
-	fat1, err := readAt(r, g.sectorOffset(base, g.reserved), g.fatBytes())
+func (v *fatVolume) readFATMirrors() ([]byte, error) {
+	fat1, err := v.read(v.sectorOffset(v.reserved), v.fatBytes())
 	if err != nil {
 		return nil, err
 	}
-	fat2, err := readAt(r, g.sectorOffset(base, g.reserved+g.fatSectors), g.fatBytes())
+	fat2, err := v.read(v.sectorOffset(v.reserved+v.fatSectors), v.fatBytes())
 	if err != nil {
 		return nil, err
 	}
@@ -467,21 +570,16 @@ func readFATMirrors(r io.ReaderAt, base uint64, g fatGeometry) ([]byte, error) {
 }
 
 func (v *fatVolume) clusterSize() uint64 { return v.bytesPerSector * v.sectorsPerCluster }
-func (v *fatVolume) maxCluster() uint32 {
-	return uint32((v.totalSectors-v.reserved-2*v.fatSectors)/v.sectorsPerCluster + 1)
+func (v *fatVolume) maxCluster() cluster {
+	return cluster((v.totalSectors-v.reserved-2*v.fatSectors)/v.sectorsPerCluster + 1)
 }
 
-const (
-	fatEndOfChain = 0x0ffffff8
-	fatEntryMask  = 0x0fffffff
-)
-
-func (v *fatVolume) chain(first uint32, owner string) ([]uint32, error) {
+func (v *fatVolume) chain(first cluster, owner chainOwner) ([]cluster, error) {
 	if first < 2 {
 		return nil, nil
 	}
-	seen := map[uint32]bool{}
-	var out []uint32
+	seen := map[cluster]bool{}
+	var out []cluster
 	for c := first; c < fatEndOfChain; c = v.next(c) {
 		if err := v.claimCluster(c, owner, seen); err != nil {
 			return nil, err
@@ -491,14 +589,14 @@ func (v *fatVolume) chain(first uint32, owner string) ([]uint32, error) {
 	return out, nil
 }
 
-func (v *fatVolume) validCluster(c uint32) bool {
+func (v *fatVolume) validCluster(c cluster) bool {
 	if c < 2 || c > v.maxCluster() {
 		return false
 	}
 	return int(c)*4+4 <= len(v.fat)
 }
 
-func (v *fatVolume) claimCluster(c uint32, owner string, seen map[uint32]bool) error {
+func (v *fatVolume) claimCluster(c cluster, owner chainOwner, seen map[cluster]bool) error {
 	if !v.validCluster(c) {
 		return semantic("cluster out of bounds for %s", owner)
 	}
@@ -513,25 +611,26 @@ func (v *fatVolume) claimCluster(c uint32, owner string, seen map[uint32]bool) e
 	return nil
 }
 
-func (v *fatVolume) next(c uint32) uint32 {
-	return binary.LittleEndian.Uint32(v.fat[int(c)*4:int(c)*4+4]) & fatEntryMask
+func (v *fatVolume) next(c cluster) cluster {
+	return cluster(binary.LittleEndian.Uint32(v.fat[int(c)*4:int(c)*4+4]) & fatEntryMask)
 }
 
-func (v *fatVolume) cluster(c uint32) ([]byte, error) {
-	return readAt(v.r, v.clusterOffset(c), v.clusterSize())
+func (v *fatVolume) readCluster(c cluster) ([]byte, error) {
+	return v.read(v.clusterOffset(c), v.clusterSize())
 }
 
-func (v *fatVolume) clusterOffset(c uint32) uint64 {
-	return v.base + (v.reserved+2*v.fatSectors+uint64(c-2)*v.sectorsPerCluster)*v.bytesPerSector
+// clusterOffset is the byte offset of c from the start of the volume.
+func (v *fatVolume) clusterOffset(c cluster) uint64 {
+	return (v.reserved + 2*v.fatSectors + uint64(c-2)*v.sectorsPerCluster) * v.bytesPerSector
 }
 
-func (v *fatVolume) readChain(ctx context.Context, chain []uint32) ([]byte, error) {
+func (v *fatVolume) readChain(ctx context.Context, chain []cluster) ([]byte, error) {
 	var data []byte
 	for _, c := range chain {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		b, err := v.cluster(c)
+		b, err := v.readCluster(c)
 		if err != nil {
 			return nil, err
 		}
@@ -540,15 +639,15 @@ func (v *fatVolume) readChain(ctx context.Context, chain []uint32) ([]byte, erro
 	return data, nil
 }
 
-func (v *fatVolume) walk(ctx context.Context) error { return v.walkDir(ctx, 2, "", map[uint32]bool{}) }
+func (v *fatVolume) walk(ctx context.Context) error { return v.walkDir(ctx, 2, "", map[cluster]bool{}) }
 
-func (v *fatVolume) walkDir(ctx context.Context, first uint32, parent string, dirs map[uint32]bool) error {
+func (v *fatVolume) walkDir(ctx context.Context, first cluster, parent volumePath, dirs map[cluster]bool) error {
 	if dirs[first] {
 		return semantic("directory cycle")
 	}
 	dirs[first] = true
 	defer delete(dirs, first)
-	chain, err := v.chain(first, "dir:"+parent)
+	chain, err := v.chain(first, parent.dirOwner())
 	if err != nil {
 		return err
 	}
@@ -566,108 +665,115 @@ func (v *fatVolume) walkDir(ctx context.Context, first uint32, parent string, di
 
 // dirEntry is a directory record with its long name already resolved.
 type dirEntry struct {
-	name    string
-	attr    byte
-	cluster uint32
-	size    uint64
+	name  string
+	attr  byte
+	first cluster
+	size  uint64
 }
 
 func (e dirEntry) isDir() bool { return e.attr&0x10 != 0 }
 
-// parseDirEntries resolves long-name runs and drops deleted entries, dot
-// entries, and volume labels, leaving only real files and subdirectories.
-func parseDirEntries(data []byte) []dirEntry {
-	var out []dirEntry
-	var lfn [][]byte
-	for off := 0; off+32 <= len(data); off += 32 {
-		raw := data[off : off+32]
-		if raw[0] == 0 {
-			break
-		}
-		if raw[0] == 0xe5 {
-			lfn = nil
-			continue
-		}
-		if raw[11] == 0x0f {
-			lfn = append(lfn, append([]byte(nil), raw...))
-			continue
-		}
-		e := decodeDirEntry(raw, lfn)
-		lfn = nil
-		if !skipDirEntry(e) {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-func decodeDirEntry(raw []byte, lfn [][]byte) dirEntry {
-	name := shortName(raw)
-	if len(lfn) > 0 {
-		name = longName(lfn)
-	}
-	return dirEntry{
-		name:    name,
-		attr:    raw[11],
-		cluster: uint32(binary.LittleEndian.Uint16(raw[26:28])) | uint32(binary.LittleEndian.Uint16(raw[20:22]))<<16,
-		size:    uint64(binary.LittleEndian.Uint32(raw[28:32])),
-	}
-}
-
-func skipDirEntry(e dirEntry) bool {
+// skipped reports volume labels and nameless or dot entries, which are not
+// real files or subdirectories.
+func (e dirEntry) skipped() bool {
 	if e.attr&0x08 != 0 {
 		return true
 	}
 	return e.name == "" || e.name == "." || e.name == ".."
 }
 
-func (v *fatVolume) addEntry(ctx context.Context, e dirEntry, parent string, dirs map[uint32]bool) error {
-	p := strings.ToLower(e.name)
-	if parent != "" {
-		p = parent + "/" + p
+// rawDirEntry is one 32-byte directory record as stored on disk.
+type rawDirEntry []byte
+
+func (r rawDirEntry) endOfDir() bool    { return r[0] == 0 }
+func (r rawDirEntry) deleted() bool     { return r[0] == 0xe5 }
+func (r rawDirEntry) isLFN() bool       { return r[11] == 0x0f }
+func (r rawDirEntry) lfnSequence() byte { return r[0] & 0x1f }
+
+// parseDirEntries resolves long-name runs and drops deleted entries, dot
+// entries, and volume labels, leaving only real files and subdirectories.
+func parseDirEntries(data []byte) []dirEntry {
+	var out []dirEntry
+	var lfn []rawDirEntry
+	for off := 0; off+32 <= len(data); off += 32 {
+		raw := rawDirEntry(data[off : off+32])
+		if raw.endOfDir() {
+			break
+		}
+		if raw.deleted() {
+			lfn = nil
+			continue
+		}
+		if raw.isLFN() {
+			lfn = append(lfn, append(rawDirEntry(nil), raw...))
+			continue
+		}
+		e := raw.decode(lfn)
+		lfn = nil
+		if !e.skipped() {
+			out = append(out, e)
+		}
 	}
+	return out
+}
+
+func (r rawDirEntry) decode(lfn []rawDirEntry) dirEntry {
+	name := r.shortName()
+	if len(lfn) > 0 {
+		name = longName(lfn)
+	}
+	return dirEntry{
+		name:  name,
+		attr:  r[11],
+		first: cluster(binary.LittleEndian.Uint16(r[26:28])) | cluster(binary.LittleEndian.Uint16(r[20:22]))<<16,
+		size:  uint64(binary.LittleEndian.Uint32(r[28:32])),
+	}
+}
+
+func (v *fatVolume) addEntry(ctx context.Context, e dirEntry, parent volumePath, dirs map[cluster]bool) error {
+	p := parent.child(e.name)
 	if e.isDir() {
-		return v.walkDir(ctx, e.cluster, p, dirs)
+		return v.walkDir(ctx, e.first, p, dirs)
 	}
 	if _, exists := v.files[p]; exists {
 		return semantic("duplicate FAT path %s", p)
 	}
-	v.files[p] = fatFile{p, e.size, e.cluster}
-	_, err := v.chain(e.cluster, "file:"+p)
+	v.files[p] = fatFile{p, e.size, e.first}
+	_, err := v.chain(e.first, p.fileOwner())
 	return err
 }
 
-func shortName(e []byte) string {
-	base := strings.TrimSpace(string(e[:8]))
-	ext := strings.TrimSpace(string(e[8:11]))
+func (r rawDirEntry) shortName() string {
+	base := strings.TrimSpace(string(r[:8]))
+	ext := strings.TrimSpace(string(r[8:11]))
 	if ext != "" {
 		return base + "." + ext
 	}
 	return base
 }
 
-// lfnNameFields are the byte ranges holding UTF-16 name characters in a
-// long-name directory entry.
-var lfnNameFields = []struct{ start, end int }{{1, 11}, {14, 26}, {28, 32}}
+// lfnField is a byte range holding UTF-16 name characters in a long-name
+// directory entry.
+type lfnField struct{ start, end int }
 
-func lfnSequence(e []byte) byte { return e[0] & 0x1f }
+var lfnNameFields = []lfnField{{1, 11}, {14, 26}, {28, 32}}
 
-func longName(es [][]byte) string {
-	sort.Slice(es, func(i, j int) bool { return lfnSequence(es[i]) < lfnSequence(es[j]) })
+func longName(es []rawDirEntry) string {
+	sort.Slice(es, func(i, j int) bool { return es[i].lfnSequence() < es[j].lfnSequence() })
 	var u []uint16
 	for _, e := range es {
 		for _, field := range lfnNameFields {
-			u = appendLFNField(u, e, field.start, field.end)
+			u = e.appendLFNField(u, field)
 		}
 	}
 	return string(utf16.Decode(u))
 }
 
-// appendLFNField appends the UTF-16 characters stored in e[start:end],
+// appendLFNField appends the UTF-16 characters stored in one name field,
 // stopping at the NUL terminator or 0xffff padding.
-func appendLFNField(u []uint16, e []byte, start, end int) []uint16 {
-	for i := start; i < end; i += 2 {
-		c := binary.LittleEndian.Uint16(e[i : i+2])
+func (r rawDirEntry) appendLFNField(u []uint16, f lfnField) []uint16 {
+	for i := f.start; i < f.end; i += 2 {
+		c := binary.LittleEndian.Uint16(r[i : i+2])
 		if c == 0 || c == 0xffff {
 			return u
 		}
@@ -677,7 +783,7 @@ func appendLFNField(u []uint16, e []byte, start, end int) []uint16 {
 }
 
 func (v *fatVolume) hashFile(ctx context.Context, f fatFile, meter *verifyMeter) (string, error) {
-	chain, err := v.chain(f.cluster, "file:"+f.path)
+	chain, err := v.chain(f.first, f.path.fileOwner())
 	if err != nil {
 		return "", err
 	}
@@ -696,7 +802,7 @@ func (v *fatVolume) hashFile(ctx context.Context, f fatFile, meter *verifyMeter)
 		}
 		run := contiguousRun(chain, limit)
 		b := buf[:run*cs]
-		if err := readFullAt(v.r, v.clusterOffset(chain[0]), b); err != nil {
+		if err := v.readFull(v.clusterOffset(chain[0]), b); err != nil {
 			return "", err
 		}
 		n := min(uint64(len(b)), remaining)
@@ -713,7 +819,7 @@ const maxHashRead = uint64(1 << 20)
 
 // contiguousRun counts the leading clusters of chain that directly follow one
 // another on disk, at least one and at most limit, so they can be read at once.
-func contiguousRun(chain []uint32, limit uint64) uint64 {
+func contiguousRun(chain []cluster, limit uint64) uint64 {
 	n := uint64(1)
 	for n < uint64(len(chain)) && n < limit && chain[n] == chain[n-1]+1 {
 		n++
@@ -721,7 +827,7 @@ func contiguousRun(chain []uint32, limit uint64) uint64 {
 	return n
 }
 
-func verifySWM(files map[string]fatFile, o InstallerOptions) (int, error) {
+func verifySWM(files map[volumePath]fatFile, o InstallerOptions) (int, error) {
 	parts, err := collectSWMParts(files)
 	if err != nil {
 		return 0, err
@@ -729,13 +835,16 @@ func verifySWM(files map[string]fatFile, o InstallerOptions) (int, error) {
 	if o.RequireSplitWIM && len(parts) == 0 {
 		return 0, semantic("split WIM set missing")
 	}
-	return len(parts), verifySWMSet(parts, o.SplitWIMPolicySize)
+	return len(parts), parts.verify(o.SplitWIMPolicySize)
 }
 
-func collectSWMParts(files map[string]fatFile) (map[int]fatFile, error) {
-	parts := map[int]fatFile{}
+// swmParts maps each split WIM part's 1-based index to its file.
+type swmParts map[int]fatFile
+
+func collectSWMParts(files map[volumePath]fatFile) (swmParts, error) {
+	parts := swmParts{}
 	for p, f := range files {
-		n, ok, err := swmPartNumber(p)
+		n, ok, err := p.swmPartNumber()
 		if err != nil {
 			return nil, err
 		}
@@ -753,24 +862,26 @@ func collectSWMParts(files map[string]fatFile) (map[int]fatFile, error) {
 // swmPartNumber reports the 1-based index of a split WIM part path. Paths
 // that look like parts but do not round-trip through the canonical name are
 // rejected rather than ignored.
-func swmPartNumber(p string) (int, bool, error) {
+func (p volumePath) swmPartNumber() (int, bool, error) {
 	if p == "sources/install.swm" {
 		return 1, true, nil
 	}
-	if !strings.HasPrefix(p, "sources/install") || !strings.HasSuffix(p, ".swm") {
+	if !strings.HasPrefix(string(p), "sources/install") || !strings.HasSuffix(string(p), ".swm") {
 		return 0, false, nil
 	}
 	var n int
-	if _, err := fmt.Sscanf(p, "sources/install%d.swm", &n); err != nil {
+	if _, err := fmt.Sscanf(string(p), "sources/install%d.swm", &n); err != nil {
 		return 0, false, semantic("invalid SWM name %s", p)
 	}
-	if n < 2 || p != fmt.Sprintf("sources/install%d.swm", n) {
+	if n < 2 || string(p) != fmt.Sprintf("sources/install%d.swm", n) {
 		return 0, false, semantic("invalid SWM name %s", p)
 	}
 	return n, true, nil
 }
 
-func verifySWMSet(parts map[int]fatFile, policySize uint64) error {
+// verify checks that the parts are numbered 1..n without gaps and that each
+// is non-empty and within the split policy size.
+func (parts swmParts) verify(policySize uint64) error {
 	for i := 1; i <= len(parts); i++ {
 		f, ok := parts[i]
 		if !ok {

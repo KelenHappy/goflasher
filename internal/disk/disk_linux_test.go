@@ -79,7 +79,7 @@ func (f sysfsFixture) setMountInfo(t *testing.T, content string) {
 }
 
 func (f sysfsFixture) manager(udisks *fakeUDisks) *linuxManager {
-	m := &linuxManager{sysClassBlock: f.class, mountInfo: f.mountInfo, devRoot: "/dev"}
+	m := &linuxManager{sysClassBlock: blockClassDir(f.class), mountInfo: mountInfoFile(f.mountInfo), devRoot: "/dev"}
 	if udisks != nil {
 		m.udisks = udisks
 	}
@@ -178,16 +178,16 @@ func TestLinuxDeviceNumber(t *testing.T) {
 		{input: "invalid"},
 	}
 	for _, tc := range tests {
-		major, minor, ok := linuxDeviceNumber(tc.input)
+		number, ok := parseDeviceNumber(tc.input)
 		if ok != tc.ok {
-			t.Errorf("linuxDeviceNumber(%q) ok = %v, want %v", tc.input, ok, tc.ok)
+			t.Errorf("parseDeviceNumber(%q) ok = %v, want %v", tc.input, ok, tc.ok)
 			continue
 		}
-		if major != tc.major {
-			t.Errorf("linuxDeviceNumber(%q) major = %d, want %d", tc.input, major, tc.major)
+		if number.major != tc.major {
+			t.Errorf("parseDeviceNumber(%q) major = %d, want %d", tc.input, number.major, tc.major)
 		}
-		if minor != tc.minor {
-			t.Errorf("linuxDeviceNumber(%q) minor = %d, want %d", tc.input, minor, tc.minor)
+		if number.minor != tc.minor {
+			t.Errorf("parseDeviceNumber(%q) minor = %d, want %d", tc.input, number.minor, tc.minor)
 		}
 	}
 }

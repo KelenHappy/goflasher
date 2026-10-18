@@ -239,15 +239,7 @@ func (f *File) writeRun(p []byte) (int, error) {
 		}
 	}
 	start := f.b.clusterOffset(f.last) + int64(pos)
-	n := min(cs-pos, len(p))
-	for n < len(p) {
-		c, ok := f.b.allocateAdjacent(f.last)
-		if !ok {
-			break
-		}
-		f.last = c
-		n += min(cs, len(p)-n)
-	}
+	n := f.growRun(min(cs-pos, len(p)), len(p))
 	if err := writeFullAt(f.b.ctx, f.b.dev, p[:n], start); err != nil {
 		return 0, err
 	}
@@ -256,6 +248,22 @@ func (f *File) writeRun(p []byte) (int, error) {
 	}
 	f.size += uint32(n)
 	return n, nil
+}
+
+// growRun extends a run of n bytes that ends in f.last with the clusters
+// directly after it, until the run covers want bytes or the next cluster
+// cannot be claimed, and returns the run's new length.
+func (f *File) growRun(n, want int) int {
+	cs := f.b.clusterSize()
+	for n < want {
+		c, ok := f.b.allocateAdjacent(f.last)
+		if !ok {
+			return n
+		}
+		f.last = c
+		n += min(cs, want-n)
+	}
+	return n
 }
 
 // zeroTail clears the rest of a cluster that a run filled only up to used
@@ -394,7 +402,7 @@ func (b *Builder) allocate(after uint32) (uint32, error) {
 // reporting false when that cluster is past the end of the volume or in use.
 func (b *Builder) allocateAdjacent(c uint32) (uint32, bool) {
 	n := c + 1
-	if b.free == 0 || uint64(n) >= uint64(len(b.fat)) || b.fat[n] != 0 {
+	if b.free == 0 || !b.isFree(n) {
 		return 0, false
 	}
 	b.fat[n] = endOfChain
@@ -404,6 +412,11 @@ func (b *Builder) allocateAdjacent(c uint32) (uint32, bool) {
 		b.next++
 	}
 	return n, true
+}
+
+// isFree reports whether c is inside the volume and not part of any chain.
+func (b *Builder) isFree(c uint32) bool {
+	return uint64(c) < uint64(len(b.fat)) && b.fat[c] == 0
 }
 
 // findFree scans forward from the next-free hint, wrapping once.
