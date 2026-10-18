@@ -169,3 +169,75 @@ func TestVerifyInstallerReportsHashedBytes(t *testing.T) {
 		t.Fatalf("calls=%d last=%d total=%d, want %d", calls, last, total, want)
 	}
 }
+
+// countingReader counts the ReadAt calls that reach a disk image.
+type countingReader struct {
+	r     *bytes.Reader
+	reads int
+}
+
+func (c *countingReader) ReadAt(p []byte, off int64) (int, error) {
+	c.reads++
+	return c.r.ReadAt(p, off)
+}
+
+func TestVerifyInstallerReadsContiguousClustersTogether(t *testing.T) {
+	d, b := newInstallerBuilder(t)
+	files := installerFiles(false)
+	files["sources/boot.wim"] = bytes.Repeat([]byte("LARGE-BOOT-WIM!!"), (4<<20)/16)
+	var manifest []installer.VerificationEntry
+	for name, data := range files {
+		manifest = append(manifest, writeInstallerFile(t, b, name, data))
+	}
+	if err := b.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	r := &countingReader{r: bytes.NewReader(d)}
+	if _, err := VerifyInstaller(context.Background(), RawTarget{Reader: r, Size: uint64(len(d))}, manifest, InstallerOptions{SplitWIMPolicySize: 3800 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	// A 4 MiB file is thousands of clusters; reading runs needs only a few.
+	if r.reads > 64 {
+		t.Fatalf("verification issued %d reads", r.reads)
+	}
+}
+
+func TestVerifyInstallerHashesInterleavedChains(t *testing.T) {
+	d, b := newInstallerBuilder(t)
+	var manifest []installer.VerificationEntry
+	for name, data := range installerFiles(false) {
+		manifest = append(manifest, writeInstallerFile(t, b, name, data))
+	}
+	// Alternate cluster-sized writes so neither chain is contiguous.
+	const cluster = 4096
+	names := []string{"sources/a.bin", "sources/b.bin"}
+	data := [][]byte{bytes.Repeat([]byte("A"), 5*cluster+17), bytes.Repeat([]byte("B"), 5*cluster+9)}
+	var open [2]*fat32.File
+	for i, name := range names {
+		f, err := b.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		open[i] = f
+	}
+	for off := 0; off < len(data[0]); off += cluster {
+		for i, f := range open {
+			if _, err := f.Write(data[i][off:min(off+cluster, len(data[i]))]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for i, f := range open {
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data[i])
+		manifest = append(manifest, installer.VerificationEntry{Path: names[i], Size: uint64(len(data[i])), SHA256: fmt.Sprintf("%x", sum)})
+	}
+	if err := b.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyInstaller(context.Background(), RawTarget{Reader: bytes.NewReader(d), Size: uint64(len(d))}, manifest, InstallerOptions{SplitWIMPolicySize: 3800 << 20}); err != nil {
+		t.Fatal(err)
+	}
+}

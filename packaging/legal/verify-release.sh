@@ -45,7 +45,7 @@ if "$(dirname "${BASH_SOURCE[0]}")/links-wimlib.sh" "$app"; then
   grep -Fxq APPROVED "$record/LEGAL_APPROVED" || { echo "libwim legal approval missing" >&2; exit 65; }
   grep -Fq 'LGPL-2.1-or-later' "$record/license-inventory.txt" || { echo "libwim LGPL-2.1-or-later classification missing" >&2; exit 65; }
   grep -Eiq 'replacement|relink' "$record/corresponding-source.txt" || { echo "libwim replacement/relink instructions missing" >&2; exit 65; }
-  test -d "$record/licenses" && test -n "$(find "$record/licenses" -type f -print -quit)" || { echo "libwim license payload missing" >&2; exit 65; }
+  { test -d "$record/licenses" && test -n "$(find "$record/licenses" -type f -print -quit)"; } || { echo "libwim license payload missing" >&2; exit 65; }
   packaged_licenses=$(find "$payload" -type f \( -path '*/Resources/legal/wimlib-*/*' -o -path '*/share/doc/goflasher/third-party/wimlib-*/*' \) -print -quit)
   test -n "$packaged_licenses" || { echo "libwim notices/licenses absent from final payload" >&2; exit 65; }
 fi

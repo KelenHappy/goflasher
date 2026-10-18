@@ -40,6 +40,7 @@ func runApplication(tr i18n.Localizer) {
 	controller.view.window.SetContent(container.NewVScroll(windowContent(tr, controller.view)))
 	controller.appendLog(tr.T("log.launched"))
 	controller.refresh()
+	controller.watchDevices()
 	controller.view.window.ShowAndRun()
 }
 
@@ -74,6 +75,8 @@ type guiController struct {
 	formatProgress    progress.Update
 	refreshGeneration uint64
 	refreshCancel     context.CancelFunc
+	watchCancel       context.CancelFunc
+	hotplug           *debouncer
 	closing           bool
 	shutdownDone      chan struct{}
 	// installerRun records whether the confirmed run builds Windows installer
@@ -171,6 +174,7 @@ func (c *guiController) closeNow() {
 		c.refreshCancel()
 		c.refreshCancel = nil
 	}
+	c.stopWatchingDevices()
 	c.view.window.SetCloseIntercept(nil)
 	c.view.window.Close()
 	if c.shutdownDone != nil {
@@ -847,10 +851,14 @@ func (c *guiController) progressMetrics(update progress.Update) string {
 
 // installerProgress maps the Windows installer stages onto one bar. The
 // installer always verifies its filesystem, independent of the raw-write
-// verify option, and its two long phases report bytes.
+// verify option. Staging, splitting, extraction and verification report bytes.
 func installerProgress(update progress.Update) float64 {
 	ratio := progressRatio(update)
 	switch update.Stage {
+	case progress.StageStagingWIM:
+		return 0.06 + ratio*0.05
+	case progress.StageSplittingWIM:
+		return 0.11 + ratio*0.04
 	case progress.StageExtracting:
 		return 0.20 + ratio*0.60
 	case progress.StageVerifyingFilesystem:
@@ -863,8 +871,6 @@ func installerProgress(update progress.Update) float64 {
 var installerStageProgress = map[progress.Stage]float64{
 	progress.StageInspecting:   0.02,
 	progress.StagePlanning:     0.05,
-	progress.StageStagingWIM:   0.08,
-	progress.StageSplittingWIM: 0.12,
 	progress.StagePartitioning: 0.16,
 	progress.StageFormatting:   0.18,
 	progress.StageFlushing:     0.80,

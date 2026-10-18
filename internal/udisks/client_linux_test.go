@@ -77,3 +77,24 @@ func TestBlockForDeviceRejectsUnknownOrMalformedProperties(t *testing.T) {
 		t.Fatal("malformed Device property was accepted")
 	}
 }
+
+func TestDeviceSignalAcceptsOnlyBlockDeviceAndDriveChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path dbus.ObjectPath
+		want bool
+	}{
+		{name: "InterfacesAdded", path: "/org/freedesktop/UDisks2/block_devices/sdb", want: true},
+		{name: "InterfacesRemoved", path: "/org/freedesktop/UDisks2/drives/Acme_Flash_123", want: true},
+		{name: "InterfacesAdded", path: "/org/freedesktop/UDisks2/jobs/42"},
+		{name: "PropertiesChanged", path: "/org/freedesktop/UDisks2/block_devices/sdb"},
+	} {
+		signal := &dbus.Signal{Name: objectManagerInterface + "." + tc.name, Body: []any{tc.path}}
+		if got := deviceSignal(signal); got != tc.want {
+			t.Errorf("deviceSignal(%s %s) = %t, want %t", tc.name, tc.path, got, tc.want)
+		}
+	}
+	if deviceSignal(&dbus.Signal{Name: objectManagerInterface + ".InterfacesAdded"}) {
+		t.Error("signal without a body accepted")
+	}
+}

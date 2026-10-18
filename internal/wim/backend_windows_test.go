@@ -5,9 +5,11 @@ package wim
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -23,7 +25,7 @@ func windowsSplitPaths(t *testing.T) (string, string) {
 	return source, output
 }
 
-func fakeWindowsBackend(t *testing.T, run func(context.Context, string, []string) ([]byte, error)) {
+func fakeWindowsBackend(t *testing.T, run func(context.Context, string, []string, io.Writer) error) {
 	t.Helper()
 	oldResolve, oldExecute := resolveDISM, executeDISM
 	resolveDISM = func() (string, error) { return `C:\Windows\System32\dism.exe`, nil }
@@ -70,9 +72,9 @@ func TestDISMArgumentsAreSeparateExactAndSizeRoundsDown(t *testing.T) {
 	source, output := windowsSplitPaths(t)
 	var gotExecutable string
 	var gotArgs []string
-	fakeWindowsBackend(t, func(_ context.Context, executable string, args []string) ([]byte, error) {
+	fakeWindowsBackend(t, func(_ context.Context, executable string, args []string, _ io.Writer) error {
 		gotExecutable, gotArgs = executable, append([]string(nil), args...)
-		return nil, os.WriteFile(filepath.Join(output, "install.swm"), []byte("part"), 0600)
+		return os.WriteFile(filepath.Join(output, "install.swm"), []byte("part"), 0600)
 	})
 	var progress [][2]uint64
 	_, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 5*1024*1024 + 999, Progress: func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) }})
@@ -82,13 +84,27 @@ func TestDISMArgumentsAreSeparateExactAndSizeRoundsDown(t *testing.T) {
 	canonicalSource, canonicalOutput := mustCanonical(t, source), mustCanonical(t, output)
 	want := []string{"/English", "/Split-Image", "/ImageFile:" + canonicalSource, "/SWMFile:" + filepath.Join(canonicalOutput, "install.swm"), "/FileSize:5"}
 	assertDISMInvocation(t, gotExecutable, gotArgs, want)
-	assertProgress(t, progress, [2]uint64{0, 1}, [2]uint64{1, 1})
+	assertProgress(t, progress, [2]uint64{0, 3}, [2]uint64{3, 3})
+}
+
+func TestDISMProgressBarReportsSourceBytes(t *testing.T) {
+	source, output := windowsSplitPaths(t)
+	mustWriteFile(t, source, strings.Repeat("w", 2000))
+	fakeWindowsBackend(t, func(_ context.Context, _ string, _ []string, out io.Writer) error {
+		_, _ = io.WriteString(out, "Splitting image\r\n[=====   25.0%     ]\r[==========  50.0%    ]\r\n")
+		return os.WriteFile(filepath.Join(output, "install.swm"), []byte("part"), 0600)
+	})
+	var progress [][2]uint64
+	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 2 * 1024 * 1024, Progress: func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) }}); err != nil {
+		t.Fatal(err)
+	}
+	assertProgress(t, progress, [2]uint64{0, 2000}, [2]uint64{500, 2000}, [2]uint64{1000, 2000}, [2]uint64{2000, 2000})
 }
 
 func TestDISMRejectsSubMiBPartSizeWithoutExecution(t *testing.T) {
 	source, output := windowsSplitPaths(t)
 	called := false
-	fakeWindowsBackend(t, func(context.Context, string, []string) ([]byte, error) { called = true; return nil, nil })
+	fakeWindowsBackend(t, func(context.Context, string, []string, io.Writer) error { called = true; return nil })
 	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 1024*1024 - 1}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("error=%v", err)
 	}
@@ -103,12 +119,13 @@ func TestDISMFailureAndCancellationCleanPartialOutput(t *testing.T) {
 			source, output := windowsSplitPaths(t)
 			ctx, stop := context.WithCancel(context.Background())
 			defer stop()
-			fakeWindowsBackend(t, func(context.Context, string, []string) ([]byte, error) {
+			fakeWindowsBackend(t, func(_ context.Context, _ string, _ []string, out io.Writer) error {
 				_ = os.WriteFile(filepath.Join(output, "install.swm"), []byte("partial"), 0600)
 				if cancel {
 					stop()
 				}
-				return []byte("diagnostic"), errors.New("exit status 1")
+				_, _ = io.WriteString(out, "diagnostic")
+				return errors.New("exit status 1")
 			})
 			var progress [][2]uint64
 			_, err := Split(ctx, Request{SourcePath: source, OutputDir: output, PartSize: 2 * 1024 * 1024, Progress: func(a, b uint64) { progress = append(progress, [2]uint64{a, b}) }})
@@ -116,15 +133,15 @@ func TestDISMFailureAndCancellationCleanPartialOutput(t *testing.T) {
 			if _, statErr := os.Stat(filepath.Join(output, "install.swm")); !os.IsNotExist(statErr) {
 				t.Fatalf("partial remains: %v", statErr)
 			}
-			assertProgress(t, progress, [2]uint64{0, 1})
+			assertProgress(t, progress, [2]uint64{0, 3})
 		})
 	}
 }
 
 func TestDISMSuccessStillValidatesAndCleansOutput(t *testing.T) {
 	source, output := windowsSplitPaths(t)
-	fakeWindowsBackend(t, func(context.Context, string, []string) ([]byte, error) {
-		return nil, os.WriteFile(filepath.Join(output, "install2.swm"), []byte("gap"), 0600)
+	fakeWindowsBackend(t, func(context.Context, string, []string, io.Writer) error {
+		return os.WriteFile(filepath.Join(output, "install2.swm"), []byte("gap"), 0600)
 	})
 	if _, err := Split(context.Background(), Request{SourcePath: source, OutputDir: output, PartSize: 2 * 1024 * 1024}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("error=%v", err)

@@ -25,11 +25,18 @@ func main() {
 		panic(err)
 	}
 	defer os.RemoveAll(out)
-	parts, err := wim.Split(context.Background(), wim.Request{SourcePath: os.Args[1], OutputDir: out, PartSize: 4 << 20})
+	var reports int
+	var done, total uint64
+	progress := func(d, t uint64) { reports, done, total = reports+1, d, t }
+	parts, err := wim.Split(context.Background(), wim.Request{SourcePath: os.Args[1], OutputDir: out, PartSize: 4 << 20, Progress: progress})
 	if err != nil {
 		panic(fmt.Sprintf("split smoke failed: error=%v", err))
 	}
 	if len(parts) == 0 || filepath.Base(parts[0].Path) != "install.swm" {
 		panic(fmt.Sprintf("split smoke failed: unexpected parts=%v", parts))
+	}
+	// The final SPLIT_END_PART message reports every byte as done.
+	if reports == 0 || total == 0 || done != total {
+		panic(fmt.Sprintf("split smoke failed: progress reports=%d last=%d/%d", reports, done, total))
 	}
 }

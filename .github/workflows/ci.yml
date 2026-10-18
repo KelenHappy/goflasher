@@ -43,8 +43,14 @@ jobs:
       # Exercise the GUI source set without requiring the native Fyne/OpenGL
       # release build on every pull request.
       - name: Test GUI source set
-        if: runner.os == 'Windows' || runner.os == 'macOS'
+        if: runner.os == 'Windows'
         run: go test -tags "fyne ci" ./cmd/usbwriter
+
+      # The tests serialize fyne.Do through a main loop of their own
+      # (serial_driver_fyne_test.go), so they are race-clean.
+      - name: Test GUI source set with race detector
+        if: runner.os == 'macOS'
+        run: go test -race -tags "fyne ci" ./cmd/usbwriter
 
   quality:
     name: Quality
@@ -69,6 +75,12 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # shellcheck is preinstalled on the ubuntu-24.04 runner image.
+      - name: Shellcheck
+        run: |
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 shellcheck
 
       - name: Reject external XZ runtime regressions
         run: |

@@ -11,7 +11,7 @@ import (
 )
 
 type nativeImage interface {
-	Split(string, uint64) error
+	Split(string, uint64, native.SplitProgress) error
 	Close() error
 }
 type nativeLibrary interface {
@@ -51,9 +51,17 @@ func backendSplit(ctx context.Context, req Request) (parts []Part, err error) {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, image.Close()) }()
-	req.report(0, 1)
-	if err := image.Split(filepath.Join(req.OutputDir, "install.swm"), req.PartSize); err != nil {
+	// wimlib calls progress synchronously; returning false aborts the split,
+	// so cancellation takes effect between progress messages.
+	progress := func(done, total uint64) bool {
+		req.report(done, total)
+		return ctx.Err() == nil
+	}
+	if err := image.Split(filepath.Join(req.OutputDir, "install.swm"), req.PartSize, progress); err != nil {
 		removeParts(req.OutputDir)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 	parts, err = discoverParts(req.OutputDir)
@@ -65,6 +73,5 @@ func backendSplit(ctx context.Context, req Request) (parts []Part, err error) {
 		removeParts(req.OutputDir)
 		return nil, err
 	}
-	req.report(1, 1)
 	return parts, nil
 }

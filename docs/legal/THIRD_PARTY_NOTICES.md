@@ -27,7 +27,7 @@ application bundle, package, or accompanying documentation.
 ## github.com/ebitengine/purego
 
 - Purpose: bindings to documented macOS system frameworks without CGo
-- Version: v0.10.2 (from `go.mod`)
+- Version: v0.11.1 (from `go.mod`)
 - License: Apache License 2.0
 - Upstream: <https://github.com/ebitengine/purego>
 

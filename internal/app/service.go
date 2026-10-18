@@ -228,10 +228,14 @@ func (s *Service) prepareSplitWIM(ctx context.Context, info image.Info, plan *Wo
 	}
 	sendStage(ctx, updates, progress.StageStagingWIM)
 	prepared, err := installer.PrepareSplitWIM(ctx, installer.SplitPreparation{
-		Plan:        plan.Windows,
-		Source:      r,
-		Splitter:    s.InstallerSplitter,
-		OnSplitting: func() error { return s.startWIMSplit(ctx, updates) },
+		Plan:     plan.Windows,
+		Source:   r,
+		Splitter: s.InstallerSplitter,
+		Hooks: installer.SplitHooks{
+			StageProgress: byteProgress(ctx, updates, progress.StageStagingWIM),
+			OnSplitting:   func() error { return s.startWIMSplit(ctx, updates) },
+			SplitProgress: byteProgress(ctx, updates, progress.StageSplittingWIM),
+		},
 	})
 	if err != nil {
 		return nil, nil, errors.Join(installer.ErrWIMSplitFailure, err)
@@ -466,13 +470,17 @@ func sendUpdate(ctx context.Context, updates chan<- progress.Update, update prog
 }
 
 // byteProgress returns a callback that reports byte counts for stage, with
-// throughput measured from the moment the callback is created.
+// throughput measured from its first call. Callbacks are often created ahead
+// of their stage, as the split callback is before staging starts.
 func byteProgress(ctx context.Context, updates chan<- progress.Update, stage progress.Stage) func(done, total uint64) {
 	if updates == nil {
 		return nil
 	}
-	start := time.Now()
+	var start time.Time
 	return func(done, total uint64) {
+		if start.IsZero() {
+			start = time.Now()
+		}
 		sendUpdate(ctx, updates, progress.Calculate(stage, done, total, time.Since(start)))
 	}
 }

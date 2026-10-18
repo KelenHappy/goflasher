@@ -6,11 +6,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/goflasher/goflasher/internal/privilege"
 	"golang.org/x/sys/unix"
@@ -131,7 +133,7 @@ func TestInstallerSessionRejectsOutOfBoundsBeforeWrite(t *testing.T) {
 	}
 }
 
-func TestInstallerSessionRevalidatesIdentityForEveryCommand(t *testing.T) {
+func TestInstallerSessionRevalidatesIdentityOnFirstCommand(t *testing.T) {
 	f, env, req, target := installerSessionFixture(t)
 	defer target.Close()
 	real, err := filepath.EvalSymlinks(filepath.Join(f.SysClassBlock, "sdb"))
@@ -150,5 +152,69 @@ func TestInstallerSessionRevalidatesIdentityForEveryCommand(t *testing.T) {
 	}
 	if response.OK || response.Code != "device-changed" {
 		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestInstallerSessionBoundsFullRevalidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		advance time.Duration
+		length  uint64
+	}{
+		{name: "interval elapsed", advance: fullRevalidationInterval, length: 4096},
+		{name: "byte bound reached", length: fullRevalidationBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, env, req, target := installerSessionFixture(t)
+			defer target.Close()
+			now := time.Unix(1_700_000_000, 0)
+			s := installerSession{request: req, target: target, env: env, now: func() time.Time { return now }}
+			requireNoError(t, s.revalidateTarget(4096))
+			write(t, filepath.Join(f.SysClassBlock, "sdb", "device/serial"), "REPLACED")
+			// Within both bounds only the descriptor is checked.
+			requireNoError(t, s.revalidateTarget(4096))
+			now = now.Add(tc.advance)
+			if err := s.revalidateTarget(tc.length); !errors.Is(err, ErrDeviceChanged) {
+				t.Fatalf("revalidateTarget() = %v, want %v", err, ErrDeviceChanged)
+			}
+		})
+	}
+}
+
+func TestInstallerSessionChecksDescriptorBetweenFullRevalidations(t *testing.T) {
+	_, env, req, target := installerSessionFixture(t)
+	defer target.Close()
+	calls := 0
+	env.fstat = func(_ int, st *syscall.Stat_t) error {
+		calls++
+		st.Mode = syscall.S_IFBLK
+		st.Rdev = unix.Mkdev(8, 16)
+		if calls > 1 {
+			st.Rdev = unix.Mkdev(8, 32)
+		}
+		return nil
+	}
+	s := installerSession{request: req, target: target, env: env}
+	requireNoError(t, s.revalidateTarget(4096))
+	if err := s.revalidateTarget(4096); !errors.Is(err, ErrDeviceChanged) {
+		t.Fatalf("revalidateTarget() = %v, want %v", err, ErrDeviceChanged)
+	}
+}
+
+func TestInstallerSessionSyncsAfterUnsyncedWriteLimit(t *testing.T) {
+	_, env, req, target := installerSessionFixture(t)
+	defer target.Close()
+	s := installerSession{request: req, target: target, env: env, output: io.Discard}
+	write := func(n uint64) {
+		t.Helper()
+		requireNoError(t, s.performWrite(privilege.SessionCommand{Offset: 0, Length: uint32(n)}, make([]byte, n)))
+	}
+	write(4096)
+	if s.unsynced != 4096 {
+		t.Fatalf("unsynced=%d after a small write", s.unsynced)
+	}
+	write(unsyncedWriteLimit - 4096)
+	if s.unsynced != 0 {
+		t.Fatalf("unsynced=%d after reaching the limit, want a sync", s.unsynced)
 	}
 }

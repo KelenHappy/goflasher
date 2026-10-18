@@ -16,7 +16,11 @@ type Device interface {
 }
 type ProgressFunc func(uint64)
 
-const sectorSize = uint64(512)
+// LogicalSectorSize is the only sector size Format and Builder lay out. A
+// device reporting any other logical block size cannot hold their output.
+const LogicalSectorSize = 512
+
+const sectorSize = uint64(LogicalSectorSize)
 const reserved = uint64(32)
 const fatCount = uint64(2)
 

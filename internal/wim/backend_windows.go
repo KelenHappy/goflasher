@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,8 +17,16 @@ import (
 const maxDISMDiagnostic = 32 * 1024
 
 var resolveDISM = trustedDISMPath
-var executeDISM = func(ctx context.Context, executable string, args []string) ([]byte, error) {
-	return exec.CommandContext(ctx, executable, args...).CombinedOutput()
+
+// executeDISM runs DISM and streams its combined stdout and stderr to output
+// as it is produced.
+var executeDISM = func(ctx context.Context, executable string, args []string, output io.Writer) error {
+	cmd := exec.CommandContext(ctx, executable, args...)
+	// One writer for both streams: os/exec then calls Write from at most one
+	// goroutine at a time.
+	cmd.Stdout = output
+	cmd.Stderr = output
+	return cmd.Run()
 }
 
 func trustedDISMPath() (string, error) {
@@ -98,18 +107,31 @@ func backendSplit(ctx context.Context, req Request) ([]Part, error) {
 	if err != nil {
 		return nil, errors.Join(ErrUnsupported, err)
 	}
-	req.report(0, 1)
-	output, runErr := executeDISM(ctx, dismPath, splitImageArgs(req.SourcePath, req.OutputDir, sizeMiB))
+	total := progressTotal(req.SourcePath)
+	req.report(0, total)
+	diagnostic := &tailBuffer{limit: maxDISMDiagnostic}
+	progress := &dismProgress{report: func(permille uint64) { req.report(total*permille/1000, total) }}
+	runErr := executeDISM(ctx, dismPath, splitImageArgs(req.SourcePath, req.OutputDir, sizeMiB), io.MultiWriter(diagnostic, progress))
 	if runErr != nil {
 		removeParts(req.OutputDir)
-		return nil, dismFailure(ctx, output, runErr)
+		return nil, dismFailure(ctx, diagnostic.data, runErr)
 	}
 	parts, err := collectDISMParts(ctx, req.OutputDir)
 	if err != nil {
 		return nil, err
 	}
-	req.report(1, 1)
+	req.report(total, total)
 	return parts, nil
+}
+
+// progressTotal is the scale DISM's percentages are reported on: the source
+// size, so throughput reads as bytes per second, or 1000 if it is unknown.
+func progressTotal(sourcePath string) uint64 {
+	info, err := os.Stat(sourcePath)
+	if err != nil || info.Size() <= 0 {
+		return 1000
+	}
+	return uint64(info.Size())
 }
 
 // splitImageArgs builds the DISM command line, one exact argument per element
@@ -125,15 +147,12 @@ func splitImageArgs(sourcePath, outputDir string, sizeMiB uint64) []string {
 }
 
 // dismFailure reports cancellation in preference to DISM's own error, and
-// otherwise attaches at most the tail of DISM's diagnostic output.
+// otherwise attaches output, the bounded tail of DISM's diagnostic output.
 func dismFailure(ctx context.Context, output []byte, runErr error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
 	diagnostic := strings.TrimSpace(string(output))
-	if len(diagnostic) > maxDISMDiagnostic {
-		diagnostic = diagnostic[len(diagnostic)-maxDISMDiagnostic:]
-	}
 	if diagnostic != "" {
 		return fmt.Errorf("DISM Split-Image failed: %w: %s", runErr, diagnostic)
 	}

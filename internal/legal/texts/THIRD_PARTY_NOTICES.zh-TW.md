@@ -22,7 +22,7 @@
 ## github.com/ebitengine/purego
 
 - 用途：不使用CGo的macOS system framework binding
-- 版本：v0.10.2（來自 `go.mod`）
+- 版本：v0.11.1（來自 `go.mod`）
 - 授權：Apache License 2.0
 - 上游：<https://github.com/ebitengine/purego>
 

@@ -25,8 +25,9 @@ type functions struct {
 	getVersionString func() string
 	// int wimlib_open_wim(const tchar *, int, WIMStruct **)
 	openWIM func(string, int32) (uintptr, int32)
-	// int wimlib_split(WIMStruct *, const tchar *, uint64_t, int)
-	split func(uintptr, string, uint64, int32) int32
+	// int wimlib_split(WIMStruct *, const tchar *, uint64_t, int), with the
+	// progress function, when non-nil, registered for the duration of the call
+	split func(uintptr, string, uint64, int32, func(splitEvent) bool) int32
 	// void wimlib_free(WIMStruct *)
 	free func(uintptr)
 	// void wimlib_global_cleanup(void)
@@ -104,7 +105,60 @@ func (l *Library) OpenWIM(path string) (*Image, error) {
 	return &Image{lib: l, handle: handle}, nil
 }
 
-func (i *Image) Split(output string, partSize uint64) error {
+// SplitProgress receives the bytes of the original WIM's resources copied
+// into parts so far, and their total. Returning false aborts the split.
+type SplitProgress func(done, total uint64) bool
+
+// splitEventKind identifies the wimlib progress messages a split reports. The
+// values are shared with the C trampoline in link_wimlib.go.
+type splitEventKind int32
+
+const (
+	// splitPartBegin and splitPartEnd carry wimlib_progress_info_split's
+	// cumulative completed_bytes and total_bytes.
+	splitPartBegin splitEventKind = 1
+	splitPartEnd   splitEventKind = 2
+	// splitPartWrite carries write_streams.completed_compressed_bytes, which
+	// counts the current part only.
+	splitPartWrite splitEventKind = 3
+)
+
+type splitEvent struct {
+	kind             splitEventKind
+	completed, total uint64
+}
+
+// splitTracker turns wimlib's per-part messages into one monotonic count of
+// split bytes. Within a part only compressed write progress is known, so the
+// estimate is clamped and corrected by the exact figure at the part's end.
+type splitTracker struct {
+	report            SplitProgress
+	base, total, last uint64
+}
+
+func (t *splitTracker) handle(e splitEvent) bool {
+	switch e.kind {
+	case splitPartBegin, splitPartEnd:
+		t.base, t.total = e.completed, e.total
+		return t.emit(e.completed)
+	case splitPartWrite:
+		return t.emit(t.base + e.completed)
+	default:
+		return true
+	}
+}
+
+func (t *splitTracker) emit(done uint64) bool {
+	if t.total == 0 {
+		return true
+	}
+	t.last = min(max(done, t.last), t.total)
+	return t.report(t.last, t.total)
+}
+
+// Split writes the image as split parts named after output. progress may be
+// nil.
+func (i *Image) Split(output string, partSize uint64, progress SplitProgress) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.closed || i.handle == 0 {
@@ -118,7 +172,11 @@ func (i *Image) Split(output string, partSize uint64) error {
 	if err := checkPath(output); err != nil {
 		return err
 	}
-	if code := i.lib.fn.split(i.handle, output, partSize, 0); code != 0 {
+	var events func(splitEvent) bool
+	if progress != nil {
+		events = (&splitTracker{report: progress}).handle
+	}
+	if code := i.lib.fn.split(i.handle, output, partSize, 0, events); code != 0 {
 		return i.lib.nativeError("wimlib_split", code)
 	}
 	return nil

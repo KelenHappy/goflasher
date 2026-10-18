@@ -96,6 +96,7 @@ func (r *execution) execute() error {
 		return err
 	}
 	r.total = r.plannedFileBytes()
+	r.reportCopied(0) // start the stage's throughput clock before the first copy
 	if err := r.copyFiles(); err != nil {
 		return err
 	}

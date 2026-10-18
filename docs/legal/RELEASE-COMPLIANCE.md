@@ -7,7 +7,7 @@ source repository. `packaging/legal/verify-release.sh` is the executable gate.
 |---|---|---|---|---|
 | GoFlasher | candidate commit | GPL-3.0 | n/a | Include GPL text and Corresponding Source |
 | ulikunitz/xz | v0.5.16, compiled Go module | BSD-3-Clause | compatible | Preserve copyright/license; packaged |
-| purego | v0.10.2, compiled Go module | Apache-2.0 plus Go-derived BSD-3-Clause portions | compatible with GPLv3 distribution; component terms remain distinct | Include Apache and Go license texts; Linux and macOS |
+| purego | v0.11.1, compiled Go module | Apache-2.0 plus Go-derived BSD-3-Clause portions | compatible with GPLv3 distribution; component terms remain distinct | Include Apache and Go license texts; Linux and macOS |
 | wimlib/libwim | intended 1.14.5, statically linked into the GUI executable; no approved `libwim.a` hash recorded | LGPL-2.1-or-later for the library | compatible with GPL-3.0 distribution, conditionally | Release blocker remains: bind exact archive to source/headers/license texts, preserve LGPL notices, provide Corresponding Source and relinking material, permit reverse engineering for debugging, inventory dependencies, and obtain approval |
 | native transitive dependencies of libwim | `libwim.a` built from `BUILD.lock` references only libc and pthread symbols; no reviewed dependency report attached | **UNCONFIRMED** | **UNCONFIRMED** | Release blocker; classify each actual dependency independently |
 | UEFI component | none permitted | not evaluated | not evaluated | Non-MVP; payload prohibited by gate |

@@ -201,7 +201,7 @@ func (f *File) Write(p []byte) (int, error) {
 	}
 	written := 0
 	for len(p) > 0 {
-		n, err := f.writeChunk(p)
+		n, err := f.writeRun(p)
 		written += n
 		if err != nil {
 			return written, f.fail(err)
@@ -226,9 +226,11 @@ func (f *File) fail(err error) error {
 	return err
 }
 
-// writeChunk writes as much of p as fits in the current cluster, allocating
-// and zeroing a new one at a cluster boundary.
-func (f *File) writeChunk(p []byte) (int, error) {
+// writeRun writes the longest prefix of p that is contiguous on the device:
+// the rest of the current cluster, then every newly allocated cluster that
+// directly follows it. Each run is one device write, so a large Write costs a
+// handful of requests rather than one per cluster.
+func (f *File) writeRun(p []byte) (int, error) {
 	cs := f.b.clusterSize()
 	pos := int(f.size) % cs
 	if pos == 0 {
@@ -236,16 +238,37 @@ func (f *File) writeChunk(p []byte) (int, error) {
 			return 0, err
 		}
 	}
+	start := f.b.clusterOffset(f.last) + int64(pos)
 	n := min(cs-pos, len(p))
-	if err := writeFullAt(f.b.ctx, f.b.dev, p[:n], f.b.clusterOffset(f.last)+int64(pos)); err != nil {
+	for n < len(p) {
+		c, ok := f.b.allocateAdjacent(f.last)
+		if !ok {
+			break
+		}
+		f.last = c
+		n += min(cs, len(p)-n)
+	}
+	if err := writeFullAt(f.b.ctx, f.b.dev, p[:n], start); err != nil {
+		return 0, err
+	}
+	if err := f.zeroTail(start+int64(n), (pos+n)%cs); err != nil {
 		return 0, err
 	}
 	f.size += uint32(n)
 	return n, nil
 }
 
-// openCluster appends a cluster to the chain and zeroes it so stale media
-// data cannot become file data in the unwritten tail.
+// zeroTail clears the rest of a cluster that a run filled only up to used
+// bytes, so stale media data cannot become file data in the unwritten tail.
+// A later Write overwrites the zeros it continues into.
+func (f *File) zeroTail(off int64, used int) error {
+	if used == 0 {
+		return nil
+	}
+	return writeFullAt(f.b.ctx, f.b.dev, make([]byte, f.b.clusterSize()-used), off)
+}
+
+// openCluster appends a cluster, at any free position, to the chain.
 func (f *File) openCluster() error {
 	c, err := f.b.allocate(f.last)
 	if err != nil {
@@ -255,7 +278,7 @@ func (f *File) openCluster() error {
 		f.first = c
 	}
 	f.last = c
-	return writeFullAt(f.b.ctx, f.b.dev, make([]byte, f.b.clusterSize()), f.b.clusterOffset(c))
+	return nil
 }
 
 func (f *File) Close() error {
@@ -365,6 +388,22 @@ func (b *Builder) allocate(after uint32) (uint32, error) {
 	}
 	b.free--
 	return c, nil
+}
+
+// allocateAdjacent claims the cluster directly after c and links it to c,
+// reporting false when that cluster is past the end of the volume or in use.
+func (b *Builder) allocateAdjacent(c uint32) (uint32, bool) {
+	n := c + 1
+	if b.free == 0 || uint64(n) >= uint64(len(b.fat)) || b.fat[n] != 0 {
+		return 0, false
+	}
+	b.fat[n] = endOfChain
+	b.fat[c] = n
+	b.free--
+	if b.next == n {
+		b.next++
+	}
+	return n, true
 }
 
 // findFree scans forward from the next-free hint, wrapping once.

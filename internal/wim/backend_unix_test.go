@@ -34,14 +34,24 @@ type fakeImage struct {
 	splitErr   error
 	splitCalls int
 	closeCalls int
+	// progress is reported in order before the parts are written.
+	progress [][2]uint64
 }
 
-func (f *fakeImage) Split(output string, _ uint64) error {
+var errAbortedByProgress = errors.New("aborted by progress function")
+
+func (f *fakeImage) Split(output string, _ uint64, progress native.SplitProgress) error {
 	f.output = output
 	f.splitCalls++
 	if f.splitErr != nil {
 		_ = os.WriteFile(output, []byte("partial"), 0600)
 		return f.splitErr
+	}
+	for _, p := range f.progress {
+		if !progress(p[0], p[1]) {
+			_ = os.WriteFile(output, []byte("partial"), 0600)
+			return errAbortedByProgress
+		}
 	}
 	if err := os.WriteFile(output, []byte("part-one"), 0600); err != nil {
 		return err
@@ -113,7 +123,7 @@ func TestSplitFailureClosesObjectsAndRemovesPartialParts(t *testing.T) {
 
 func TestSplitReturnsContiguousPartsAndSynchronousProgress(t *testing.T) {
 	source, output := splitPaths(t)
-	image := &fakeImage{}
+	image := &fakeImage{progress: [][2]uint64{{0, 16}, {8, 16}, {16, 16}}}
 	lib := &fakeLibrary{image: image}
 	withFakeNative(t, func() (nativeLibrary, error) { return lib, nil })
 	var progress [][2]uint64
@@ -123,7 +133,29 @@ func TestSplitReturnsContiguousPartsAndSynchronousProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPartNames(t, parts, "install.swm", "install2.swm")
-	assertProgress(t, progress, [2]uint64{0, 1}, [2]uint64{1, 1})
+	assertProgress(t, progress, image.progress...)
+	assertNativeReleased(t, lib, image)
+}
+
+func TestSplitCancellationAbortsNativeSplit(t *testing.T) {
+	source, output := splitPaths(t)
+	image := &fakeImage{progress: [][2]uint64{{0, 16}, {8, 16}, {16, 16}}}
+	lib := &fakeLibrary{image: image}
+	withFakeNative(t, func() (nativeLibrary, error) { return lib, nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var progress [][2]uint64
+	record := func(done, total uint64) {
+		progress = append(progress, [2]uint64{done, total})
+		cancel()
+	}
+	if _, err := Split(ctx, Request{SourcePath: source, OutputDir: output, PartSize: 1024, Progress: record}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Split error=%v, want %v", err, context.Canceled)
+	}
+	assertProgress(t, progress, [2]uint64{0, 16})
+	if _, err := os.Stat(filepath.Join(output, "install.swm")); !os.IsNotExist(err) {
+		t.Fatalf("partial output remains: %v", err)
+	}
 	assertNativeReleased(t, lib, image)
 }
 

@@ -48,8 +48,18 @@ type FAT32Formatter interface {
 	FormatFAT32(context.Context, Device, string, chan<- progress.Update) error
 }
 
+// HotplugBackend is implemented by backends that can tell when removable
+// devices may have been attached or detached.
+type HotplugBackend interface {
+	// WatchDevices calls changed, possibly from several goroutines at once,
+	// whenever the set of devices may have changed. It returns nil once ctx is
+	// done, or an error if watching cannot start or stops.
+	WatchDevices(ctx context.Context, changed func()) error
+}
+
 // InstallerTarget is a bounded random-access raw session. Backends must bind
-// it to the selected device identity and revalidate safety for every command.
+// it to the selected device identity, check that binding for every command,
+// and revalidate identity and safety in full at least at a bounded interval.
 type InstallerTarget interface {
 	io.WriterAt
 	Sync() error

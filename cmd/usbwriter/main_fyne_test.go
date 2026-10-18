@@ -76,11 +76,15 @@ func TestCloseCancelsActiveFormatAndWaits(t *testing.T) {
 	default:
 	}
 	close(formatter.release)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("window did not close after formatting worker exited")
-	}
+	// The worker finishes through fyne.Do, so keep running the main loop.
+	waitFor(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 func TestCloseCancelsActiveWrite(t *testing.T) {
@@ -104,27 +108,29 @@ func TestFormattingExcludesWritingAndPreservesLocalizedStatus(t *testing.T) {
 	c.machine = stateMachineAt(t, core.ImageSelected, core.Ready)
 	formatter := &blockingFormatter{started: make(chan struct{}), release: make(chan struct{})}
 
-	c.runFormat(formatter, c.selected)
+	onGUI(func() { c.runFormat(formatter, c.selected) })
 	<-formatter.started
 	waitFor(t, func() bool { return c.formatProgress.BytesProcessed == 42 })
-	if !c.view.start.Disabled() {
-		t.Fatal("Start is enabled during formatting")
-	}
-	c.startWrite()
-	if got := c.machine.State(); got != core.Ready {
-		t.Fatalf("state after Start during format = %s, want Ready", got)
-	}
+	onGUI(func() {
+		if !c.view.start.Disabled() {
+			t.Error("Start is enabled during formatting")
+		}
+		c.startWrite()
+		if got := c.machine.State(); got != core.Ready {
+			t.Errorf("state after Start during format = %s, want Ready", got)
+		}
 
-	c.setLanguage(i18n.Japanese)
-	if got, want := c.view.status.Text, "フォーマット中"; got != want {
-		t.Errorf("status after language change = %q, want %q", got, want)
-	}
-	if got, want := c.view.metrics.Text, "進捗：42%"; got != want {
-		t.Errorf("metrics after language change = %q, want %q", got, want)
-	}
-	if !c.view.start.Disabled() || !c.view.format.Disabled() {
-		t.Error("destructive controls enabled by language change during formatting")
-	}
+		c.setLanguage(i18n.Japanese)
+		if got, want := c.view.status.Text, "フォーマット中"; got != want {
+			t.Errorf("status after language change = %q, want %q", got, want)
+		}
+		if got, want := c.view.metrics.Text, "進捗：42%"; got != want {
+			t.Errorf("metrics after language change = %q, want %q", got, want)
+		}
+		if !c.view.start.Disabled() || !c.view.format.Disabled() {
+			t.Error("destructive controls enabled by language change during formatting")
+		}
+	})
 
 	close(formatter.release)
 	waitFor(t, func() bool { return c.operation == operationNone })
@@ -163,15 +169,17 @@ func TestRefreshKeepsNewestResult(t *testing.T) {
 		{devices: []device.Device{{Path: "/dev/old"}}, started: firstStarted, release: first},
 		{devices: []device.Device{{Path: "/dev/new"}}, started: secondStarted, release: second},
 	}}
-	c.refresh()
+	onGUI(c.refresh)
 	<-firstStarted
-	c.refresh()
+	onGUI(c.refresh)
 	<-secondStarted
 	close(second)
 	waitFor(t, func() bool { return len(c.devices) == 1 && c.devices[0].Path == "/dev/new" })
 	close(first)
 	time.Sleep(20 * time.Millisecond)
-	if got := c.devices[0].Path; got != "/dev/new" {
+	var got string
+	onGUI(func() { got = c.devices[0].Path })
+	if got != "/dev/new" {
 		t.Fatalf("device after stale refresh completed = %q, want /dev/new", got)
 	}
 }
@@ -184,7 +192,7 @@ func TestRefreshAndLanguageChangeShareGUIThread(t *testing.T) {
 		devices: []device.Device{{Path: "/dev/test"}}, started: started, release: release,
 	}}}
 
-	c.refresh()
+	onGUI(c.refresh)
 	<-started
 	for i := 0; i < 20; i++ {
 		locale := i18n.Japanese
@@ -203,8 +211,7 @@ func TestRefreshAndLanguageChangeShareGUIThread(t *testing.T) {
 // starts one blocks forever inside NewWindow.
 func newTestController(t *testing.T) *guiController {
 	t.Helper()
-	a := test.NewApp()
-	t.Cleanup(a.Quit)
+	a := newSerialTestApp(t)
 	w := test.NewWindow(nil)
 	tr := i18n.New("en")
 	v := newApplicationView(tr, w)

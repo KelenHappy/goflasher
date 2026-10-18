@@ -31,6 +31,27 @@ func (f *fakeUDisks) PowerOff(_ context.Context, devPath string) error {
 	return f.err
 }
 
+func (f *fakeUDisks) Watch(ctx context.Context, changed func()) error {
+	if f.err != nil {
+		return f.err
+	}
+	changed()
+	<-ctx.Done()
+	return nil
+}
+
+func TestWatchDevicesUsesUDisks(t *testing.T) {
+	b := newBackendFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	if err := b.WatchDevices(ctx, func() { calls++; cancel() }); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("changed calls=%d, want 1", calls)
+	}
+}
+
 func TestUnmountAllMountedPartitions(t *testing.T) {
 	t.Run("unmounts every mounted partition", func(t *testing.T) {
 		b := newBackendFixture(t)

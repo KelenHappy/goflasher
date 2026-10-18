@@ -58,7 +58,7 @@ fi
 
 echo "Artifact SHA-256 verified: $actual"
 
-symbols='wimlib_global_init wimlib_get_version wimlib_get_version_string wimlib_open_wim wimlib_split wimlib_free wimlib_global_cleanup wimlib_get_error_string'
+symbols='wimlib_global_init wimlib_get_version wimlib_get_version_string wimlib_open_wim wimlib_split wimlib_register_progress_function wimlib_free wimlib_global_cleanup wimlib_get_error_string'
 
 case "$os" in
   linux)

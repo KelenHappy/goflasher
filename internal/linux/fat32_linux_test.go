@@ -5,6 +5,7 @@ package linux
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,5 +89,31 @@ func assertZeroedRegion(t *testing.T, file *os.File, region zeroedRegion) {
 	data := readAt(t, file, region.size, region.offset)
 	if !bytes.Equal(data, make([]byte, region.size)) {
 		t.Fatalf("stale %s partition metadata was not cleared", region.description)
+	}
+}
+
+func TestHelperRefusesNon512SectorDevicesForSectorLayouts(t *testing.T) {
+	for _, tc := range []struct {
+		mode operationMode
+		want error
+	}{
+		{mode: modeFormatFAT32, want: ErrUnsupportedSectorSize},
+		{mode: modeInstallerSession, want: ErrUnsupportedSectorSize},
+		{mode: modeWrite},
+		{mode: modeRead},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			f, env, req, target := installerSessionFixture(t)
+			_ = target.Close()
+			write(t, filepath.Join(f.SysClassBlock, "sdb", "queue/logical_block_size"), "4096")
+			req.Mode = tc.mode
+			req.Label = "GOFLASHER"
+			g := deviceGuard{req: req, env: env}
+			d, err := g.resolve()
+			requireNoError(t, err)
+			if err := validateDeviceMetadata(req, d); !errors.Is(err, tc.want) {
+				t.Fatalf("validateDeviceMetadata() = %v, want %v", err, tc.want)
+			}
+		})
 	}
 }

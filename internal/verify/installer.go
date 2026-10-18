@@ -132,6 +132,7 @@ func newVerifyMeter(manifest []installer.VerificationEntry, report func(uint64, 
 	for _, e := range manifest {
 		m.total += e.Size
 	}
+	m.add(0) // start the stage's throughput clock before the first read
 	return m
 }
 
@@ -517,8 +518,11 @@ func (v *fatVolume) next(c uint32) uint32 {
 }
 
 func (v *fatVolume) cluster(c uint32) ([]byte, error) {
-	off := v.base + (v.reserved+2*v.fatSectors+uint64(c-2)*v.sectorsPerCluster)*v.bytesPerSector
-	return readAt(v.r, off, v.clusterSize())
+	return readAt(v.r, v.clusterOffset(c), v.clusterSize())
+}
+
+func (v *fatVolume) clusterOffset(c uint32) uint64 {
+	return v.base + (v.reserved+2*v.fatSectors+uint64(c-2)*v.sectorsPerCluster)*v.bytesPerSector
 }
 
 func (v *fatVolume) readChain(ctx context.Context, chain []uint32) ([]byte, error) {
@@ -682,21 +686,39 @@ func (v *fatVolume) hashFile(ctx context.Context, f fatFile, meter *verifyMeter)
 		return "", semantic("invalid chain length for %s", f.path)
 	}
 	h := sha256.New()
+	cs := v.clusterSize()
+	limit := max(1, maxHashRead/cs)
+	buf := make([]byte, limit*cs)
 	remaining := f.size
-	for _, c := range chain {
+	for len(chain) > 0 {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		b, e := v.cluster(c)
-		if e != nil {
-			return "", e
+		run := contiguousRun(chain, limit)
+		b := buf[:run*cs]
+		if err := readFullAt(v.r, v.clusterOffset(chain[0]), b); err != nil {
+			return "", err
 		}
 		n := min(uint64(len(b)), remaining)
 		h.Write(b[:n])
 		remaining -= n
 		meter.add(n)
+		chain = chain[run:]
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// maxHashRead caps one device read while hashing file data.
+const maxHashRead = uint64(1 << 20)
+
+// contiguousRun counts the leading clusters of chain that directly follow one
+// another on disk, at least one and at most limit, so they can be read at once.
+func contiguousRun(chain []uint32, limit uint64) uint64 {
+	n := uint64(1)
+	for n < uint64(len(chain)) && n < limit && chain[n] == chain[n-1]+1 {
+		n++
+	}
+	return n
 }
 
 func verifySWM(files map[string]fatFile, o InstallerOptions) (int, error) {
@@ -772,14 +794,22 @@ func manifestHash(entries []installer.VerificationEntry) string {
 }
 
 func readAt(r io.ReaderAt, off, n uint64) ([]byte, error) {
-	if off > uint64(^uint64(0)>>1) || n > 64<<20 {
+	if n > 64<<20 {
 		return nil, semantic("read out of bounds")
 	}
 	b := make([]byte, n)
-	if _, err := r.ReadAt(b, int64(off)); err != nil {
+	if err := readFullAt(r, off, b); err != nil {
 		return nil, err
 	}
 	return b, nil
+}
+
+func readFullAt(r io.ReaderAt, off uint64, b []byte) error {
+	if off > uint64(^uint64(0)>>1) {
+		return semantic("read out of bounds")
+	}
+	_, err := r.ReadAt(b, int64(off))
+	return err
 }
 
 func semantic(format string, args ...any) error {

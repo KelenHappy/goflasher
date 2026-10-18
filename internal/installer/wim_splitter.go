@@ -41,8 +41,25 @@ type SplitPreparation struct {
 	Plan     *BuildPlan
 	Source   io.ReaderAt
 	Splitter WIMSplitter
+	Hooks    SplitHooks
+}
+
+// SplitHooks lets a caller follow one split preparation. Every field is
+// optional, and each runs synchronously on the preparing goroutine.
+type SplitHooks struct {
+	// StageProgress receives bytes of install.wim staged so far and the total.
+	StageProgress func(done, total uint64)
 	// OnSplitting runs after staging succeeds and before the backend splits.
 	OnSplitting func() error
+	// SplitProgress receives the backend's split progress.
+	SplitProgress func(done, total uint64)
+}
+
+func (h SplitHooks) splitting() error {
+	if h.OnSplitting == nil {
+		return nil
+	}
+	return h.OnSplitting()
 }
 
 func (in SplitPreparation) valid() bool {
@@ -66,7 +83,7 @@ type NativeWIMSplitter struct {
 }
 
 type wimPreparer interface {
-	PrepareWithProgress(context.Context, SplitRequest, func() error) (WIMSplitter, io.Closer, error)
+	PrepareWithProgress(context.Context, SplitRequest, SplitHooks) (WIMSplitter, io.Closer, error)
 }
 
 type preparedNativeWIM struct {
@@ -105,7 +122,7 @@ func PrepareSplitWIM(ctx context.Context, in SplitPreparation) (*PreparedSplitWI
 	if err != nil {
 		return nil, err
 	}
-	prepared, cleanup, err := prepareComplete(ctx, preparer, request, in.OnSplitting)
+	prepared, cleanup, err := prepareComplete(ctx, preparer, request, in.Hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -118,8 +135,8 @@ func PrepareSplitWIM(ctx context.Context, in SplitPreparation) (*PreparedSplitWI
 
 // prepareComplete runs the preparer and rejects a partial result so callers
 // never receive a splitter without its cleanup or vice versa.
-func prepareComplete(ctx context.Context, preparer wimPreparer, request SplitRequest, onSplitting func() error) (WIMSplitter, io.Closer, error) {
-	prepared, cleanup, err := preparer.PrepareWithProgress(ctx, request, onSplitting)
+func prepareComplete(ctx context.Context, preparer wimPreparer, request SplitRequest, hooks SplitHooks) (WIMSplitter, io.Closer, error) {
+	prepared, cleanup, err := preparer.PrepareWithProgress(ctx, request, hooks)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -171,10 +188,10 @@ func (s *NativeWIMSplitter) Split(ctx context.Context, request SplitRequest, emi
 // Prepare performs every source-dependent WIM operation and retains the
 // validated parts until Close. Callers run it before opening the target.
 func (s *NativeWIMSplitter) Prepare(ctx context.Context, request SplitRequest) (WIMSplitter, io.Closer, error) {
-	return s.PrepareWithProgress(ctx, request, nil)
+	return s.PrepareWithProgress(ctx, request, SplitHooks{})
 }
 
-func (s *NativeWIMSplitter) PrepareWithProgress(ctx context.Context, request SplitRequest, onSplitting func() error) (_ WIMSplitter, cleanup io.Closer, err error) {
+func (s *NativeWIMSplitter) PrepareWithProgress(ctx context.Context, request SplitRequest, hooks SplitHooks) (_ WIMSplitter, cleanup io.Closer, err error) {
 	if !s.accepts(request) {
 		return nil, nil, fmt.Errorf("%w: invalid native split input", ErrVerification)
 	}
@@ -182,7 +199,7 @@ func (s *NativeWIMSplitter) PrepareWithProgress(ctx context.Context, request Spl
 	if err != nil {
 		return nil, nil, err
 	}
-	parts, err := s.stageAndSplit(ctx, temporary, request, onSplitting)
+	parts, err := s.stageAndSplit(ctx, temporary, request, hooks)
 	if err != nil {
 		return nil, nil, errors.Join(err, os.RemoveAll(temporary))
 	}
@@ -210,21 +227,19 @@ func newSplitWorkspace() (string, error) {
 
 // stageAndSplit copies the verified source into the workspace, runs the
 // backend, and returns a private copy of the validated part list.
-func (s *NativeWIMSplitter) stageAndSplit(ctx context.Context, temporary string, request SplitRequest, onSplitting func() error) ([]wim.Part, error) {
+func (s *NativeWIMSplitter) stageAndSplit(ctx context.Context, temporary string, request SplitRequest, hooks SplitHooks) ([]wim.Part, error) {
 	sourcePath := filepath.Join(temporary, "install.wim")
-	if err := stageWIM(ctx, sourcePath, request); err != nil {
+	if err := stageWIM(ctx, sourcePath, request, hooks.StageProgress); err != nil {
 		return nil, err
 	}
-	if onSplitting != nil {
-		if err := onSplitting(); err != nil {
-			return nil, err
-		}
+	if err := hooks.splitting(); err != nil {
+		return nil, err
 	}
 	output := filepath.Join(temporary, "split")
 	if err := os.Mkdir(output, 0700); err != nil {
 		return nil, err
 	}
-	parts, err := s.split(ctx, wim.Request{SourcePath: sourcePath, OutputDir: output, PartSize: request.PartSize})
+	parts, err := s.split(ctx, wim.Request{SourcePath: sourcePath, OutputDir: output, PartSize: request.PartSize, Progress: hooks.SplitProgress})
 	if err != nil { // A native call may return only after cancellation; never emit afterwards.
 		return nil, err
 	}
@@ -298,14 +313,25 @@ func (p *preparedNativeWIM) Close() error {
 	return os.RemoveAll(p.temporary)
 }
 
-func stageWIM(ctx context.Context, path string, request SplitRequest) (err error) {
+// stageWIM copies install.wim into path and checks it against the preflight
+// size and hash. progress, when non-nil, receives the bytes staged so far.
+func stageWIM(ctx context.Context, path string, request SplitRequest, progress func(done, total uint64)) (err error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
 	hash := sha256.New()
-	written, err := copyContext(ctx, io.MultiWriter(file, hash), io.LimitReader(request.Source, int64(request.SourceSize)+1))
+	sinks := []io.Writer{file, hash}
+	if progress != nil {
+		var staged uint64
+		progress(0, request.SourceSize)
+		sinks = append(sinks, copyCounter(func(n int) {
+			staged += uint64(n)
+			progress(min(staged, request.SourceSize), request.SourceSize)
+		}))
+	}
+	written, err := copyContext(ctx, io.MultiWriter(sinks...), io.LimitReader(request.Source, int64(request.SourceSize)+1))
 	if err != nil {
 		return err
 	}

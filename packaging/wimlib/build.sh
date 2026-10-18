@@ -65,6 +65,7 @@ case "$host_os" in
     fi
 
     linux_version=$(
+      # shellcheck source=/dev/null
       . /etc/os-release
       printf '%s' "${VERSION_ID:-}"
     )

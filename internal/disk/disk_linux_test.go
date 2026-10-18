@@ -29,6 +29,11 @@ func (f *fakeUDisks) PowerOff(_ context.Context, device string) error {
 	return f.err
 }
 
+func (f *fakeUDisks) Watch(ctx context.Context, _ func()) error {
+	<-ctx.Done()
+	return nil
+}
+
 // sysfsFixture builds a fake sysfs tree for a single removable USB disk
 // named sdb and returns the class/block directory plus the physical path.
 type sysfsFixture struct {

@@ -22,6 +22,9 @@ var (
 	ErrSystemDisk        = errors.New("system disk")
 	ErrDeviceChanged     = errors.New("device identity changed")
 	ErrUnmountFailed     = errors.New("unmount failed")
+	// ErrUnsupportedSectorSize reports a device whose logical block size differs
+	// from the sector size the requested on-disk layout is built for.
+	ErrUnsupportedSectorSize = errors.New("unsupported logical sector size")
 )
 
 // maxGenericUSBFlashSize is a conservative fallback for removable USB mass
@@ -43,6 +46,7 @@ type Backend struct {
 
 var _ device.Backend = (*Backend)(nil)
 var _ device.WindowsInstallerBackend = (*Backend)(nil)
+var _ device.HotplugBackend = (*Backend)(nil)
 
 func NewBackend() *Backend {
 	return &Backend{SysClassBlock: "/sys/class/block", MountInfo: "/proc/self/mountinfo", Swaps: "/proc/swaps", DevRoot: "/dev", UdevDataRoot: "/run/udev/data", helper: newCommandHelper(), udisks: udisks.New()}
@@ -411,6 +415,12 @@ func (b *Backend) Eject(ctx context.Context, d device.Device) error {
 		return err
 	}
 	return b.diskService().PowerOff(ctx, fresh.Path)
+}
+
+// WatchDevices follows UDisks2's device objects, which it adds and removes as
+// udev reports block devices coming and going.
+func (b *Backend) WatchDevices(ctx context.Context, changed func()) error {
+	return b.diskService().Watch(ctx, changed)
 }
 
 func (b *Backend) diskService() udisks.Client {

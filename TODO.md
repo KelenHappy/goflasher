@@ -4,38 +4,23 @@ Open work for Linux and Windows. macOS is deferred (see the end).
 
 ## Linux
 
-### 1. Installer build performance (high priority)
+### 1. Installer build performance
 
-Building Windows installer media through the privileged helper is likely very
-slow. Measured with a 16 GiB target (8 KiB clusters):
+The round-trip fixes are in: `fat32.File` writes whole contiguous cluster runs
+and zeroes only the unwritten tail of a run's last cluster, the helper fully
+revalidates at most once per second or 64 MiB and checks the descriptor
+(fstat rdev) for every command, the session descriptor is no longer `O_SYNC`
+(the helper syncs every 32 MiB and on `SessionFlush`), and `hashFile` reads
+contiguous clusters together (up to 1 MiB). With the executor's 1 MiB copy
+buffer, a ~5 GB `install.wim` now takes about 5,000 helper round trips instead
+of about 1.3 million.
 
-- `fat32.Builder` issues ~262,144 `WriteAt` calls per GiB of file data and
-  writes 2.06× the payload, because `File.openCluster` zero-fills every
-  cluster before `writeChunk` writes it (`internal/fat32/builder.go`).
-- Each `WriteAt` is one helper round trip (`remoteInstallerSession`). For every
-  command the helper runs `revalidateTarget`: sysfs resolve twice, a full
-  `readBlockTopology` scan, and parsing of mountinfo and swaps
-  (`internal/linux/helper_linux.go`).
-- The session descriptor is opened with `O_SYNC` (`deviceOpenFlags`), so every
-  8 KiB write waits for the device.
-- Read-back verification also reads one cluster per call
-  (`fatVolume.hashFile` in `internal/verify/installer.go`).
-
-A ~5 GB `install.wim` means about 1.3 million round trips. Not yet timed on real
-hardware.
-
-Proposed fix (each part needs a security review):
-
-- [ ] Write whole cluster runs from `File.Write` and zero only the unwritten
-      tail of the last cluster.
-- [ ] Do full revalidation when the session opens and at a bounded interval
-      (time or bytes); check each command with `validateDescriptor` (fstat
-      rdev) only.
-- [ ] Drop `O_SYNC` for `modeInstallerSession`; durability comes from
-      `SessionFlush`.
-- [ ] Read several clusters per call in `hashFile` when the chain is
-      contiguous.
-- [ ] Time a full build on physical media before and after.
+- [ ] Security review of the helper changes in `internal/linux/helper_linux.go`:
+      the bounded full revalidation (`fullRevalidationInterval`,
+      `fullRevalidationBytes`) and the dropped `O_SYNC`
+      (`unsyncedWriteLimit`).
+- [ ] Time a full build on physical media and compare it with a build from
+      before these changes.
 
 ### 2. Shipping the installer builder
 
@@ -49,35 +34,21 @@ Proposed fix (each part needs a security review):
 - [ ] The static wimlib build is verified only on Linux (Ubuntu 24.04
       container). Confirm that the macOS jobs in `wimlib.yml` pass and that
       `ZERO_AR_DATE` makes `libwim.a` reproducible under Xcode 16.4.
-
-### 3. FAT32 format sector-size check
-
-- [ ] `formatFAT32` in the helper always writes a 512-byte-sector layout but
-      checks `queue/logical_block_size` only for installer sessions. Refuse
-      non-512 devices for formatting too. Risk is low: admitted devices are
-      flash drives and card readers.
+      `verify.sh` now also requires `wimlib_register_progress_function`, and
+      `wim-smoke` checks that split progress reaches its total.
 
 ## Linux and Windows
 
-- [ ] **Progress while staging and splitting the WIM.** Copying `install.wim`
-      to the temporary directory (`stageWIM`) and the DISM or libwim split
-      report only a stage, with no byte progress. This needs a progress
-      callback through `wimPreparer.PrepareWithProgress`.
-- [ ] **Hotplug.** The device list refreshes only when the user presses Rescan.
-      Consider udev/UDisks2 signals on Linux and `WM_DEVICECHANGE` on Windows.
-- [ ] **GUI tests under `-race`.** Four `cmd/usbwriter` tests already fail with
-      `-race` before any of the recent changes, because Fyne's test driver runs
-      `fyne.Do` inline and does not serialize it. CI runs these tests without
-      `-race`. Fix them or document why race checking is skipped here.
-
-## All platforms
-
-- [ ] `gofmt` reports `internal/legal/legal.go`.
-- [ ] The legal docs list purego v0.10.2, but `go.mod` pins v0.11.1
-      (`docs/legal/THIRD_PARTY_NOTICES.md`, its zh-TW copy, and
-      `docs/legal/RELEASE-COMPLIANCE.md`).
-- [ ] CI does not run `shellcheck`. The `packaging/` scripts have only been
-      checked with `bash -n`.
+- [ ] **Hotplug on real hardware.** The GUI rescans 750 ms after the backend
+      reports a change, and defers the rescan while an operation runs. Linux
+      follows UDisks2 `InterfacesAdded`/`InterfacesRemoved` (checked against
+      the system bus with a loop device only); Windows uses
+      `CM_Register_Notification` for the disk interface class, which has not
+      run yet. Plug and unplug a stick on both, including during a write.
+- [ ] **DISM progress on real hardware.** The split progress parser expects
+      DISM's `[====  25.0%  ]` bar on redirected output. Confirm the bar is
+      printed when stdout is a pipe; otherwise the split stage shows only its
+      start and end.
 
 ## Windows
 
@@ -90,6 +61,8 @@ Proposed fix (each part needs a security review):
       (`ErrUnsupportedSectorSize`).
 - [ ] Check raw-write throughput: `blockio.Aligned` forwards at most 1 MiB per
       request, where the old path issued 4 MiB writes.
+- [ ] The GUI tests run without `-race` on Windows CI (macOS runs them with
+      it). Enable it if the runner's cgo toolchain supports the race detector.
 
 ## Deferred: macOS
 
@@ -100,3 +73,5 @@ Proposed fix (each part needs a security review):
   way as on Windows.
 - `go vet` warns about `unsafe.Pointer` in
   `internal/disk/darwin/native/library.go`.
+- Hotplug: the macOS backend does not implement `device.HotplugBackend`
+  (DiskArbitration appeared/disappeared callbacks would).

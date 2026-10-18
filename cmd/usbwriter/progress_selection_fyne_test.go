@@ -15,7 +15,11 @@ var installerRunUpdates = []progress.Update{
 	{Stage: progress.StageInspecting},
 	{Stage: progress.StagePlanning},
 	{Stage: progress.StageStagingWIM},
+	{Stage: progress.StageStagingWIM, BytesProcessed: 2, TotalBytes: 4},
+	{Stage: progress.StageStagingWIM, BytesProcessed: 4, TotalBytes: 4},
 	{Stage: progress.StageSplittingWIM},
+	{Stage: progress.StageSplittingWIM, BytesProcessed: 2, TotalBytes: 4},
+	{Stage: progress.StageSplittingWIM, BytesProcessed: 4, TotalBytes: 4},
 	{Stage: progress.StagePartitioning},
 	{Stage: progress.StageFormatting},
 	{Stage: progress.StageExtracting},
@@ -37,8 +41,11 @@ func TestInstallerProgressIsMonotonic(t *testing.T) {
 		}
 		previous = got
 	}
-	if mid := installerProgress(progress.Update{Stage: progress.StageExtracting, BytesProcessed: 1, TotalBytes: 2}); mid <= 0.2 {
-		t.Fatalf("extraction at half = %v, want visible progress", mid)
+	for _, stage := range []progress.Stage{progress.StageStagingWIM, progress.StageSplittingWIM, progress.StageExtracting} {
+		start := installerProgress(progress.Update{Stage: stage})
+		if mid := installerProgress(progress.Update{Stage: stage, BytesProcessed: 1, TotalBytes: 2}); mid <= start {
+			t.Fatalf("%s at half = %v, want visible progress past %v", stage, mid, start)
+		}
 	}
 }
 

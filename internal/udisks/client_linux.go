@@ -7,8 +7,10 @@ package udisks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -20,12 +22,20 @@ const (
 	blockInterface    = "org.freedesktop.UDisks2.Block"
 	filesystemUnmount = "org.freedesktop.UDisks2.Filesystem.Unmount"
 	drivePowerOff     = "org.freedesktop.UDisks2.Drive.PowerOff"
+
+	objectManagerInterface = "org.freedesktop.DBus.ObjectManager"
+	blockDevicesPrefix     = "/org/freedesktop/UDisks2/block_devices/"
+	drivesPrefix           = "/org/freedesktop/UDisks2/drives/"
 )
 
 // Client performs mount-management operations through the system D-Bus.
 type Client interface {
 	Unmount(context.Context, string) error
 	PowerOff(context.Context, string) error
+	// Watch calls changed each time UDisks2 adds or removes a block device or
+	// drive, until ctx is done. It returns nil when ctx ends, or an error if
+	// the subscription cannot be set up or the bus connection is lost.
+	Watch(ctx context.Context, changed func()) error
 }
 
 type client struct {
@@ -62,6 +72,55 @@ func (c *client) PowerOff(ctx context.Context, device string) error {
 		return fmt.Errorf("UDisks2 block device %q has no drive", device)
 	}
 	return conn.Object(busName, drive).CallWithContext(ctx, drivePowerOff, 0, map[string]dbus.Variant{}).Err
+}
+
+func (c *client) Watch(ctx context.Context, changed func()) error {
+	conn, err := c.connect()
+	if err != nil {
+		return fmt.Errorf("connect to system D-Bus: %w", err)
+	}
+	defer conn.Close()
+	err = conn.AddMatchSignalContext(ctx,
+		dbus.WithMatchSender(busName),
+		dbus.WithMatchObjectPath(managerPath),
+		dbus.WithMatchInterface(objectManagerInterface))
+	if err != nil {
+		return fmt.Errorf("subscribe to UDisks2 objects: %w", err)
+	}
+	signals := make(chan *dbus.Signal, 64)
+	conn.Signal(signals)
+	defer conn.RemoveSignal(signals)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case signal, ok := <-signals:
+			if !ok {
+				return errors.New("system D-Bus connection closed")
+			}
+			if deviceSignal(signal) {
+				changed()
+			}
+		}
+	}
+}
+
+// deviceSignal reports whether signal announces an added or removed block
+// device or drive. Jobs and other UDisks2 objects are ignored.
+func deviceSignal(signal *dbus.Signal) bool {
+	switch signal.Name {
+	case objectManagerInterface + ".InterfacesAdded", objectManagerInterface + ".InterfacesRemoved":
+	default:
+		return false
+	}
+	if len(signal.Body) == 0 {
+		return false
+	}
+	path, ok := signal.Body[0].(dbus.ObjectPath)
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(string(path), blockDevicesPrefix) || strings.HasPrefix(string(path), drivesPrefix)
 }
 
 // resolveDevicePath converts persistent aliases such as /dev/disk/by-uuid/*

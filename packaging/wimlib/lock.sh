@@ -65,6 +65,7 @@ load_wimlib_lock() {
           return 65
         }
         seen_LINUX_TOOLCHAIN=1
+        # shellcheck disable=SC2034 # read by callers that source this file
         LINUX_TOOLCHAIN=$value
         ;;
       MACOS_TOOLCHAIN)
@@ -73,6 +74,7 @@ load_wimlib_lock() {
           return 65
         }
         seen_MACOS_TOOLCHAIN=1
+        # shellcheck disable=SC2034 # read by callers that source this file
         MACOS_TOOLCHAIN=$value
         ;;
       CONFIGURE_FLAGS)

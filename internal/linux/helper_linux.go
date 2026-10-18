@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/fat32"
@@ -671,11 +672,42 @@ func (req privilegedRequest) validProtocol() bool {
 	return req.Version == privilege.ProtocolVersion && validLogicalSectorSize(req.LogicalSectorSize)
 }
 
+// requiredLogicalSectorSize is the logical block size the device must report
+// for modes that lay out sector-addressed structures. Raw image writes and
+// reads copy bytes and have no requirement.
+func (req privilegedRequest) requiredLogicalSectorSize() (uint32, bool) {
+	switch req.Mode {
+	case modeInstallerSession:
+		return req.LogicalSectorSize, true
+	case modeFormatFAT32:
+		// The in-process formatter always writes a 512-byte-sector layout.
+		return fat32.LogicalSectorSize, true
+	default:
+		return 0, false
+	}
+}
+
 func validLogicalSectorSize(size uint32) bool {
 	return size >= 512 && size&(size-1) == 0
 }
 
 const maxSessionTransfer = uint32(4 << 20)
+
+// A full revalidation re-reads sysfs, the block topology, mountinfo and swaps,
+// which costs far more than the transfer it guards. Every command still
+// rebinds the descriptor with fstat; the full check runs on the first command
+// and again once either bound is reached, so a device that is replaced,
+// mounted or swapped onto mid-session is caught within one interval.
+const (
+	fullRevalidationInterval = time.Second
+	fullRevalidationBytes    = uint64(64 << 20)
+)
+
+// unsyncedWriteLimit bounds how much written data may sit in the page cache.
+// The session descriptor is not O_SYNC, so without this Linux would accept
+// gigabytes at RAM speed, making copy progress meaningless and leaving one
+// very long flush at the end. SessionFlush remains the durability point.
+const unsyncedWriteLimit = uint64(32 << 20)
 
 type installerSession struct {
 	request privilegedRequest
@@ -683,6 +715,13 @@ type installerSession struct {
 	input   *bufio.Reader
 	output  io.Writer
 	env     helperEnvironment
+	now     func() time.Time
+
+	// validatedAt is when the last full revalidation passed; zero means none
+	// has run in this session. sinceValidated counts bytes transferred since.
+	validatedAt    time.Time
+	sinceValidated uint64
+	unsynced       uint64
 }
 
 func runInstallerSession(session installerSession) error {
@@ -730,7 +769,7 @@ func (s *installerSession) execute(command privilege.SessionCommand) error {
 	if err != nil {
 		return err
 	}
-	if err := s.revalidateTarget(); err != nil {
+	if err := s.revalidateTarget(uint64(command.Length)); err != nil {
 		_ = s.failure(failDeviceChanged, err.Error())
 		return err
 	}
@@ -750,13 +789,40 @@ func (s *installerSession) readWritePayload(command privilege.SessionCommand) ([
 	return payload, err
 }
 
-func (s *installerSession) revalidateTarget() error {
+// revalidateTarget authorizes a command that transfers length bytes.
+func (s *installerSession) revalidateTarget(length uint64) error {
 	g := deviceGuard{req: s.request, env: s.env}
+	if !s.fullRevalidationDue(length) {
+		if err := g.validateDescriptor(s.target); err != nil {
+			return err
+		}
+		s.sinceValidated += length
+		return nil
+	}
 	d, err := g.resolve()
 	if err != nil {
 		return err
 	}
-	return g.validateOpened(d, s.target)
+	if err := g.validateOpened(d, s.target); err != nil {
+		return err
+	}
+	s.validatedAt = s.clock()
+	s.sinceValidated = length
+	return nil
+}
+
+func (s *installerSession) fullRevalidationDue(length uint64) bool {
+	if s.validatedAt.IsZero() || s.sinceValidated+length > fullRevalidationBytes {
+		return true
+	}
+	return s.clock().Sub(s.validatedAt) >= fullRevalidationInterval
+}
+
+func (s *installerSession) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func (s *installerSession) perform(command privilege.SessionCommand, payload []byte) error {
@@ -776,7 +842,21 @@ func (s *installerSession) performWrite(command privilege.SessionCommand, payloa
 	if _, err := s.target.WriteAt(payload, int64(command.Offset)); err != nil {
 		return err
 	}
+	s.unsynced += uint64(len(payload))
+	if s.unsynced >= unsyncedWriteLimit {
+		if err := s.syncTarget(); err != nil {
+			return err
+		}
+	}
 	return s.reply(privilege.SessionResponse{OK: true})
+}
+
+func (s *installerSession) syncTarget() error {
+	if err := s.target.Sync(); err != nil {
+		return err
+	}
+	s.unsynced = 0
+	return nil
 }
 
 func (s *installerSession) performRead(command privilege.SessionCommand) error {
@@ -792,7 +872,7 @@ func (s *installerSession) performRead(command privilege.SessionCommand) error {
 }
 
 func (s *installerSession) performFlush() error {
-	if err := s.target.Sync(); err != nil {
+	if err := s.syncTarget(); err != nil {
 		return err
 	}
 	return s.reply(privilege.SessionResponse{OK: true})
@@ -877,8 +957,8 @@ func validateDeviceMetadata(req privilegedRequest, d blockDevice) error {
 		return ErrDeviceChanged
 	}
 	d.number = number
-	if req.Mode == modeInstallerSession && d.attr("queue/logical_block_size") != fmt.Sprint(req.LogicalSectorSize) {
-		return ErrDeviceChanged
+	if want, ok := req.requiredLogicalSectorSize(); ok && d.attr("queue/logical_block_size") != fmt.Sprint(want) {
+		return ErrUnsupportedSectorSize
 	}
 	if d.capacity() != req.Capacity {
 		return ErrDeviceChanged
@@ -987,7 +1067,9 @@ func deviceOpenFlags(mode operationMode) int {
 		// completed filesystem, so its validated descriptor must be read/write.
 		return os.O_RDWR
 	case modeInstallerSession:
-		return os.O_RDWR | syscall.O_SYNC
+		// Not O_SYNC: the FAT builder issues many small metadata writes, and
+		// the session bounds unsynced data itself (unsyncedWriteLimit).
+		return os.O_RDWR
 	case modeWrite:
 		// Keep each large stream write tied to actual device progress instead of
 		// letting Linux accept the entire image into the page cache at RAM speed.

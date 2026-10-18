@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -153,10 +154,10 @@ func TestNativeWIMPrepareCompletesBeforePartsAreConsumed(t *testing.T) {
 		temporary = filepath.Dir(sourcePath)
 		return writeSplitParts(output, []string{"install.swm"}, [][]byte{payload})
 	}}
-	prepared, cleanup, err := splitter.PrepareWithProgress(context.Background(), request, func() error {
+	prepared, cleanup, err := splitter.PrepareWithProgress(context.Background(), request, SplitHooks{OnSplitting: func() error {
 		splittingReported = true
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,5 +254,37 @@ func TestValidateSplitPartsAcceptsCanonicalizedTemporaryPath(t *testing.T) {
 	}
 	if err := validateSplitParts([]wim.Part{{Path: part, Size: 19}}, output, 19, 1024); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNativeWIMPrepareReportsStagingAndSplitProgress(t *testing.T) {
+	payload := bytes.Repeat([]byte("progress-wim"), 300_000) // spans several copy buffers
+	request := SplitRequest{Source: bytes.NewReader(payload), SourceSize: uint64(len(payload)), ExpectedSHA256: payloadDigest(payload), PartSize: 4 << 20}
+	var events []string
+	var staged []uint64
+	splitter := &NativeWIMSplitter{split: func(_ context.Context, req wim.Request) ([]wim.Part, error) {
+		req.Progress(0, 10)
+		req.Progress(10, 10)
+		return writeSplitParts(req.OutputDir, []string{"install.swm"}, [][]byte{payload})
+	}}
+	_, cleanup, err := splitter.PrepareWithProgress(context.Background(), request, SplitHooks{
+		StageProgress: func(done, total uint64) {
+			if total != request.SourceSize {
+				t.Fatalf("staging total=%d", total)
+			}
+			staged = append(staged, done)
+		},
+		OnSplitting:   func() error { events = append(events, "splitting"); return nil },
+		SplitProgress: func(done, total uint64) { events = append(events, fmt.Sprintf("split %d/%d", done, total)) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireIdempotentClose(t, cleanup)
+	if len(staged) < 3 || staged[0] != 0 || staged[len(staged)-1] != request.SourceSize || !slices.IsSorted(staged) {
+		t.Fatalf("staging progress=%v", staged)
+	}
+	if want := []string{"splitting", "split 0/10", "split 10/10"}; !slices.Equal(events, want) {
+		t.Fatalf("events=%v, want %v", events, want)
 	}
 }
