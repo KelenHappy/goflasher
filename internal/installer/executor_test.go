@@ -179,3 +179,25 @@ func TestExecutorCancellationNeverCompletes(t *testing.T) {
 		t.Fatalf("result=%+v error=%v", result, err)
 	}
 }
+
+func TestExecutorReportsMonotonicCopyProgress(t *testing.T) {
+	plan, source := executorFixture(t)
+	var reports [][2]uint64
+	progress := func(copied, total uint64) { reports = append(reports, [2]uint64{copied, total}) }
+	if _, err := (Executor{Progress: progress}).Execute(context.Background(), plan, bytes.NewReader(source), &sparseTarget{size: 80 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) == 0 {
+		t.Fatal("no progress reported")
+	}
+	var previous uint64
+	for _, r := range reports {
+		if r[1] != 4000 || r[0] < previous || r[0] > r[1] {
+			t.Fatalf("progress reports = %v, want monotonic values bounded by 4000", reports)
+		}
+		previous = r[0]
+	}
+	if last := reports[len(reports)-1]; last[0] != last[1] {
+		t.Fatalf("final progress = %v, want complete", last)
+	}
+}

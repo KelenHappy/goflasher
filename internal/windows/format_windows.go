@@ -31,6 +31,13 @@ func (f *winFile) Write(p []byte) (int, error) {
 	return f.f.Write(p)
 }
 
+func (f *winFile) ReadAt(p []byte, off int64) (int, error) {
+	if err := f.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return f.f.ReadAt(p, off)
+}
+
 func (f *winFile) WriteAt(p []byte, off int64) (int, error) {
 	if err := f.ctx.Err(); err != nil {
 		return 0, err
@@ -39,6 +46,12 @@ func (f *winFile) WriteAt(p []byte, off int64) (int, error) {
 }
 
 func (f *winFile) Close() error { return f.f.Close() }
+
+// logicalSectorSize queries the geometry of the handle that was opened and
+// identity-checked, not of a path that could be re-resolved.
+func (f *winFile) logicalSectorSize() (uint32, error) {
+	return logicalSectorSize(windows.Handle(f.f.Fd()))
+}
 
 // Flush and Sync are the same operation: os.File.Sync is FlushFileBuffers on
 // Windows. Both names exist to satisfy nativeFile and fat32.Device.

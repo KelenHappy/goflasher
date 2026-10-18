@@ -20,12 +20,18 @@ on Linux, Windows, and macOS.**
   an external decompressor or an uncompressed temporary file.
 - Calculate the source SHA-256 while inspecting the image and while writing it.
 - Optionally read the written bytes back and compare their SHA-256 checksum.
+- Build UEFI x64 Windows installer media from an uncompressed Windows ISO: a GPT
+  disk with one FAT32 partition, an `install.wim` larger than 4 GiB split into
+  `.swm` parts, and a file-by-file read-back verification. Windows hosts split
+  with the system DISM; Linux and macOS packages offer the builder only when
+  they bundle the pinned libwim, and otherwise refuse before touching the disk.
 - Show writing and verification progress, throughput, and estimated time.
 - Cancel an active operation.
 - Optionally power off the USB device after a successful write.
 - Use the bundled, localized Fyne file chooser on Linux and native file
   choosers on Windows and macOS.
-- Display the interface in English or Traditional Chinese.
+- Display the interface in English, Traditional Chinese, Simplified Chinese, or
+  Japanese.
 - Keep a copyable, bounded activity log in the application.
 - Restrict targets to removable USB flash media or card readers. On Linux,
   generic `usb-storage` media up to 128 GB is accepted when udev omits its
@@ -35,9 +41,10 @@ on Linux, Windows, and macOS.**
 - Revalidate device identity before unmounting and on both sides of the
   privileged raw-device boundary.
 - Provide a platform-neutral `disk.Manager` abstraction; callers only construct
-  `disk.NewManager()`. The Linux sysfs/udisks and native Windows implementations
-  are active; macOS currently retains a compile-safe outline for a future Disk
-  Arbitration/IOKit manager.
+  `disk.NewManager()`. The Linux sysfs/udisks, native Windows, and macOS Disk
+  Arbitration/IOKit implementations are active; the macOS privileged-helper
+  cutover remains gated (see
+  [MACOS-CONVERGENCE.md](docs/architecture/MACOS-CONVERGENCE.md)).
 
 GoFlasher does not inspect, identify, or restrict the operating system contained
 inside an image. On every supported host it can therefore write a Linux ISO or

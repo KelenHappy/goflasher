@@ -11,12 +11,20 @@ import (
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/image"
 	"github.com/goflasher/goflasher/internal/installer"
+	"github.com/goflasher/goflasher/internal/progress"
 )
 
 type installerWorkflowBackend struct {
 	target                                        device.Device
 	unmounted, opened, flushed, released, ejected int
 	openErr                                       error
+	// session, when set, wraps every raw installer handle the backend opens.
+	session func(*os.File) (installerSession, error)
+}
+
+type installerSession interface {
+	InstallerTarget
+	io.ReaderAt
 }
 
 type availableInstallerSplitter struct{ installer.WIMSplitter }
@@ -54,10 +62,18 @@ func (b *installerWorkflowBackend) OpenInstallerTarget(context.Context, device.D
 	if b.openErr != nil {
 		return nil, b.openErr
 	}
-	return os.OpenFile(b.target.Path, os.O_RDWR, 0)
+	f, err := os.OpenFile(b.target.Path, os.O_RDWR, 0)
+	if err != nil || b.session == nil {
+		return f, err
+	}
+	return b.session(f)
 }
 func (b *installerWorkflowBackend) OpenInstallerReader(context.Context, device.Device) (InstallerReader, error) {
-	return os.Open(b.target.Path)
+	f, err := os.Open(b.target.Path)
+	if err != nil || b.session == nil {
+		return f, err
+	}
+	return b.session(f)
 }
 
 func TestServiceUsesWindowsExecutorAndSemanticResultFields(t *testing.T) {
@@ -154,5 +170,24 @@ func assertNonempty(t *testing.T, name, got string) {
 	t.Helper()
 	if got == "" {
 		t.Fatalf("%s is empty", name)
+	}
+}
+
+func TestWindowsInstallerReportsExtractionAndVerificationBytes(t *testing.T) {
+	fixture := newWindowsExecutorFixture(t)
+	updates := make(chan progress.Update, 4096)
+	_, err := fixture.service().Run(context.Background(), RunRequest{Image: fixture.info, Target: fixture.target, Updates: updates})
+	assertNoError(t, err)
+	close(updates)
+	complete := map[progress.Stage]bool{}
+	for u := range updates {
+		if u.TotalBytes > 0 && u.BytesProcessed == u.TotalBytes {
+			complete[u.Stage] = true
+		}
+	}
+	for _, stage := range []progress.Stage{progress.StageExtracting, progress.StageVerifyingFilesystem} {
+		if !complete[stage] {
+			t.Errorf("no completed byte progress for %s", stage)
+		}
 	}
 }

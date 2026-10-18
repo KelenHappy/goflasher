@@ -67,6 +67,20 @@ The three-platform CI matrix proves that each native source set compiles and its
 isolated tests pass. It does not prove destructive access on real hardware; the
 physical-media acceptance gate in `TESTING.md` remains mandatory for releases.
 
+### Windows-host installer builder boundary
+
+On Windows the installer builder runs inside the same elevated process as the
+raw writer. After every volume on the disk is locked and dismounted, it opens
+the identity-checked `\\.\PhysicalDriveN` handle, writes the GPT and FAT32
+structures itself, and reads them back through an independent handle for
+semantic verification. Raw disk handles accept only whole-sector requests, so
+all builder and verifier I/O passes through `internal/blockio`, which completes
+partial sectors with read-modify-write inside the validated disk size. Disks
+whose logical sector size is not 512 bytes are refused. Only an `install.wim`
+larger than the FAT32 file limit invokes a program: the system
+`%SystemRoot%\System32\dism.exe /Split-Image`, resolved and validated by
+`internal/wim`; no other command runs while building media.
+
 ### macOS Windows-installer builder boundary
 
 The macOS installer builder is a **development-only migration path**, not a

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/goflasher/goflasher/internal/blockio"
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/progress"
 )
@@ -25,6 +26,7 @@ var (
 	ErrSystemTopologyUnavailable = errors.New("Windows system topology unavailable")
 	ErrVolumeTopologyUnavailable = errors.New("Windows volume topology unavailable")
 	ErrVolumeLockDenied          = errors.New("Windows volume lock denied")
+	ErrUnsupportedSectorSize     = errors.New("unsupported logical sector size")
 )
 
 type windowsIdentityEvidence struct {
@@ -63,6 +65,7 @@ type Backend struct {
 
 var _ device.Backend = (*Backend)(nil)
 var _ device.FAT32Formatter = (*Backend)(nil)
+var _ device.WindowsInstallerBackend = (*Backend)(nil)
 
 func NewBackend() *Backend { return &Backend{api: newWinAPI(), locks: make(map[string]volumeLocks)} }
 func (b *Backend) native() nativeAPI {
@@ -254,12 +257,128 @@ func (b *Backend) open(ctx context.Context, d device.Device, write bool) (*manag
 	}
 	return &managedFile{nativeFile: f, flushOnClose: write}, nil
 }
+
+// rawWriter streams an image through whole-sector requests. The image size
+// need not be a sector multiple: Close merges the final partial sector before
+// the handle flushes and closes.
+type rawWriter struct {
+	*blockio.Writer
+	file *managedFile
+}
+
+func (w *rawWriter) Close() error { return errors.Join(w.Writer.Flush(), w.file.Close()) }
+
+// rawReader reads back any byte length through whole-sector requests.
+type rawReader struct {
+	*io.SectionReader
+	file *managedFile
+}
+
+func (r *rawReader) Close() error { return r.file.Close() }
+
 func (b *Backend) OpenWriter(ctx context.Context, d device.Device) (io.WriteCloser, error) {
-	return b.open(ctx, d, true)
+	f, err := b.open(ctx, d, true)
+	if err != nil {
+		return nil, err
+	}
+	disk, _, err := alignedDisk(f, d.Size)
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	return &rawWriter{Writer: blockio.NewWriter(disk), file: f}, nil
 }
 func (b *Backend) OpenReader(ctx context.Context, d device.Device) (io.ReadCloser, error) {
-	return b.open(ctx, d, false)
+	f, err := b.open(ctx, d, false)
+	if err != nil {
+		return nil, err
+	}
+	disk, _, err := alignedDisk(f, d.Size)
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	return &rawReader{SectionReader: io.NewSectionReader(disk, 0, int64(d.Size)), file: f}, nil
 }
+
+// installerSectorSize is the only logical sector size the installer's GPT
+// layout is computed for; any other geometry fails closed.
+const installerSectorSize = 512
+
+// installerSession is a raw disk handle narrowed for the installer builder.
+// \\.\PhysicalDriveN accepts only whole-sector requests, while the FAT32
+// builder and verifier address individual bytes, so all I/O passes through a
+// read-modify-write adapter bounded by the validated disk size.
+type installerSession struct {
+	*blockio.Aligned
+	file *managedFile
+}
+
+func (s *installerSession) Sync() error  { return s.file.Flush() }
+func (s *installerSession) Close() error { return s.file.Close() }
+
+// sectorSizer is implemented by native files that can report the logical
+// sector size of their own already-validated handle.
+type sectorSizer interface {
+	logicalSectorSize() (uint32, error)
+}
+
+// OpenInstallerTarget opens the same identity-checked write handle as
+// OpenWriter, so Unmount must already hold every volume lock on the disk.
+func (b *Backend) OpenInstallerTarget(ctx context.Context, d device.Device) (device.InstallerTarget, error) {
+	return b.openInstallerSession(ctx, d, true)
+}
+
+// OpenInstallerReader re-runs identity validation and opens an independent
+// read handle for semantic read-back verification.
+func (b *Backend) OpenInstallerReader(ctx context.Context, d device.Device) (device.InstallerReader, error) {
+	return b.openInstallerSession(ctx, d, false)
+}
+
+func (b *Backend) openInstallerSession(ctx context.Context, d device.Device, write bool) (*installerSession, error) {
+	f, err := b.open(ctx, d, write)
+	if err != nil {
+		return nil, err
+	}
+	session, err := newInstallerSession(f, d.Size)
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	return session, nil
+}
+
+func newInstallerSession(f *managedFile, size uint64) (*installerSession, error) {
+	disk, sector, err := alignedDisk(f, size)
+	if err != nil {
+		return nil, err
+	}
+	if sector != installerSectorSize {
+		return nil, fmt.Errorf("%w: %d bytes", ErrUnsupportedSectorSize, sector)
+	}
+	return &installerSession{Aligned: disk, file: f}, nil
+}
+
+// alignedDisk binds an opened raw handle to its own reported logical sector
+// size and the validated disk size, so every request it forwards is a whole
+// number of sectors inside the disk.
+func alignedDisk(f *managedFile, size uint64) (*blockio.Aligned, uint32, error) {
+	random, ok := f.nativeFile.(blockio.Device)
+	if !ok {
+		return nil, 0, errors.New("raw disk does not support random access")
+	}
+	sizer, ok := f.nativeFile.(sectorSizer)
+	if !ok {
+		return nil, 0, fmt.Errorf("%w: geometry is unavailable", ErrUnsupportedSectorSize)
+	}
+	sector, err := sizer.logicalSectorSize()
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w: %w", ErrUnsupportedSectorSize, err)
+	}
+	disk, err := blockio.NewAligned(random, sector, size)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w: %w", ErrUnsupportedSectorSize, err)
+	}
+	return disk, sector, nil
+}
+
 func (b *Backend) Flush(ctx context.Context, d device.Device) error {
 	// FlushFileBuffers requires a handle opened with write access.
 	f, err := b.open(ctx, d, true)

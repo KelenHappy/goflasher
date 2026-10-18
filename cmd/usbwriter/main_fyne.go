@@ -76,6 +76,9 @@ type guiController struct {
 	refreshCancel     context.CancelFunc
 	closing           bool
 	shutdownDone      chan struct{}
+	// installerRun records whether the confirmed run builds Windows installer
+	// media, which reports progress through its own stages.
+	installerRun bool
 }
 
 type operation uint8
@@ -430,6 +433,7 @@ func (c *guiController) showDevices(list []device.Device, report device.ScanRepo
 	}
 	c.view.deviceSelect.Options = options
 	c.view.deviceSelect.Refresh()
+	c.reconcileSelection()
 	c.appendLog(c.tr.T("log.devices", len(list)))
 	// A device that failed inspection never reaches the list, so without this
 	// line an unreadable device and an absent one look identical to the user.
@@ -448,6 +452,48 @@ func (c *guiController) selectDevice(value string) {
 		advanceSelection(c.machine, c.info.Path != "", core.ImageSelected, core.DeviceSelected)
 		c.view.format.Enable()
 		return
+	}
+}
+
+// reconcileSelection matches the selected device against a new scan. A device
+// that is still present is replaced by its fresh snapshot; one that is gone is
+// deselected, so the confirmation dialog never describes a removed device. An
+// active operation keeps its own copy of the target and is left alone.
+func (c *guiController) reconcileSelection() {
+	if c.selected.Path == "" || c.operation != operationNone || writingState(c.machine.State()) {
+		return
+	}
+	for _, d := range c.devices {
+		if device.SameIdentity(c.selected, d) && d.Size == c.selected.Size {
+			c.selected = d
+			c.view.deviceSelect.SetSelected(deviceDisplay(d))
+			c.updateDeviceDetail()
+			return
+		}
+	}
+	c.forgetDevice()
+}
+
+func (c *guiController) forgetDevice() {
+	c.selected = device.Device{}
+	c.view.deviceSelect.ClearSelected()
+	c.view.deviceDetail.SetText(c.tr.T("device.none"))
+	c.view.format.Disable()
+	retreatSelection(c.machine, c.info.Path != "")
+	c.view.start.SetText(c.tr.T(startActionKey(c.machine.State())))
+}
+
+// retreatSelection returns an idle or finished machine to the state for "no
+// device selected", keeping the image selection when there is one.
+func retreatSelection(machine *core.StateMachine, imageSelected bool) {
+	switch machine.State() {
+	case core.Ready, core.DeviceSelected, core.Completed, core.Cancelled, core.Failed:
+		_ = machine.Transition(core.Idle)
+	default:
+		return
+	}
+	if imageSelected {
+		_ = machine.Transition(core.ImageSelected)
 	}
 }
 
@@ -638,6 +684,7 @@ func (c *guiController) finishPreview(preview core.PlanSummary, err error) {
 		c.finishPreviewError(err)
 		return
 	}
+	c.installerRun = preview.Class == string(core.ImageWindowsISO)
 	body := widget.NewLabel(c.previewConfirmationText(preview))
 	body.Wrapping = fyne.TextWrapWord
 	confirm := dialog.NewCustomConfirm(c.tr.T("confirm.title"), c.tr.T("confirm.accept"), c.tr.T("action.cancel"), body, c.confirmWrite, c.view.window)
@@ -738,12 +785,8 @@ func (c *guiController) consumeWriteProgress(updates <-chan progress.Update) {
 		u := update
 		fyne.Do(func() {
 			c.view.status.SetText(c.tr.T("stage." + string(u.Stage)))
-			c.view.bar.SetValue(overallProgress(u, c.view.verifyCheck.Checked))
-			if u.TotalBytes > 0 {
-				c.view.metrics.SetText(c.tr.T("metrics.progress", u.BytesPerSecond/(1<<20), float64(u.BytesProcessed)/(1<<20), u.ETA.Round(time.Second)))
-			} else {
-				c.view.metrics.SetText(c.tr.T("metrics.finalizing"))
-			}
+			c.view.bar.SetValue(c.runProgress(u))
+			c.view.metrics.SetText(c.progressMetrics(u))
 		})
 	}
 }
@@ -782,6 +825,50 @@ func (c *guiController) showWriteSuccess(result core.RunResult) {
 	}
 	c.view.metrics.SetText(c.tr.T("metrics.complete", result.AverageBytesPerSecond/(1<<20), result.Elapsed.Round(time.Second)))
 	c.view.start.SetText(c.tr.T("action.restart"))
+}
+
+func (c *guiController) runProgress(update progress.Update) float64 {
+	if c.installerRun {
+		return installerProgress(update)
+	}
+	return overallProgress(update, c.view.verifyCheck.Checked)
+}
+
+func (c *guiController) progressMetrics(update progress.Update) string {
+	switch {
+	case update.TotalBytes > 0:
+		return c.tr.T("metrics.progress", update.BytesPerSecond/(1<<20), float64(update.BytesProcessed)/(1<<20), update.ETA.Round(time.Second))
+	case update.Stage == progress.StageFlushing, update.Stage == progress.StageEjecting:
+		return c.tr.T("metrics.finalizing")
+	default:
+		return c.tr.T("metrics.empty")
+	}
+}
+
+// installerProgress maps the Windows installer stages onto one bar. The
+// installer always verifies its filesystem, independent of the raw-write
+// verify option, and its two long phases report bytes.
+func installerProgress(update progress.Update) float64 {
+	ratio := progressRatio(update)
+	switch update.Stage {
+	case progress.StageExtracting:
+		return 0.20 + ratio*0.60
+	case progress.StageVerifyingFilesystem:
+		return 0.82 + ratio*0.13
+	default:
+		return installerStageProgress[update.Stage]
+	}
+}
+
+var installerStageProgress = map[progress.Stage]float64{
+	progress.StageInspecting:   0.02,
+	progress.StagePlanning:     0.05,
+	progress.StageStagingWIM:   0.08,
+	progress.StageSplittingWIM: 0.12,
+	progress.StagePartitioning: 0.16,
+	progress.StageFormatting:   0.18,
+	progress.StageFlushing:     0.80,
+	progress.StageEjecting:     0.97,
 }
 
 func overallProgress(update progress.Update, verify bool) float64 {

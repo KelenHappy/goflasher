@@ -110,6 +110,17 @@ func TestParseDiskGeometryExSize(t *testing.T) {
 	}
 }
 
+func TestParseDiskGeometryBytesPerSector(t *testing.T) {
+	b := make([]byte, 32)
+	binary.LittleEndian.PutUint32(b[20:], 4096)
+	size, err := parseDiskGeometryBytesPerSector(b)
+	requireNoError(t, err)
+	requireEqual(t, "bytes per sector", size, uint32(4096))
+	if _, err := parseDiskGeometryBytesPerSector(b[:23]); err == nil {
+		t.Fatal("short DISK_GEOMETRY accepted")
+	}
+}
+
 func TestDiskRecordFromEvidence(t *testing.T) {
 	const vendor, model, serial = "Vendor", "Model X", " SN 42 "
 	const rawWWN, wantWWN = "5000c50012345678", "5000C50012345678"

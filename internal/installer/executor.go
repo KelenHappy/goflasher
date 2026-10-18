@@ -54,13 +54,17 @@ type ExecutionResult struct {
 
 type Executor struct {
 	Splitter WIMSplitter
+	// Progress, when set, receives the file bytes copied so far and the total
+	// planned file bytes. A split install.wim is counted at its source size, so
+	// the reported value is capped at the total.
+	Progress func(copied, total uint64)
 }
 
 // Execute consumes only paths and extents frozen into plan. On every error or
 // cancellation Complete remains false, so partial copies or verification can
 // never be presented as a successful installer build.
 func (x Executor) Execute(ctx context.Context, plan *BuildPlan, source io.ReaderAt, target Target) (result ExecutionResult, err error) {
-	run := execution{ctx: ctx, plan: plan, source: source, target: target, splitter: x.Splitter}
+	run := execution{ctx: ctx, plan: plan, source: source, target: target, splitter: x.Splitter, progress: x.Progress}
 	if err := run.execute(); err != nil {
 		return run.result, errors.Join(ErrIncomplete, err)
 	}
@@ -76,6 +80,9 @@ type execution struct {
 	splitter WIMSplitter
 	builder  *fat32.Builder
 	result   ExecutionResult
+	progress func(copied, total uint64)
+	// copied and total are the progress counters reported through progress.
+	copied, total uint64
 }
 
 func (r *execution) execute() error {
@@ -88,6 +95,7 @@ func (r *execution) execute() error {
 	if err := r.createDirectories(); err != nil {
 		return err
 	}
+	r.total = r.plannedFileBytes()
 	if err := r.copyFiles(); err != nil {
 		return err
 	}
@@ -172,6 +180,26 @@ func (r *execution) copyFiles() error {
 	return nil
 }
 
+// plannedFileBytes is the size of every planned file, install.wim included
+// whether it is copied whole or as split parts.
+func (r *execution) plannedFileBytes() uint64 {
+	var total uint64
+	for _, item := range r.plan.planned {
+		if item.source.Type == installeriso.File {
+			total += item.source.Size
+		}
+	}
+	return total
+}
+
+// reportCopied counts n more copied bytes and forwards the running total.
+func (r *execution) reportCopied(n int) {
+	r.copied += uint64(n)
+	if r.progress != nil {
+		r.progress(min(r.copied, r.total), r.total)
+	}
+}
+
 func (r *execution) shouldCopy(item plannedEntry) bool {
 	if item.source.Type != installeriso.File {
 		return false
@@ -206,7 +234,7 @@ func (r *execution) copySplitWIM() error {
 			return err
 		}
 		destination := path.Join(path.Dir(wim.destination), name)
-		verified, n, copyErr := copyReaderFile(r.ctx, r.builder, fileCopy{destination: destination, source: part.Data, expectedSize: part.Size})
+		verified, n, copyErr := copyReaderFile(r.ctx, r.builder, fileCopy{destination: destination, source: part.Data, expectedSize: part.Size, onCopy: r.reportCopied})
 		r.recordCopy(verified, n, copyErr)
 		if copyErr != nil {
 			return copyErr
@@ -280,6 +308,7 @@ func (r *execution) copyISOFile(item plannedEntry) (VerificationEntry, uint64, e
 		source:       reader,
 		expectedSize: item.source.Size,
 		expectedHash: expected,
+		onCopy:       r.reportCopied,
 	})
 }
 
@@ -297,6 +326,17 @@ type fileCopy struct {
 	source       io.Reader
 	expectedSize uint64
 	expectedHash string
+	// onCopy, when set, is told how many bytes each successful write stored.
+	onCopy func(int)
+}
+
+// copyCounter reports every chunk that reached the filesystem. It follows the
+// file in an io.MultiWriter, so a failed file write is never counted.
+type copyCounter func(int)
+
+func (c copyCounter) Write(p []byte) (int, error) {
+	c(len(p))
+	return len(p), nil
 }
 
 func copyReaderFile(ctx context.Context, builder *fat32.Builder, file fileCopy) (VerificationEntry, uint64, error) {
@@ -310,8 +350,12 @@ func copyReaderFile(ctx context.Context, builder *fat32.Builder, file fileCopy) 
 		return VerificationEntry{}, 0, err
 	}
 	h := sha256.New()
+	sinks := []io.Writer{dst, h}
+	if file.onCopy != nil {
+		sinks = append(sinks, copyCounter(file.onCopy))
+	}
 	limited := io.LimitReader(file.source, int64(file.expectedSize)+1)
-	written, copyErr := copyContext(ctx, io.MultiWriter(dst, h), limited)
+	written, copyErr := copyContext(ctx, io.MultiWriter(sinks...), limited)
 	closeErr := dst.Close()
 	if copyErr != nil || closeErr != nil {
 		return VerificationEntry{}, uint64(written), errors.Join(copyErr, closeErr)

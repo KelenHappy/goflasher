@@ -160,7 +160,8 @@ func (x WindowsInstallerExecutor) Execute(ctx context.Context, req installerRequ
 	if err := x.enter(ctx, req.updates, Extracting, progress.StageExtracting); err != nil {
 		return err
 	}
-	result, err := (installer.Executor{Splitter: x.splitter}).Execute(ctx, req.plan, r, raw)
+	executor := installer.Executor{Splitter: x.splitter, Progress: byteProgress(ctx, req.updates, progress.StageExtracting)}
+	result, err := executor.Execute(ctx, req.plan, r, raw)
 	if err != nil {
 		return err
 	}

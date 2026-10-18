@@ -27,6 +27,9 @@ var (
 type InstallerOptions struct {
 	SplitWIMPolicySize uint64
 	RequireSplitWIM    bool
+	// Progress, when set, receives the file bytes hashed so far and the total
+	// bytes listed in the manifest.
+	Progress func(verified, total uint64)
 }
 type InstallerResult struct {
 	FilesVerified  int
@@ -74,7 +77,7 @@ func VerifyInstaller(ctx context.Context, target RawTarget, manifest []installer
 	if err != nil {
 		return result, err
 	}
-	filesVerified, err := v.verifyManifest(ctx, expected)
+	filesVerified, err := v.verifyManifest(ctx, expected, newVerifyMeter(manifest, options.Progress))
 	result.FilesVerified = filesVerified
 	if err != nil {
 		return result, err
@@ -118,10 +121,31 @@ func indexManifest(manifest []installer.VerificationEntry) (map[string]installer
 	return expected, nil
 }
 
-func (v *fatVolume) verifyManifest(ctx context.Context, expected map[string]installer.VerificationEntry) (int, error) {
+// verifyMeter accumulates hashed file bytes for InstallerOptions.Progress.
+type verifyMeter struct {
+	report      func(verified, total uint64)
+	done, total uint64
+}
+
+func newVerifyMeter(manifest []installer.VerificationEntry, report func(uint64, uint64)) *verifyMeter {
+	m := &verifyMeter{report: report}
+	for _, e := range manifest {
+		m.total += e.Size
+	}
+	return m
+}
+
+func (m *verifyMeter) add(n uint64) {
+	m.done += n
+	if m.report != nil {
+		m.report(min(m.done, m.total), m.total)
+	}
+}
+
+func (v *fatVolume) verifyManifest(ctx context.Context, expected map[string]installer.VerificationEntry, meter *verifyMeter) (int, error) {
 	verified := 0
 	for key, e := range expected {
-		if err := v.verifyEntry(ctx, key, e); err != nil {
+		if err := v.verifyEntry(ctx, key, e, meter); err != nil {
 			return verified, err
 		}
 		verified++
@@ -129,7 +153,7 @@ func (v *fatVolume) verifyManifest(ctx context.Context, expected map[string]inst
 	return verified, nil
 }
 
-func (v *fatVolume) verifyEntry(ctx context.Context, key string, e installer.VerificationEntry) error {
+func (v *fatVolume) verifyEntry(ctx context.Context, key string, e installer.VerificationEntry, meter *verifyMeter) error {
 	actual, ok := v.files[key]
 	if !ok {
 		return semantic("manifest path missing: %s", e.Path)
@@ -137,7 +161,7 @@ func (v *fatVolume) verifyEntry(ctx context.Context, key string, e installer.Ver
 	if actual.size != e.Size {
 		return semantic("size mismatch for %s", e.Path)
 	}
-	h, err := v.hashFile(ctx, actual)
+	h, err := v.hashFile(ctx, actual, meter)
 	if err != nil {
 		return err
 	}
@@ -648,7 +672,7 @@ func appendLFNField(u []uint16, e []byte, start, end int) []uint16 {
 	return u
 }
 
-func (v *fatVolume) hashFile(ctx context.Context, f fatFile) (string, error) {
+func (v *fatVolume) hashFile(ctx context.Context, f fatFile, meter *verifyMeter) (string, error) {
 	chain, err := v.chain(f.cluster, "file:"+f.path)
 	if err != nil {
 		return "", err
@@ -670,6 +694,7 @@ func (v *fatVolume) hashFile(ctx context.Context, f fatFile) (string, error) {
 		n := min(uint64(len(b)), remaining)
 		h.Write(b[:n])
 		remaining -= n
+		meter.add(n)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

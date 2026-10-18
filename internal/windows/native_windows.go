@@ -59,7 +59,10 @@ const (
 	// DISK_GEOMETRY_EX: a 24-byte DISK_GEOMETRY, then the DiskSize
 	// LARGE_INTEGER, then variable partition and detection data.
 	diskGeometryExSizeOffset = 24
-	diskGeometryExQuerySize  = 256
+	// DISK_GEOMETRY.BytesPerSector follows Cylinders (LARGE_INTEGER),
+	// MediaType, TracksPerCylinder, and SectorsPerTrack.
+	diskGeometryBytesPerSectorOffset = 20
+	diskGeometryExQuerySize          = 256
 
 	storageIDCodeSetBinary = 1
 	storageIDCodeSetASCII  = 2
@@ -462,6 +465,23 @@ func parseDiskGeometryExSize(b []byte) (uint64, error) {
 		return 0, fmt.Errorf("short DISK_GEOMETRY_EX: got %d bytes", len(b))
 	}
 	return binary.LittleEndian.Uint64(b[diskGeometryExSizeOffset:]), nil
+}
+
+// logicalSectorSize reports DISK_GEOMETRY.BytesPerSector, the granularity
+// every raw read and write on h must respect.
+func logicalSectorSize(h windows.Handle) (uint32, error) {
+	geometry, err := query(h, ioctlDiskGetDriveGeometryEx, diskGeometryExQuerySize)
+	if err != nil {
+		return 0, fmt.Errorf("IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: %w", err)
+	}
+	return parseDiskGeometryBytesPerSector(geometry)
+}
+
+func parseDiskGeometryBytesPerSector(b []byte) (uint32, error) {
+	if len(b) < diskGeometryBytesPerSectorOffset+4 {
+		return 0, fmt.Errorf("short DISK_GEOMETRY: got %d bytes", len(b))
+	}
+	return binary.LittleEndian.Uint32(b[diskGeometryBytesPerSectorOffset:]), nil
 }
 
 func storageDescriptor(h windows.Handle) ([]byte, error) {

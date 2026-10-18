@@ -145,3 +145,27 @@ func TestVerifyInstallerRejectsRawMetadataAndContentCorruption(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyInstallerReportsHashedBytes(t *testing.T) {
+	d, manifest := buildInstallerDisk(t, true)
+	var want uint64
+	for _, e := range manifest {
+		want += e.Size
+	}
+	var last, total uint64
+	calls := 0
+	progress := func(done, all uint64) {
+		if done < last || done > all {
+			t.Fatalf("progress %d/%d after %d", done, all, last)
+		}
+		last, total = done, all
+		calls++
+	}
+	_, err := VerifyInstaller(context.Background(), RawTarget{Reader: bytes.NewReader(d), Size: uint64(len(d))}, manifest, InstallerOptions{SplitWIMPolicySize: 3800 << 20, RequireSplitWIM: true, Progress: progress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 || last != want || total != want {
+		t.Fatalf("calls=%d last=%d total=%d, want %d", calls, last, total, want)
+	}
+}

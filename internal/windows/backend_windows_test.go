@@ -33,6 +33,7 @@ type fakeAPI struct {
 	lockErr          error
 	locks            *fakeLocks
 	file             *fakeFile
+	disk             nativeFile
 	opens, lockCalls int
 	openWrites       []bool
 }
@@ -51,6 +52,9 @@ func (f *fakeAPI) lockVolumes(context.Context, uint32) (volumeLocks, error) {
 func (f *fakeAPI) openDisk(_ context.Context, _ diskRecord, write bool) (nativeFile, error) {
 	f.opens++
 	f.openWrites = append(f.openWrites, write)
+	if f.disk != nil {
+		return f.disk, nil
+	}
 	if f.file == nil {
 		f.file = &fakeFile{}
 	}
@@ -119,7 +123,7 @@ func TestSystemDiskQueryErrorFailsEnumeration(t *testing.T) {
 	}
 }
 func TestEveryOpenRevalidates(t *testing.T) {
-	api := &fakeAPI{records: []diskRecord{candidate()}}
+	api := &fakeAPI{records: []diskRecord{candidate()}, disk: newFakeDisk(512, 512)}
 	b := &Backend{api: api, locks: map[string]volumeLocks{}}
 	d := listedDevice(t, b)
 	if _, err := b.OpenWriter(context.Background(), d); !errors.Is(err, ErrUnmountFailed) {

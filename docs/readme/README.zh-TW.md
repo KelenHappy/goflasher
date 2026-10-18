@@ -20,12 +20,16 @@
   程式，也不必先建立未壓縮的暫存檔。
 - 檢查及寫入映像檔時，計算來源檔案的 SHA-256。
 - 可選擇回讀已寫入的位元組，並比對 SHA-256 總和檢查碼。
+- 可從未壓縮的 Windows ISO 建立 UEFI x64 Windows 安裝媒體：建立含單一 FAT32
+  分割區的 GPT 磁碟，將超過 4 GiB 的 `install.wim` 分割為 `.swm`，並逐檔回讀
+  驗證。Windows 主機使用系統內建的 DISM 分割；Linux 與 macOS 套件只有在附帶
+  固定版本的 libwim 時才提供此功能，否則會在動到磁碟前拒絕執行。
 - 顯示寫入與驗證進度、傳輸速度及預估剩餘時間。
 - 可取消進行中的操作。
 - 寫入成功後，可選擇關閉 USB 裝置電源。
 - Linux 使用內建且已本地化的 Fyne 檔案選擇器；Windows 與 macOS 使用系統原生
   檔案選擇器。
-- 介面支援英文與繁體中文。
+- 介面支援英文、繁體中文、簡體中文與日文。
 - 在應用程式內保留可複製且有行數上限的活動紀錄。
 - 僅允許選取可移除式 USB 隨身碟或讀卡機；在 Linux 上，若 udev 未提供隨身碟
   分類，亦允許容量不超過 128 GB 的一般 `usb-storage` 媒體。
@@ -33,8 +37,9 @@
   儲存裝置橋接器、UAS 裝置及容量較大且無法明確辨識的 USB 儲存裝置。
 - 在卸載前及開啟原始裝置前，重新驗證裝置身分。
 - 提供跨平台且不洩漏原生 handle 或常數的 `disk.Manager` 統一介面，上層只需呼叫
-  `disk.NewManager()`。Linux 的 sysfs/udisks 與 Windows 原生實作已啟用；macOS
-  目前保留可編譯的雛形，日後再接上 Disk Arbitration/IOKit。
+  `disk.NewManager()`。Linux 的 sysfs/udisks、Windows 原生與 macOS Disk
+  Arbitration/IOKit 實作皆已啟用；macOS 的 privileged helper 切換仍受發布閘門管制
+  （請參閱 [MACOS-CONVERGENCE.zh-TW.md](../architecture/MACOS-CONVERGENCE.zh-TW.md)）。
 
 GoFlasher 不會分析、辨識或限制映像檔內含的作業系統。因此，在每個支援的主機
 平台上，都可以燒錄 Linux ISO 或其他支援格式的 raw disk image；目前接受
@@ -62,7 +67,8 @@ polkit 呼叫由 root 擁有的專用權限提升輔助程式。
 
 這不表示所有平台都已完全不依賴主機指令。Linux 直接讀取 `/run/udev/data` 補充裝置
 分類，只以 `pkexec` 啟動權限提升輔助程式。Windows 的磁碟探索、身分驗證、raw I/O、
-volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動 CLI；macOS 仍使用
+volume lock/dismount、flush、格式化及退出都使用原生 API，不啟動 CLI；唯一例外是
+建立 Windows 安裝媒體且 `install.wim` 需要分割時，會呼叫系統內建的 DISM；macOS 仍使用
 `diskutil` 管理裝置及 `osascript` 開啟原生選擇器，但格式化在程式內完成。三個平台的原生版本都會在 CI 中建置及測試，
 但 Windows/macOS 仍需要原生主機權限及實體媒體驗收才能發布。完整邊界及改用原生 API
 的方向請參閱 [BUILDING.md](../development/BUILDING.md#native-api-and-command-dependencies)。

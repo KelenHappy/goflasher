@@ -283,6 +283,7 @@ func (s *Service) flushAndVerifyInstaller(ctx context.Context, plan *installer.B
 	}
 	verification, verifyErr := verify.VerifyInstaller(ctx, verify.RawTarget{Reader: reader, Size: target.Size}, out.installerManifest, verify.InstallerOptions{
 		SplitWIMPolicySize: plan.SplitWIMPolicySize(), RequireSplitWIM: plan.InstallStrategy() == installer.SplitWIM,
+		Progress: byteProgress(ctx, updates, progress.StageVerifyingFilesystem),
 	})
 	if err := errors.Join(verifyErr, reader.Close()); err != nil {
 		return err
@@ -449,12 +450,29 @@ func (s *Service) finishRun(out *RunResult, runErr error, elapsed time.Duration)
 }
 
 func sendStage(ctx context.Context, updates chan<- progress.Update, stage progress.Stage) {
+	sendUpdate(ctx, updates, progress.Update{Stage: stage})
+}
+
+// sendUpdate never blocks the workflow: a full channel drops the update.
+func sendUpdate(ctx context.Context, updates chan<- progress.Update, update progress.Update) {
 	if updates == nil {
 		return
 	}
 	select {
-	case updates <- progress.Update{Stage: stage}:
+	case updates <- update:
 	case <-ctx.Done():
 	default:
+	}
+}
+
+// byteProgress returns a callback that reports byte counts for stage, with
+// throughput measured from the moment the callback is created.
+func byteProgress(ctx context.Context, updates chan<- progress.Update, stage progress.Stage) func(done, total uint64) {
+	if updates == nil {
+		return nil
+	}
+	start := time.Now()
+	return func(done, total uint64) {
+		sendUpdate(ctx, updates, progress.Calculate(stage, done, total, time.Since(start)))
 	}
 }

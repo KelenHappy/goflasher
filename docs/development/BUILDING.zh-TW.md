@@ -44,6 +44,18 @@ process 執行。Windows 不設 privileged helper、service 或跨程序 IPC，b
 
 三平台CI只能證明source可編譯及隔離測試通過，不能證明真實硬體上的destructive access；release仍必須通過 `TESTING.zh-TW.md` 的實體媒體驗收。
 
+### Windows主機installer builder邊界
+
+在Windows上，installer builder與raw writer在同一個已提升權限的process中執行。
+磁碟上所有volume皆已lock並dismount後，它會開啟已驗證身分的
+`\\.\PhysicalDriveN` handle，自行寫入GPT與FAT32結構，再以另一個獨立handle
+回讀並進行semantic verification。Raw disk handle只接受完整sector的請求，因此
+builder與verifier的所有I/O都會經過`internal/blockio`，在已驗證的磁碟大小內以
+read-modify-write補齊不完整的sector。Logical sector size不是512 bytes的磁碟會被
+拒絕。只有超過FAT32單檔上限的`install.wim`會呼叫外部程式：由`internal/wim`解析
+並驗證的系統`%SystemRoot%\System32\dism.exe /Split-Image`；建立媒體時不會執行
+其他指令。
+
 ### macOS Windows installer builder邊界
 
 macOS installer builder目前只是**開發中的migration path**，不是production-ready
