@@ -109,3 +109,13 @@ jobs:
             '${{ matrix.arch }}' \
             "$hash" \
             "$RUNNER_TEMP/wimlib-out/smoke.wim"
+
+      # Kept so a hash that differs from docs/legal/wimlib-1.14.5 can be
+      # compared with a local build.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: libwim-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/wimlib-out/lib/libwim.a
+            ${{ runner.temp }}/wimlib-out/SHA256SUMS
+          if-no-files-found: error

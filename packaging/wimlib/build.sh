@@ -197,17 +197,21 @@ fi
 # ZERO_AR_DATE makes Apple's archiver omit member timestamps, so the archive
 # hash depends on the source, toolchain, and flags only.
 #
-# On Windows the compiler sees native paths, so the prefix map uses those.
-# MinGW's make expands $(SHELL) to the unquoted "C:/Program Files/Git/..."
-# path, which breaks automake's $(LIBTOOL), so libtool runs through the sh on
-# PATH instead. WinLibs' binutils do not default to deterministic archives,
-# so ar and ranlib get D to zero the member timestamps.
+# On Windows the compiler sees native paths, so the prefix maps use those.
+# WinLibs is unpacked wherever the host puts it, and the debug info names its
+# system header directories, so its root is mapped as well. MinGW's make
+# expands $(SHELL) to the unquoted "C:/Program Files/Git/..." path, which
+# breaks automake's $(LIBTOOL), so libtool runs through the sh on PATH
+# instead. WinLibs' binutils do not default to deterministic archives, so ar
+# and ranlib get D to zero the member timestamps.
 #
 
 case "$host_os" in
   Windows)
     cc=gcc
     compiler_src=$(cygpath -m "$src")
+    toolchain_root=$(cygpath -m "$(cd "$(dirname "$(command -v gcc)")/.." && pwd)")
+    toolchain_map=" -ffile-prefix-map=$toolchain_root=winlibs"
     make_cmd=(mingw32-make "LIBTOOL=sh ./libtool")
     export AR_FLAGS=crD RANLIB="ranlib -D"
     exe=.exe
@@ -215,6 +219,7 @@ case "$host_os" in
   *)
     cc=clang
     compiler_src=$src
+    toolchain_map=
     make_cmd=(make)
     exe=
     ;;
@@ -227,7 +232,7 @@ echo "Configuring wimlib $WIMLIB_VERSION"
 
   CC=$cc \
   MAKE=${make_cmd[0]} \
-  CFLAGS="-g -O2 -ffile-prefix-map=$compiler_src=wimlib-$WIMLIB_VERSION" \
+  CFLAGS="-g -O2 -ffile-prefix-map=$compiler_src=wimlib-$WIMLIB_VERSION$toolchain_map" \
   ./configure \
     --prefix=/usr \
     "${WIMLIB_CONFIGURE_FLAGS[@]}"
