@@ -2,9 +2,15 @@ name: CI
 
 on:
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
+    # Documentation alone does not run CI, except the legal texts: the notices
+    # in docs/legal are the source of the ones embedded by internal/legal.
+    # Later patterns override earlier ones.
+    paths:
+      - '**'
+      - '!**/*.md'
+      - '!docs/**'
+      - 'docs/legal/**'
+      - 'internal/legal/**'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -71,6 +77,16 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Verify embedded licenses are current
+        run: |
+          go generate ./internal/legal
+          if ! git diff --quiet --exit-code internal/legal/texts; then
+            echo "internal/legal/texts is stale." >&2
+            echo "Run: go generate ./internal/legal" >&2
+            git diff --stat internal/legal/texts >&2
+            exit 1
+          fi
 
       # shellcheck is preinstalled on the ubuntu-24.04 runner image.
       - name: Shellcheck
