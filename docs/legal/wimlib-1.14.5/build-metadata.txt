@@ -21,14 +21,20 @@ Recipe
 Approved libwim.a artifacts (artifact.sha256 lists the hashes alone)
   windows-amd64  WinLibs GCC 16.2.0 (MinGW-W64 x86_64-ucrt-posix-seh, r2),
                  GNU Binutils 2.47.20260726, GNU Make 4.4.1 (mingw32-make),
-                 Git Bash; AR_FLAGS=crD, RANLIB="ranlib -D"
-                 2831866f778631a4ffa430ae129c0ebc3cc9d8502d4adafd49460b707b6db721
-  linux-amd64    Ubuntu 24.04, Clang 18; hash to be added from the
-                 bundled-wimlib CI job (.github/workflows/wimlib.yml)
-  macos-amd64    Xcode 16.4 Apple Clang, ZERO_AR_DATE=1; hash to be added
-                 from the bundled-wimlib CI job
-  macos-arm64    Xcode 16.4 Apple Clang, ZERO_AR_DATE=1; hash to be added
-                 from the bundled-wimlib CI job
+                 Git Bash; AR_FLAGS=crD, RANLIB="ranlib -D", WinLibs root
+                 mapped to "winlibs" in the debug info
+                 49c958cb7d347ea02b4de4a977bec8904ff4a1cf10f6a68f6594cf7918dd16c9
+  linux-amd64    Ubuntu 24.04, Ubuntu clang 18.1.3 (1ubuntu1)
+                 f735536c2739aeb1e6ae0d7ee5e2afdfa36711f0bc317b4ac2a895a023cf599f
+  macos-amd64    Xcode 16.4, Apple clang 17.0.0 (clang-1700.0.13.5),
+                 ZERO_AR_DATE=1
+                 8b84c27868412c3f07e07962a4a92fc40950381c773fe56b1c68e551ae1db5cb
+  macos-arm64    Xcode 16.4, Apple clang 17.0.0 (clang-1700.0.13.5),
+                 ZERO_AR_DATE=1
+                 6be08539d317b900e348af8cb9df965800fd36dd007bdb3643118742dcaa5e1a
 
-Each archive is reproducible: repeated builds from the same lock on the same
-toolchain produce the same SHA-256 (checked twice for windows-amd64).
+The linux and macOS hashes come from the bundled-wimlib CI job
+(.github/workflows/wimlib.yml, run 39131822781). Each archive is reproducible:
+repeated builds from the same lock on the same toolchain produce the same
+SHA-256, also with the toolchain installed elsewhere (checked for
+windows-amd64).
