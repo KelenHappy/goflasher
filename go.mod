@@ -4,7 +4,7 @@ go 1.26.7
 
 require (
 	fyne.io/fyne/v2 v2.8.2
-	github.com/ebitengine/purego v0.11.1
+	github.com/ebitengine/purego v0.11.2
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/ulikunitz/xz v0.5.17
 	golang.org/x/sys v0.49.0
