@@ -1,6 +1,6 @@
 module github.com/goflasher/goflasher
 
-go 1.26.7
+go 1.26.10
 
 require (
 	fyne.io/fyne/v2 v2.8.2
