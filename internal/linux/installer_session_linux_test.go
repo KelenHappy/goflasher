@@ -108,9 +108,16 @@ func TestInstallerSessionFlushReportsInvalidationFailure(t *testing.T) {
 	if err := runInstallerSession(installerSession{request: req, target: target, input: bufio.NewReader(input), output: &output, env: env}); err == nil {
 		t.Fatal("flush succeeded without invalidating the cache")
 	}
-	replies := decodeSessionReplies(t, &output)
-	if len(replies) != 1 || replies[0].OK || replies[0].Code != string(failOperationFailed) {
-		t.Fatalf("replies=%+v", replies)
+	requireSingleFailureReply(t, decodeSessionReplies(t, &output), string(failOperationFailed))
+}
+
+func requireSingleFailureReply(t *testing.T, replies []privilege.SessionResponse, code string) {
+	t.Helper()
+	if len(replies) != 1 {
+		t.Fatalf("replies=%+v, want exactly one", replies)
+	}
+	if reply := replies[0]; reply.OK || reply.Code != code {
+		t.Fatalf("reply=%+v, want failure with code %q", reply, code)
 	}
 }
 
