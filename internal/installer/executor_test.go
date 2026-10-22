@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -187,17 +188,27 @@ func TestExecutorReportsMonotonicCopyProgress(t *testing.T) {
 	if _, err := (Executor{Progress: progress}).Execute(context.Background(), plan, bytes.NewReader(source), &sparseTarget{size: 80 << 20}); err != nil {
 		t.Fatal(err)
 	}
+	requireCopyProgress(t, reports, 4000)
+}
+
+// requireCopyProgress checks that every report carries the same total and
+// that the copied count only moves forward until it reaches that total.
+func requireCopyProgress(t *testing.T, reports [][2]uint64, total uint64) {
+	t.Helper()
 	if len(reports) == 0 {
 		t.Fatal("no progress reported")
 	}
-	var previous uint64
+	copied := make([]uint64, 0, len(reports))
 	for _, r := range reports {
-		if r[1] != 4000 || r[0] < previous || r[0] > r[1] {
-			t.Fatalf("progress reports = %v, want monotonic values bounded by 4000", reports)
+		if r[1] != total {
+			t.Fatalf("progress reports = %v, want total %d in each", reports, total)
 		}
-		previous = r[0]
+		copied = append(copied, r[0])
 	}
-	if last := reports[len(reports)-1]; last[0] != last[1] {
-		t.Fatalf("final progress = %v, want complete", last)
+	if !slices.IsSorted(copied) {
+		t.Fatalf("progress reports = %v, want monotonic copied counts", reports)
+	}
+	if last := copied[len(copied)-1]; last != total {
+		t.Fatalf("final progress = %d/%d, want complete", last, total)
 	}
 }

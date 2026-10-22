@@ -281,10 +281,23 @@ func TestNativeWIMPrepareReportsStagingAndSplitProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireIdempotentClose(t, cleanup)
-	if len(staged) < 3 || staged[0] != 0 || staged[len(staged)-1] != request.SourceSize || !slices.IsSorted(staged) {
-		t.Fatalf("staging progress=%v", staged)
-	}
+	requireStagingProgress(t, staged, request.SourceSize)
 	if want := []string{"splitting", "split 0/10", "split 10/10"}; !slices.Equal(events, want) {
 		t.Fatalf("events=%v, want %v", events, want)
+	}
+}
+
+// requireStagingProgress checks that staging reported several steps that only
+// move forward, starting at zero and ending with every byte copied.
+func requireStagingProgress(t *testing.T, staged []uint64, total uint64) {
+	t.Helper()
+	if len(staged) < 3 {
+		t.Fatalf("staging progress=%v, want at least 3 reports", staged)
+	}
+	if !slices.IsSorted(staged) {
+		t.Fatalf("staging progress=%v moves backwards", staged)
+	}
+	if first, last := staged[0], staged[len(staged)-1]; first != 0 || last != total {
+		t.Fatalf("staging progress=%v, want 0 to %d", staged, total)
 	}
 }

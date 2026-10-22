@@ -3,7 +3,6 @@ package wim
 import (
 	"context"
 	"errors"
-	"path/filepath"
 
 	"github.com/goflasher/goflasher/internal/wim/native"
 )
@@ -55,20 +54,21 @@ func backendSplit(ctx context.Context, req Request) (parts []Part, err error) {
 		req.report(done, total)
 		return ctx.Err() == nil
 	}
-	if err := image.Split(filepath.Join(req.OutputDir, "install.swm"), req.PartSize, progress); err != nil {
-		removeParts(req.OutputDir)
+	output := partDir(req.OutputDir)
+	if err := image.Split(output.firstPart(), req.PartSize, progress); err != nil {
+		output.remove()
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
 		return nil, err
 	}
-	parts, err = discoverParts(req.OutputDir)
+	parts, err = output.discover()
 	if err != nil {
-		removeParts(req.OutputDir)
+		output.remove()
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
-		removeParts(req.OutputDir)
+		output.remove()
 		return nil, err
 	}
 	return parts, nil

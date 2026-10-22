@@ -115,7 +115,7 @@ func TestRevalidationDetectsReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.replaceIdentity("sdb", "REPLACED", "ID_DRIVE_THUMB")
+	b.setUdevIdentity("sdb", usbIdentity("REPLACED", "ID_DRIVE_THUMB"))
 	if _, err := b.Revalidate(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
 		t.Fatalf("error = %v", err)
 	}
@@ -187,7 +187,7 @@ func TestHelperFailureReplacementAndAuthorizationCancellation(t *testing.T) {
 	t.Run("replacement found before privilege escalation skips helper", func(t *testing.T) {
 		b, selected := helperFailureFixture(t, nil)
 		fake := b.helper.(*fakePrivilegedHelper)
-		b.replaceIdentity("sdc", "NEWCARD", "ID_DRIVE_FLASH_SD")
+		b.setUdevIdentity("sdc", usbIdentity("NEWCARD", "ID_DRIVE_FLASH_SD"))
 		if _, err := b.OpenWriter(context.Background(), selected); !errors.Is(err, ErrDeviceChanged) {
 			t.Fatalf("pre-helper replacement = %v", err)
 		}

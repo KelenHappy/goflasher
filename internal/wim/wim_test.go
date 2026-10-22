@@ -20,7 +20,7 @@ func TestDiscoverPartsRequiresCanonicalContiguousNonemptyOutput(t *testing.T) {
 		{"empty", map[string]string{"install.swm": ""}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			parts, err := discoverParts(writeParts(t, tt.files))
+			parts, err := partDir(writeParts(t, tt.files)).discover()
 			if tt.ok {
 				assertPartsAccepted(t, parts, err, len(tt.files))
 				return

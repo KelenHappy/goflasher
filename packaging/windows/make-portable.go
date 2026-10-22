@@ -172,43 +172,56 @@ func (l portableLayout) stageWimlibRecord() error {
 	if l.wimlibRecord == "" {
 		return errors.New("GoFlasher.exe links wimlib; --wimlib-record is required")
 	}
-	dest := filepath.Join(l.stageDir, "legal", "wimlib-1.14.5")
-	if err := copyTree(filepath.Join(l.wimlibRecord, "licenses"), filepath.Join(dest, "licenses")); err != nil {
+	record := copySpec{from: l.wimlibRecord, to: filepath.Join(l.stageDir, "legal", "wimlib-1.14.5")}
+	if err := copyTree(record.child("licenses")); err != nil {
 		return err
 	}
 	for _, item := range wimlibRecordItems {
-		if err := copyFile(filepath.Join(l.wimlibRecord, item), filepath.Join(dest, item)); err != nil {
+		if err := copyFile(record.child(item)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// copyTree copies every regular file under src to the same relative path
-// under dst.
-func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, walkErr error) error {
+// copySpec names the source and destination of one copy, so the two paths
+// cannot be swapped by argument order.
+type copySpec struct {
+	from, to string
+}
+
+// child is the copy of the entry called name inside from to the same name
+// inside to.
+func (c copySpec) child(name string) copySpec {
+	return copySpec{from: filepath.Join(c.from, name), to: filepath.Join(c.to, name)}
+}
+
+// copyTree copies every regular file under c.from to the same relative path
+// under c.to.
+func copyTree(c copySpec) error {
+	return filepath.WalkDir(c.from, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() {
 			return walkErr
 		}
-		rel, err := filepath.Rel(src, path)
+		rel, err := filepath.Rel(c.from, path)
 		if err != nil {
 			return err
 		}
-		return copyFile(path, filepath.Join(dst, rel))
+		return copyFile(c.child(rel))
 	})
 }
 
-// copyFile copies src to dst, creating dst's parent directories.
-func copyFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+// copyFile copies c.from to c.to, creating the destination's parent
+// directories.
+func copyFile(c copySpec) error {
+	if err := os.MkdirAll(filepath.Dir(c.to), 0755); err != nil {
 		return err
 	}
-	out, err := os.Create(dst)
+	out, err := os.Create(c.to)
 	if err != nil {
 		return err
 	}
-	copyErr := copyInto(out, src)
+	copyErr := copyInto(out, c.from)
 	closeErr := out.Close()
 	if copyErr != nil {
 		return copyErr
@@ -217,7 +230,7 @@ func copyFile(src, dst string) error {
 }
 
 func (l portableLayout) stageExecutable() error {
-	return copyFile(l.executable, filepath.Join(l.stageDir, "GoFlasher.exe"))
+	return copyFile(copySpec{from: l.executable, to: filepath.Join(l.stageDir, "GoFlasher.exe")})
 }
 
 // stageReadme copies README-Windows.txt with VERSION substituted.

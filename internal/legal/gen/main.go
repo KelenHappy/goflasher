@@ -5,7 +5,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -84,35 +83,39 @@ func stageProjectTexts(repo, texts string) error {
 	return nil
 }
 
-// compiledModuleDirs maps every module compiled into the GUI binary to its
-// source directory, excluding the repository's own module.
 // releaseTargets are the platforms whose GUI builds share these embedded texts.
 // Listing each one keeps a platform-only dependency (such as PureGo on macOS)
 // in the notices even when the generator runs on another host.
 var releaseTargets = []string{"linux", "darwin", "windows"}
 
+// compiledModuleDirs maps every module compiled into the GUI binary for any
+// release target to its source directory, excluding the repository's own module.
 func compiledModuleDirs(repo string) (map[string]string, error) {
 	modules := make(map[string]string)
 	for _, goos := range releaseTargets {
-		cmd := exec.Command("go", "list", "-deps", "-tags", "fyne,wimlib", "-f", `{{with .Module}}{{if .Dir}}{{.Path}}|{{.Dir}}{{end}}{{end}}`, "./cmd/usbwriter")
-		cmd.Dir = repo
-		cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=1")
-		out, err := cmd.Output()
-		if err != nil {
-			return nil, fmt.Errorf("go list compiled modules for %s: %w", goos, err)
-		}
-		scan := bufio.NewScanner(strings.NewReader(string(out)))
-		for scan.Scan() {
-			parts := strings.SplitN(scan.Text(), "|", 2)
-			if len(parts) == 2 && parts[0] != selfModule {
-				modules[parts[0]] = parts[1]
-			}
-		}
-		if err := scan.Err(); err != nil {
+		if err := addCompiledModules(modules, repo, goos); err != nil {
 			return nil, err
 		}
 	}
 	return modules, nil
+}
+
+// addCompiledModules adds the modules the GUI binary compiles for goos.
+func addCompiledModules(modules map[string]string, repo, goos string) error {
+	cmd := exec.Command("go", "list", "-deps", "-tags", "fyne,wimlib", "-f", `{{with .Module}}{{if .Dir}}{{.Path}}|{{.Dir}}{{end}}{{end}}`, "./cmd/usbwriter")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "GOOS="+goos, "CGO_ENABLED=1")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("go list compiled modules for %s: %w", goos, err)
+	}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		path, dir, ok := strings.Cut(line, "|")
+		if ok && path != selfModule {
+			modules[path] = dir
+		}
+	}
+	return nil
 }
 
 // stageModuleTexts copies each module's root license files and returns the

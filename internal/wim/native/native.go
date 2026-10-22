@@ -25,7 +25,7 @@ type functions struct {
 	openWIM func(string, int32) (uintptr, int32)
 	// int wimlib_split(WIMStruct *, const tchar *, uint64_t, int), with the
 	// progress function, when non-nil, registered for the duration of the call
-	split func(uintptr, string, uint64, int32, func(splitEvent) bool) int32
+	split func(splitCall) int32
 	// void wimlib_free(WIMStruct *)
 	free func(uintptr)
 	// void wimlib_global_cleanup(void)
@@ -121,6 +121,16 @@ const (
 	splitPartWrite splitEventKind = 3
 )
 
+// splitCall holds the arguments of one wimlib_split call.
+type splitCall struct {
+	wim      uintptr
+	output   string
+	partSize uint64
+	flags    int32
+	// progress, when non-nil, receives every split progress message.
+	progress func(splitEvent) bool
+}
+
 type splitEvent struct {
 	kind             splitEventKind
 	completed, total uint64
@@ -174,7 +184,7 @@ func (i *Image) Split(output string, partSize uint64, progress SplitProgress) er
 	if progress != nil {
 		events = (&splitTracker{report: progress}).handle
 	}
-	if code := i.lib.fn.split(i.handle, output, partSize, 0, events); code != 0 {
+	if code := i.lib.fn.split(splitCall{wim: i.handle, output: output, partSize: partSize, progress: events}); code != 0 {
 		return i.lib.nativeError("wimlib_split", code)
 	}
 	return nil

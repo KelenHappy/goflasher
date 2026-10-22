@@ -43,7 +43,7 @@ func Split(ctx context.Context, req Request) ([]Part, error) {
 	}
 	req.SourcePath = sourcePath
 	req.OutputDir = outputDir
-	if err := rejectExistingParts(req.OutputDir); err != nil {
+	if err := partDir(req.OutputDir).rejectExisting(); err != nil {
 		return nil, err
 	}
 	return backendSplit(ctx, req)
@@ -76,8 +76,15 @@ func canonicalAbsolute(name string) (string, error) {
 	return resolved, nil
 }
 
-func rejectExistingParts(dir string) error {
-	parts, err := discoverParts(dir)
+// partDir is a canonical absolute directory that holds, or will hold, the
+// install.swm, install2.swm, ... parts of one split.
+type partDir string
+
+// firstPart is the name wimlib is given; it numbers the later parts itself.
+func (d partDir) firstPart() string { return filepath.Join(string(d), "install.swm") }
+
+func (d partDir) rejectExisting() error {
+	parts, err := d.discover()
 	if err != nil {
 		return err
 	}
@@ -87,8 +94,8 @@ func rejectExistingParts(dir string) error {
 	return nil
 }
 
-func discoverParts(dir string) ([]Part, error) {
-	entries, err := os.ReadDir(dir)
+func (d partDir) discover() ([]Part, error) {
+	entries, err := os.ReadDir(string(d))
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +111,7 @@ func discoverParts(dir string) ([]Part, error) {
 		if _, duplicate := indexed[n]; duplicate {
 			return nil, fmt.Errorf("%w: duplicate split output %d", ErrUnsupported, n)
 		}
-		part, err := measurePart(dir, entry)
+		part, err := d.measure(entry)
 		if err != nil {
 			return nil, err
 		}
@@ -134,8 +141,8 @@ func splitPartIndex(entry os.DirEntry) (int, error) {
 	return n, nil
 }
 
-// measurePart sizes one canonically named part and rejects an empty one.
-func measurePart(dir string, entry os.DirEntry) (Part, error) {
+// measure sizes one canonically named part and rejects an empty one.
+func (d partDir) measure(entry os.DirEntry) (Part, error) {
 	info, err := entry.Info()
 	if err != nil {
 		return Part{}, err
@@ -143,7 +150,7 @@ func measurePart(dir string, entry os.DirEntry) (Part, error) {
 	if info.Size() <= 0 {
 		return Part{}, fmt.Errorf("%w: empty split part", ErrUnsupported)
 	}
-	return Part{Path: filepath.Join(dir, entry.Name()), Size: uint64(info.Size())}, nil
+	return Part{Path: filepath.Join(string(d), entry.Name()), Size: uint64(info.Size())}, nil
 }
 
 // orderedParts returns the parts in index order, requiring 1..n with no gaps.
@@ -170,11 +177,11 @@ func partNumber(name string) (int, bool) {
 	return n, err == nil && n >= 2 && name == "install"+strconv.Itoa(n)+".swm"
 }
 
-func removeParts(dir string) {
-	entries, _ := os.ReadDir(dir)
+func (d partDir) remove() {
+	entries, _ := os.ReadDir(string(d))
 	for _, entry := range entries {
 		if _, ok := partNumber(strings.ToLower(entry.Name())); ok && !entry.IsDir() {
-			_ = os.Remove(filepath.Join(dir, entry.Name()))
+			_ = os.Remove(filepath.Join(string(d), entry.Name()))
 		}
 	}
 }

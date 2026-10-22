@@ -22,20 +22,10 @@ func (w *Writer) Write(p []byte) (int, error) {
 	if w.err != nil {
 		return 0, w.err
 	}
-	consumed := 0
-	if len(w.pending) > 0 {
-		n := min(len(p), cap(w.pending)-len(w.pending))
-		w.pending = append(w.pending, p[:n]...)
-		consumed = n
-		if len(w.pending) < cap(w.pending) {
-			return consumed, nil
-		}
-		if err := w.commit(w.pending); err != nil {
-			return 0, err
-		}
-		w.pending = w.pending[:0]
+	rest, err := w.topUpPending(p)
+	if err != nil {
+		return 0, err
 	}
-	rest := p[consumed:]
 	whole := len(rest) / cap(w.pending) * cap(w.pending)
 	if whole > 0 {
 		if err := w.commit(rest[:whole]); err != nil {
@@ -46,6 +36,21 @@ func (w *Writer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// topUpPending moves the start of p into a held partial sector, writes the
+// sector once it is complete, and returns the rest of p. Without a held
+// sector it returns p unchanged.
+func (w *Writer) topUpPending(p []byte) ([]byte, error) {
+	if len(w.pending) == 0 {
+		return p, nil
+	}
+	n := min(len(p), cap(w.pending)-len(w.pending))
+	w.pending = append(w.pending, p[:n]...)
+	if len(w.pending) < cap(w.pending) {
+		return p[n:], nil
+	}
+	return p[n:], w.commitPending()
+}
+
 // Flush writes a held partial sector, preserving the device bytes after it.
 func (w *Writer) Flush() error {
 	if w.err != nil {
@@ -54,6 +59,10 @@ func (w *Writer) Flush() error {
 	if len(w.pending) == 0 {
 		return nil
 	}
+	return w.commitPending()
+}
+
+func (w *Writer) commitPending() error {
 	if err := w.commit(w.pending); err != nil {
 		return err
 	}

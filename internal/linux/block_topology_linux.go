@@ -189,16 +189,14 @@ func rdevNumber(rdev uint64) devNumber {
 	return devNumber{uint32(unix.Major(rdev)), uint32(unix.Minor(rdev))}
 }
 
-// underDeviceRoot reports whether path names an entry directly inside devRoot.
-// A swap path there that cannot be stat'd is a device we failed to resolve and
-// must not silently ignore; a path anywhere else is an ordinary swap file.
+// underDeviceRoot reports whether path names an entry inside devRoot, such as
+// /dev/sdb1 or /dev/mapper/swap. A swap path there that cannot be stat'd is a
+// device we failed to resolve and must not silently ignore; a path anywhere
+// else is an ordinary swap file.
 func underDeviceRoot(path, devRoot string) bool {
-	rel, err := filepath.Rel(filepath.Clean(devRoot), filepath.Clean(path))
+	rel, err := filepath.Rel(devRoot, path)
 	if err != nil {
 		return false
 	}
-	if rel == "." || rel == ".." || filepath.IsAbs(rel) {
-		return false
-	}
-	return filepath.Dir(rel) != ".."
+	return rel != "." && filepath.IsLocal(rel)
 }

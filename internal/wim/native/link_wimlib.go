@@ -109,17 +109,17 @@ func openWIM(path string, flags int32) (uintptr, int32) {
 	return uintptr(wim), int32(code)
 }
 
-func split(wim uintptr, output string, partSize uint64, flags int32, progress func(splitEvent) bool) int32 {
-	coutput, ok := newTString(output)
+func split(call splitCall) int32 {
+	coutput, ok := newTString(call.output)
 	if !ok {
 		return C.WIMLIB_ERR_INVALID_PARAM
 	}
 	defer C.free(unsafe.Pointer(coutput))
 	var handle C.uintptr_t
-	if progress != nil {
-		h := cgo.NewHandle(progress)
+	if call.progress != nil {
+		h := cgo.NewHandle(call.progress)
 		defer h.Delete()
 		handle = C.uintptr_t(h)
 	}
-	return int32(C.goflasher_split(C.uintptr_t(wim), coutput, C.uint64_t(partSize), C.int(flags), handle))
+	return int32(C.goflasher_split(C.uintptr_t(call.wim), coutput, C.uint64_t(call.partSize), C.int(call.flags), handle))
 }

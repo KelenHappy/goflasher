@@ -45,7 +45,7 @@ func TestNativePathsRejectEmbeddedNUL(t *testing.T) {
 	called := false
 	library := &Library{fn: functions{
 		openWIM: func(string, int32) (uintptr, int32) { called = true; return 42, 0 },
-		split:   func(uintptr, string, uint64, int32, func(splitEvent) bool) int32 { called = true; return 0 },
+		split:   func(splitCall) int32 { called = true; return 0 },
 	}}
 	if _, err := library.OpenWIM("/tmp/a\x00b.wim"); !errors.Is(err, ErrInvalidPath) {
 		t.Fatalf("OpenWIM error=%v", err)
@@ -62,7 +62,7 @@ func TestNativePathsRejectEmbeddedNUL(t *testing.T) {
 func TestSplitPartSizeUsesBundledUint64ABI(t *testing.T) {
 	const partSize = uint64(5) << 30 // deliberately exceeds a 32-bit argument
 	var got uint64
-	library := &Library{fn: functions{split: func(_ uintptr, _ string, size uint64, _ int32, _ func(splitEvent) bool) int32 { got = size; return 0 }}}
+	library := &Library{fn: functions{split: func(call splitCall) int32 { got = call.partSize; return 0 }}}
 	image := &Image{lib: library, handle: 42}
 	if err := image.Split("/tmp/install.swm", partSize, nil); err != nil {
 		t.Fatal(err)
@@ -85,9 +85,9 @@ func TestSplitProgressIsMonotonicAcrossParts(t *testing.T) {
 		{kind: splitPartEnd, completed: total, total: total},
 	}
 	var got []uint64
-	library := &Library{fn: functions{split: func(_ uintptr, _ string, _ uint64, _ int32, progress func(splitEvent) bool) int32 {
+	library := &Library{fn: functions{split: func(call splitCall) int32 {
 		for _, e := range events {
-			if !progress(e) {
+			if !call.progress(e) {
 				return 76 // WIMLIB_ERR_ABORTED_BY_PROGRESS
 			}
 		}
@@ -111,8 +111,8 @@ func TestSplitProgressIsMonotonicAcrossParts(t *testing.T) {
 }
 
 func TestSplitProgressCanAbort(t *testing.T) {
-	library := &Library{fn: functions{split: func(_ uintptr, _ string, _ uint64, _ int32, progress func(splitEvent) bool) int32 {
-		if !progress(splitEvent{kind: splitPartBegin, total: 10}) {
+	library := &Library{fn: functions{split: func(call splitCall) int32 {
+		if !call.progress(splitEvent{kind: splitPartBegin, total: 10}) {
 			return 76
 		}
 		return 0

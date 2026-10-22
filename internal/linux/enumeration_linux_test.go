@@ -79,7 +79,7 @@ func TestSmallGenericUSBStorageFallback(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBackendFixture(t)
-			b.useGenericUSBStorage("sdb", "FLASH123")
+			b.setUdevIdentity("sdb", genericUSBStorage("FLASH123"))
 			b.setDiskSectors("sdb", tc.sectors)
 			gotDevice, err := b.RefreshDevice(context.Background(), "FLASH123")
 			requireNoError(t, err)

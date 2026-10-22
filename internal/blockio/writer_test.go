@@ -16,17 +16,8 @@ func TestWriterStreamsArbitraryChunksWithAlignedRequests(t *testing.T) {
 	rand.New(rand.NewSource(2)).Read(payload)
 
 	w := NewWriter(a)
-	rng := rand.New(rand.NewSource(3))
-	for rest := payload; len(rest) > 0; {
-		n := min(len(rest), rng.Intn(1500)+1)
-		if got, err := w.Write(rest[:n]); err != nil || got != n {
-			t.Fatalf("Write(%d) = %d, %v", n, got, err)
-		}
-		rest = rest[n:]
-	}
-	if !bytes.Equal(dev.data[len(payload):], original[len(payload):]) {
-		t.Fatal("bytes past the stream changed before Flush")
-	}
+	writeInRandomChunks(t, w, payload, rand.New(rand.NewSource(3)))
+	requireUnchangedFrom(t, dev.data, original, len(payload), "bytes past the stream changed before Flush")
 	if err := w.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -36,8 +27,27 @@ func TestWriterStreamsArbitraryChunksWithAlignedRequests(t *testing.T) {
 	if !bytes.Equal(dev.data[:len(payload)], payload) {
 		t.Fatal("streamed bytes differ")
 	}
-	if !bytes.Equal(dev.data[len(payload):], original[len(payload):]) {
-		t.Fatal("Flush overwrote bytes after the stream")
+	requireUnchangedFrom(t, dev.data, original, len(payload), "Flush overwrote bytes after the stream")
+}
+
+// writeInRandomChunks feeds payload to w in chunks of 1 to 1500 bytes.
+func writeInRandomChunks(t *testing.T, w *Writer, payload []byte, rng *rand.Rand) {
+	t.Helper()
+	for rest := payload; len(rest) > 0; {
+		n := min(len(rest), rng.Intn(1500)+1)
+		if got, err := w.Write(rest[:n]); err != nil || got != n {
+			t.Fatalf("Write(%d) = %d, %v", n, got, err)
+		}
+		rest = rest[n:]
+	}
+}
+
+// requireUnchangedFrom fails with message unless data still equals original
+// from offset from onwards.
+func requireUnchangedFrom(t *testing.T, data, original []byte, from int, message string) {
+	t.Helper()
+	if !bytes.Equal(data[from:], original[from:]) {
+		t.Fatal(message)
 	}
 }
 

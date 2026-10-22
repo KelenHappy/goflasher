@@ -53,7 +53,7 @@ func NewAligned(dev Device, sectorSize uint32, size uint64) (*Aligned, error) {
 	if !validSectorSize(sectorSize) {
 		return nil, fmt.Errorf("%w: logical sector size %d", ErrInvalidGeometry, sectorSize)
 	}
-	if size == 0 || size > math.MaxInt64 || size%uint64(sectorSize) != 0 {
+	if !validDeviceSize(size, sectorSize) {
 		return nil, fmt.Errorf("%w: device size %d is not a positive multiple of %d", ErrInvalidGeometry, size, sectorSize)
 	}
 	return &Aligned{dev: dev, sector: int64(sectorSize), size: int64(size)}, nil
@@ -61,6 +61,15 @@ func NewAligned(dev Device, sectorSize uint32, size uint64) (*Aligned, error) {
 
 func validSectorSize(size uint32) bool {
 	return size >= minSectorSize && size <= maxSectorSize && size&(size-1) == 0
+}
+
+// validDeviceSize reports whether size is a positive whole number of sectors
+// that int64 offsets can address.
+func validDeviceSize(size uint64, sectorSize uint32) bool {
+	if size == 0 || size > math.MaxInt64 {
+		return false
+	}
+	return size%uint64(sectorSize) == 0
 }
 
 // ReadAt follows io.ReaderAt: a read that reaches the end of the device
@@ -109,7 +118,7 @@ func (a *Aligned) readRange(p []byte, off int64) error {
 // WriteAt follows io.WriterAt. A range that does not fit inside the device is
 // rejected before any byte is written.
 func (a *Aligned) WriteAt(p []byte, off int64) (int, error) {
-	if off < 0 || off > a.size || int64(len(p)) > a.size-off {
+	if !a.contains(off, len(p)) {
 		return 0, ErrOutOfRange
 	}
 	a.mu.Lock()
@@ -201,6 +210,14 @@ func (a *Aligned) writeSectors(p []byte, off int64) error {
 		}
 		return nil
 	})
+}
+
+// contains reports whether the n bytes starting at off lie inside the device.
+func (a *Aligned) contains(off int64, n int) bool {
+	if off < 0 || off > a.size {
+		return false
+	}
+	return int64(n) <= a.size-off
 }
 
 func (a *Aligned) aligned(v int64) bool { return v%a.sector == 0 }

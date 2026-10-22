@@ -151,3 +151,25 @@ func TestMalformedOrCyclicTopologyFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestUnderDeviceRoot(t *testing.T) {
+	for _, tc := range []struct {
+		path, devRoot string
+		want          bool
+	}{
+		{"/dev/sdb1", "/dev", true},
+		{"/dev/mapper/swap", "/dev", true},
+		{"/dev/../dev/sdb1", "/dev", true},
+		{"/dev", "/dev", false},
+		{"/dev/", "/dev", false},
+		{"/", "/dev", false},
+		{"/swapfile", "/dev", false},
+		{"/device/sdb1", "/dev", false},
+		{"/tmp/fixture/swapfile", "/tmp/fixture/root/dev", false},
+		{"relative/swapfile", "/dev", false},
+	} {
+		if got := underDeviceRoot(tc.path, tc.devRoot); got != tc.want {
+			t.Errorf("underDeviceRoot(%q, %q) = %t, want %t", tc.path, tc.devRoot, got, tc.want)
+		}
+	}
+}

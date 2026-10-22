@@ -41,7 +41,7 @@ func (d *strictDevice) ReadAt(p []byte, off int64) (int, error) {
 	if err := d.check(p, off); err != nil {
 		return 0, err
 	}
-	if d.failReadAt >= 0 && off <= d.failReadAt && d.failReadAt < off+int64(len(p)) {
+	if covers(d.failReadAt, p, off) {
 		return 0, errors.New("injected read failure")
 	}
 	if d.truncateAt >= 0 && off+int64(len(p)) > d.truncateAt {
@@ -55,10 +55,19 @@ func (d *strictDevice) WriteAt(p []byte, off int64) (int, error) {
 	if err := d.check(p, off); err != nil {
 		return 0, err
 	}
-	if d.failWriteAt >= 0 && off <= d.failWriteAt && d.failWriteAt < off+int64(len(p)) {
+	if covers(d.failWriteAt, p, off) {
 		return 0, errors.New("injected write failure")
 	}
 	return copy(d.data[off:], p), nil
+}
+
+// covers reports whether a request for p at off includes the byte at. A
+// negative at, meaning no injected failure, never matches.
+func covers(at int64, p []byte, off int64) bool {
+	if at < 0 {
+		return false
+	}
+	return off <= at && at < off+int64(len(p))
 }
 
 func newTestAligned(t *testing.T, size, sector int64) (*Aligned, *strictDevice) {
@@ -257,34 +266,54 @@ func TestDeviceRequestsAreBounded(t *testing.T) {
 // plain byte slice and requires identical observable behaviour.
 func TestMatchesByteModel(t *testing.T) {
 	for _, sector := range []int64{512, 4096} {
-		t.Run(fmt.Sprint(sector), func(t *testing.T) {
-			const size = 64 * 4096
-			a, dev := newTestAligned(t, size, sector)
-			model := make([]byte, size)
-			rng := rand.New(rand.NewSource(sector))
-			for i := 0; i < 2000; i++ {
-				off := rng.Int63n(size)
-				n := rng.Intn(int(min(size-off, 3*sector+1))) + 1
-				if rng.Intn(2) == 0 {
-					p := make([]byte, n)
-					rng.Read(p)
-					if w, err := a.WriteAt(p, off); err != nil || w != n {
-						t.Fatalf("op %d WriteAt(%d, %d) = %d, %v", i, n, off, w, err)
-					}
-					copy(model[off:], p)
-					continue
-				}
-				got := make([]byte, n)
-				if r, err := a.ReadAt(got, off); err != nil || r != n {
-					t.Fatalf("op %d ReadAt(%d, %d) = %d, %v", i, n, off, r, err)
-				}
-				if !bytes.Equal(got, model[off:off+int64(n)]) {
-					t.Fatalf("op %d read mismatch at %d", i, off)
-				}
-			}
-			if !bytes.Equal(dev.data, model) {
-				t.Fatal("final device contents differ from model")
-			}
-		})
+		t.Run(fmt.Sprint(sector), func(t *testing.T) { checkAgainstByteModel(t, sector) })
+	}
+}
+
+func checkAgainstByteModel(t *testing.T, sector int64) {
+	const size = 64 * 4096
+	a, dev := newTestAligned(t, size, sector)
+	m := byteModel{t: t, a: a, model: make([]byte, size), rng: rand.New(rand.NewSource(sector))}
+	for i := range 2000 {
+		off := m.rng.Int63n(size)
+		n := m.rng.Intn(int(min(size-off, 3*sector+1))) + 1
+		if m.rng.Intn(2) == 0 {
+			m.write(i, off, n)
+		} else {
+			m.read(i, off, n)
+		}
+	}
+	if !bytes.Equal(dev.data, m.model) {
+		t.Fatal("final device contents differ from model")
+	}
+}
+
+// byteModel applies each operation to an Aligned device and to a plain byte
+// slice, and requires both to observe the same bytes.
+type byteModel struct {
+	t     *testing.T
+	a     *Aligned
+	model []byte
+	rng   *rand.Rand
+}
+
+func (m *byteModel) write(op int, off int64, n int) {
+	m.t.Helper()
+	p := make([]byte, n)
+	m.rng.Read(p)
+	if w, err := m.a.WriteAt(p, off); err != nil || w != n {
+		m.t.Fatalf("op %d WriteAt(%d, %d) = %d, %v", op, n, off, w, err)
+	}
+	copy(m.model[off:], p)
+}
+
+func (m *byteModel) read(op int, off int64, n int) {
+	m.t.Helper()
+	got := make([]byte, n)
+	if r, err := m.a.ReadAt(got, off); err != nil || r != n {
+		m.t.Fatalf("op %d ReadAt(%d, %d) = %d, %v", op, n, off, r, err)
+	}
+	if !bytes.Equal(got, m.model[off:off+int64(n)]) {
+		m.t.Fatalf("op %d read mismatch at %d", op, off)
 	}
 }

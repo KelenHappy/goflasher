@@ -48,9 +48,10 @@ func TestBuilderCreatesParseableTreeAndChains(t *testing.T) {
 	if d.synced < 2 { // format and final sync
 		t.Fatalf("sync count=%d", d.synced)
 	}
-	assertFATMirrors(t, d.b)
-	assertTree(t, d.b, want)
-	assertFSInfo(t, d.b, b)
+	image := testImage(d.b)
+	image.assertFATMirrors(t)
+	image.assertTree(t, want)
+	image.assertFSInfo(t, b)
 }
 
 func populateTree(t *testing.T, b *Builder, data []byte) {
@@ -84,43 +85,85 @@ func mustWrite(t *testing.T, f *File, data []byte) {
 	}
 }
 
-func assertFATMirrors(t *testing.T, image []byte) {
+// testImage is a formatted FAT32 volume as raw bytes. Every method reads the
+// geometry from the image's own boot sector rather than from the Builder.
+type testImage []byte
+
+func (img testImage) sectorsPerCluster() uint32 { return uint32(img[13]) }
+func (img testImage) reservedSectors() uint32   { return uint32(binary.LittleEndian.Uint16(img[14:16])) }
+func (img testImage) sectorsPerFAT() uint32     { return binary.LittleEndian.Uint32(img[36:40]) }
+
+// fat returns the first FAT copy, or the mirror when copy is 1.
+func (img testImage) fat(copy uint32) []byte {
+	start := (img.reservedSectors() + copy*img.sectorsPerFAT()) * 512
+	return img[start : start+img.sectorsPerFAT()*512]
+}
+
+func (img testImage) assertFATMirrors(t *testing.T) {
 	t.Helper()
-	boot := image[:512]
-	fatOff := int(binary.LittleEndian.Uint16(boot[14:16])) * 512
-	fatBytes := int(binary.LittleEndian.Uint32(boot[36:40])) * 512
-	if !bytes.Equal(image[fatOff:fatOff+fatBytes], image[fatOff+fatBytes:fatOff+2*fatBytes]) {
+	if !bytes.Equal(img.fat(0), img.fat(1)) {
 		t.Fatal("FAT mirrors differ")
 	}
 }
 
-func assertTree(t *testing.T, image, want []byte) {
+// readChain concatenates the clusters of the chain that starts at cluster.
+func (img testImage) readChain(t *testing.T, cluster uint32) []byte {
 	t.Helper()
-	efiData := readChain(t, image, entryCluster(findEntry(t, readChain(t, image, 2), "EFI")))
-	if string(efiData[:1]) != "." || string(efiData[32:34]) != ".." {
+	spc := img.sectorsPerCluster()
+	dataStart := img.reservedSectors() + 2*img.sectorsPerFAT()
+	fat := img.fat(0)
+	var out []byte
+	seen := map[uint32]bool{}
+	for cluster >= 2 && cluster < 0x0ffffff8 {
+		if seen[cluster] {
+			t.Fatal("FAT loop")
+		}
+		seen[cluster] = true
+		off := (dataStart + (cluster-2)*spc) * 512
+		out = append(out, img[off:off+spc*512]...)
+		cluster = binary.LittleEndian.Uint32(fat[cluster*4:cluster*4+4]) & 0x0fffffff
+	}
+	return out
+}
+
+// root is the root directory, which this builder always places at cluster 2.
+func (img testImage) root(t *testing.T) rawDir {
+	t.Helper()
+	return rawDir(img.readChain(t, 2))
+}
+
+// subdirectory reads the directory that entry names.
+func (img testImage) subdirectory(t *testing.T, entry rawEntry) rawDir {
+	t.Helper()
+	return rawDir(img.readChain(t, entry.cluster()))
+}
+
+func (img testImage) assertTree(t *testing.T, want []byte) {
+	t.Helper()
+	efi := img.subdirectory(t, img.root(t).find(t, "EFI"))
+	if string(efi[:1]) != "." || string(efi[32:34]) != ".." {
 		t.Fatal("missing dot entries")
 	}
-	longData := readChain(t, image, entryCluster(findEntry(t, efiData, "啟動工具")))
-	assertFileContents(t, image, findEntry(t, longData, "Very Long Boot Filename.bin"), want)
-	emptyEntry := findEntry(t, efiData, "empty.txt")
-	if entryCluster(emptyEntry) != 0 || entryFileSize(emptyEntry) != 0 {
+	long := img.subdirectory(t, efi.find(t, "啟動工具"))
+	img.assertFileContents(t, long.find(t, "Very Long Boot Filename.bin"), want)
+	if empty := efi.find(t, "empty.txt"); empty.cluster() != 0 || empty.fileSize() != 0 {
 		t.Fatal("empty file allocated a cluster")
 	}
 }
 
-func assertFileContents(t *testing.T, image, entry, want []byte) {
+func (img testImage) assertFileContents(t *testing.T, entry rawEntry, want []byte) {
 	t.Helper()
-	if got := entryFileSize(entry); got != uint32(len(want)) {
+	if got := entry.fileSize(); got != uint32(len(want)) {
 		t.Fatalf("size=%d", got)
 	}
-	if got := readChain(t, image, entryCluster(entry))[:len(want)]; !bytes.Equal(got, want) {
+	if got := img.readChain(t, entry.cluster())[:len(want)]; !bytes.Equal(got, want) {
 		t.Fatal("cross-cluster contents differ")
 	}
 }
 
-func assertFSInfo(t *testing.T, image []byte, b *Builder) {
+func (img testImage) assertFSInfo(t *testing.T, b *Builder) {
 	t.Helper()
-	info := image[512:1024]
+	info := img[512:1024]
 	if binary.LittleEndian.Uint32(info[488:492]) != b.free || binary.LittleEndian.Uint32(info[492:496]) != b.next {
 		t.Fatal("FSInfo was not updated")
 	}
@@ -148,57 +191,46 @@ func TestBuilderDeviceFullFinalizesPartialFile(t *testing.T) {
 	if err = b.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	e := findEntry(t, readChain(t, d.b, 2), "partial.bin")
-	if entryFileSize(e) != uint32(n) {
+	e := testImage(d.b).root(t).find(t, "partial.bin")
+	if e.fileSize() != uint32(n) {
 		t.Fatal("partial size not finalized")
 	}
 }
 
-func readChain(t *testing.T, image []byte, cluster uint32) []byte {
-	t.Helper()
-	boot := image[:512]
-	spc := uint32(boot[13])
-	reserved := uint32(binary.LittleEndian.Uint16(boot[14:16]))
-	fs := binary.LittleEndian.Uint32(boot[36:40])
-	fat := image[reserved*512 : (reserved+fs)*512]
-	var out []byte
-	seen := map[uint32]bool{}
-	for cluster >= 2 && cluster < 0x0ffffff8 {
-		if seen[cluster] {
-			t.Fatal("FAT loop")
-		}
-		seen[cluster] = true
-		off := (reserved + 2*fs + (cluster-2)*spc) * 512
-		out = append(out, image[off:off+spc*512]...)
-		cluster = binary.LittleEndian.Uint32(fat[cluster*4:cluster*4+4]) & 0x0fffffff
-	}
-	return out
-}
-func entryCluster(e []byte) uint32 {
-	return uint32(binary.LittleEndian.Uint16(e[20:22]))<<16 | uint32(binary.LittleEndian.Uint16(e[26:28]))
-}
-func entryFileSize(e []byte) uint32 { return binary.LittleEndian.Uint32(e[28:32]) }
+// rawDir is the on-disk contents of one directory's cluster chain.
+type rawDir []byte
 
-func findEntry(t *testing.T, dir []byte, want string) []byte {
+// find returns the entry named want, matching its long name when it has one
+// and its 8.3 short name otherwise, case-insensitively.
+func (d rawDir) find(t *testing.T, want string) rawEntry {
 	t.Helper()
-	var chunks [][]uint16
-	for off := 0; off+32 <= len(dir) && dir[off] != 0; off += 32 {
-		e := dir[off : off+32]
-		if e[11] == 0x0f {
-			chunks = append([][]uint16{lfnChars(e)}, chunks...)
+	var name longName
+	for off := 0; off+32 <= len(d) && d[off] != 0; off += 32 {
+		e := rawEntry(d[off : off+32])
+		if e.isLongNamePart() {
+			name = append(longName{e.longNameChars()}, name...)
 			continue
 		}
-		if strings.EqualFold(entryName(e, chunks), want) {
+		if strings.EqualFold(e.name(name), want) {
 			return e
 		}
-		chunks = nil
+		name = nil
 	}
 	t.Fatalf("entry %q not found", want)
 	return nil
 }
 
-// lfnChars returns the UTF-16 name characters of one LFN entry, without the terminator or padding.
-func lfnChars(e []byte) []uint16 {
+// rawEntry is one on-disk 32-byte directory entry.
+type rawEntry []byte
+
+func (e rawEntry) cluster() uint32 {
+	return uint32(binary.LittleEndian.Uint16(e[20:22]))<<16 | uint32(binary.LittleEndian.Uint16(e[26:28]))
+}
+func (e rawEntry) fileSize() uint32     { return binary.LittleEndian.Uint32(e[28:32]) }
+func (e rawEntry) isLongNamePart() bool { return e[11] == 0x0f }
+
+// longNameChars returns the UTF-16 name characters of one LFN entry, without the terminator or padding.
+func (e rawEntry) longNameChars() []uint16 {
 	var c []uint16
 	for _, p := range []int{1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30} {
 		if v := binary.LittleEndian.Uint16(e[p : p+2]); v != 0 && v != 0xffff {
@@ -208,28 +240,32 @@ func lfnChars(e []byte) []uint16 {
 	return c
 }
 
-// entryName prefers the preceding long name and falls back to the 8.3 short name.
-func entryName(e []byte, chunks [][]uint16) string {
-	if name := stringsFromLFN(chunks); name != "" {
+// name prefers the preceding long name and falls back to the 8.3 short name.
+func (e rawEntry) name(long longName) string {
+	if name := long.String(); name != "" {
 		return name
 	}
-	return stringsTrim83(e[:11])
+	return e.shortName()
 }
 
-func stringsFromLFN(c [][]uint16) string {
-	var u []uint16
-	for _, v := range c {
-		u = append(u, v...)
-	}
-	return string(utf16.Decode(u))
-}
-func stringsTrim83(a []byte) string {
-	base := string(bytes.TrimRight(a[:8], " "))
-	ext := string(bytes.TrimRight(a[8:11], " "))
+func (e rawEntry) shortName() string {
+	base := string(bytes.TrimRight(e[:8], " "))
+	ext := string(bytes.TrimRight(e[8:11], " "))
 	if ext != "" {
 		return base + "." + ext
 	}
 	return base
+}
+
+// longName collects the LFN entries before a short entry, first part first.
+type longName [][]uint16
+
+func (n longName) String() string {
+	var u []uint16
+	for _, part := range n {
+		u = append(u, part...)
+	}
+	return string(utf16.Decode(u))
 }
 
 // recordingDevice logs each WriteAt that reaches a memoryDevice.
@@ -298,9 +334,10 @@ func TestBuilderZeroesUnwrittenTailOnDirtyMedia(t *testing.T) {
 	if err = b.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	e := findEntry(t, readChain(t, d.b, 2), "odd.bin")
-	chain := readChain(t, d.b, entryCluster(e))
-	assertFileContents(t, d.b, e, want)
+	image := testImage(d.b)
+	e := image.root(t).find(t, "odd.bin")
+	chain := image.readChain(t, e.cluster())
+	image.assertFileContents(t, e, want)
 	if tail := chain[len(want):]; !bytes.Equal(tail, make([]byte, len(tail))) {
 		t.Fatal("stale media data left in the last cluster")
 	}
@@ -321,9 +358,10 @@ func TestBuilderSplitsRunsAroundUsedClusters(t *testing.T) {
 	if err := b.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	e := findEntry(t, readChain(t, d.b, 2), "split.bin")
-	assertFileContents(t, d.b, e, want)
-	for c := entryCluster(e); !isChainEnd(c); c = b.fat[c] {
+	image := testImage(d.b)
+	e := image.root(t).find(t, "split.bin")
+	image.assertFileContents(t, e, want)
+	for c := e.cluster(); !isChainEnd(c); c = b.fat[c] {
 		if c == used {
 			t.Fatal("file chain took a used cluster")
 		}

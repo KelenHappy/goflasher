@@ -41,7 +41,7 @@ func (c *guiController) watchDevices() {
 // operation, which itself makes the target's partitions come and go, but
 // checks again after hotplugSettle until the operation has ended.
 func (c *guiController) hotplugRescan() {
-	if c.operation != operationNone || writingState(c.machine.State()) {
+	if c.busy() {
 		c.hotplug.trigger()
 		return
 	}

@@ -464,7 +464,7 @@ func (c *guiController) selectDevice(value string) {
 // deselected, so the confirmation dialog never describes a removed device. An
 // active operation keeps its own copy of the target and is left alone.
 func (c *guiController) reconcileSelection() {
-	if c.selected.Path == "" || c.operation != operationNone || writingState(c.machine.State()) {
+	if c.selected.Path == "" || c.busy() {
 		return
 	}
 	for _, d := range c.devices {
@@ -587,7 +587,7 @@ func (c *guiController) formatDevice() {
 }
 
 func (c *guiController) runFormat(formatter device.FAT32Formatter, target device.Device) {
-	if c.operation != operationNone || writingState(c.machine.State()) {
+	if c.busy() {
 		return
 	}
 	c.operation = operationFormatting
@@ -721,6 +721,12 @@ func (c *guiController) localizedSplitPlan(required bool) (string, string) {
 		return c.tr.T("bool.true"), c.tr.T("plan.split.reason.fat32")
 	}
 	return c.tr.T("bool.false"), c.tr.T("plan.split.reason.none")
+}
+
+// busy reports whether a format or write owns the target, either still
+// starting up (operation) or already driving the state machine.
+func (c *guiController) busy() bool {
+	return c.operation != operationNone || writingState(c.machine.State())
 }
 
 func writingState(state core.State) bool {
