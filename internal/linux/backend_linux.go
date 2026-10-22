@@ -22,6 +22,9 @@ var (
 	ErrSystemDisk        = errors.New("system disk")
 	ErrDeviceChanged     = errors.New("device identity changed")
 	ErrUnmountFailed     = errors.New("unmount failed")
+	// ErrDeviceBusy reports that the privileged helper could not claim the
+	// disk exclusively because something else, such as a mount, holds it.
+	ErrDeviceBusy = errors.New("device is busy")
 	// ErrUnsupportedSectorSize reports a device whose logical block size differs
 	// from the sector size the requested on-disk layout is built for.
 	ErrUnsupportedSectorSize = errors.New("unsupported logical sector size")

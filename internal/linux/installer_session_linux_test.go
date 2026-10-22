@@ -256,3 +256,65 @@ func TestInstallerSessionSyncsAfterUnsyncedWriteLimit(t *testing.T) {
 		t.Fatalf("unsynced=%d after reaching the limit, want a sync", s.unsynced)
 	}
 }
+
+func TestInstallerSessionClaimsDiskExclusively(t *testing.T) {
+	for mode, exclusive := range map[operationMode]bool{
+		modeInstallerSession: true, modeWrite: false, modeRead: false, modeFlush: false, modeFormatFAT32: false,
+	} {
+		if got := deviceOpenFlags(mode)&syscall.O_EXCL != 0; got != exclusive {
+			t.Fatalf("%s opens with O_EXCL = %t, want %t", mode, got, exclusive)
+		}
+	}
+}
+
+// busyOpener fails with EBUSY the first busy times, then opens the fixture.
+func busyOpener(f *backendFixture, busy int, attempts *int) func(string, int, os.FileMode) (*os.File, error) {
+	return func(_ string, flag int, _ os.FileMode) (*os.File, error) {
+		*attempts++
+		if *attempts <= busy {
+			return nil, &os.PathError{Op: "open", Path: "/dev/sdb", Err: syscall.EBUSY}
+		}
+		return os.OpenFile(filepath.Join(f.DevRoot, "sdb"), flag&^syscall.O_EXCL, 0)
+	}
+}
+
+func TestInstallerSessionRetriesTransientExclusiveClaim(t *testing.T) {
+	f, env, req, target := installerSessionFixture(t)
+	_ = target.Close()
+	var attempts, pauses int
+	env.openFile = busyOpener(f, 3, &attempts)
+	env.sleep = func(time.Duration) { pauses++ }
+	opened, err := deviceGuard{req: req, env: env}.open(blockDevice{name: "sdb"})
+	requireNoError(t, err)
+	_ = opened.Close()
+	if attempts != 4 || pauses != 3 {
+		t.Fatalf("attempts = %d, pauses = %d, want 4 and 3", attempts, pauses)
+	}
+}
+
+func TestInstallerSessionReportsPersistentClaimAsBusy(t *testing.T) {
+	f, env, req, target := installerSessionFixture(t)
+	_ = target.Close()
+	var attempts int
+	env.openFile = busyOpener(f, exclusiveOpenAttempts+10, &attempts)
+	env.sleep = func(time.Duration) {}
+	_, err := deviceGuard{req: req, env: env}.open(blockDevice{name: "sdb"})
+	if !errors.Is(err, ErrDeviceBusy) || !errors.Is(err, syscall.EBUSY) {
+		t.Fatalf("open error = %v, want ErrDeviceBusy wrapping EBUSY", err)
+	}
+	if attempts != exclusiveOpenAttempts {
+		t.Fatalf("attempts = %d, want %d", attempts, exclusiveOpenAttempts)
+	}
+}
+
+func TestNonExclusiveOpenDoesNotRetryBusy(t *testing.T) {
+	f, env, req, target := installerSessionFixture(t)
+	_ = target.Close()
+	var attempts int
+	env.openFile = busyOpener(f, 1, &attempts)
+	env.sleep = func(time.Duration) { t.Fatal("non-exclusive open must not wait") }
+	req.Mode = modeWrite
+	if _, err := (deviceGuard{req: req, env: env}).open(blockDevice{name: "sdb"}); !errors.Is(err, ErrDeviceBusy) || attempts != 1 {
+		t.Fatalf("open error = %v after %d attempts, want ErrDeviceBusy after 1", err, attempts)
+	}
+}

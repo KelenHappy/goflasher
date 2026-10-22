@@ -519,6 +519,8 @@ type helperEnvironment struct {
 	fstat                                                 func(int, *syscall.Stat_t) error
 	// invalidateCache defaults to invalidateBlockCache.
 	invalidateCache func(*os.File) error
+	// sleep defaults to time.Sleep.
+	sleep func(time.Duration)
 }
 
 func realHelperEnvironment() helperEnvironment {
@@ -698,8 +700,10 @@ const maxSessionTransfer = uint32(4 << 20)
 // A full revalidation re-reads sysfs, the block topology, mountinfo and swaps,
 // which costs far more than the transfer it guards. Every command still
 // rebinds the descriptor with fstat; the full check runs on the first command
-// and again once either bound is reached, so a device that is replaced,
-// mounted or swapped onto mid-session is caught within one interval.
+// and again once either bound is reached, so a device that is replaced
+// mid-session is caught within one interval. The session's O_EXCL claim
+// already makes the kernel refuse mounts and swapon on the disk; the mount and
+// swap checks stay as a backstop.
 const (
 	fullRevalidationInterval = time.Second
 	fullRevalidationBytes    = uint64(64 << 20)
@@ -1053,13 +1057,31 @@ func (env helperEnvironment) validateDeviceNode(d blockDevice) error {
 	return nil
 }
 
+// An O_EXCL open fails with EBUSY while anything else claims the disk or one
+// of its partitions. Some claims are transient: systemd-udevd re-reads the
+// partition table (BLKRRPART takes a temporary claim) after the previous
+// helper closes a writable descriptor, which is exactly when the verification
+// session opens. Retry for a bounded time before reporting the disk busy.
+const (
+	exclusiveOpenRetryInterval = 100 * time.Millisecond
+	exclusiveOpenAttempts      = 30
+)
+
 func (g deviceGuard) open(d blockDevice) (*os.File, error) {
 	flags := deviceOpenFlags(g.req.Mode)
 	opener := g.env.openFile
 	if opener == nil {
 		opener = os.OpenFile
 	}
-	f, err := opener(filepath.Join(g.env.DevRoot, d.name), flags|syscall.O_CLOEXEC, 0)
+	path := filepath.Join(g.env.DevRoot, d.name)
+	f, err := opener(path, flags|syscall.O_CLOEXEC, 0)
+	for attempt := 1; flags&syscall.O_EXCL != 0 && errors.Is(err, syscall.EBUSY) && attempt < exclusiveOpenAttempts; attempt++ {
+		g.env.pause(exclusiveOpenRetryInterval)
+		f, err = opener(path, flags|syscall.O_CLOEXEC, 0)
+	}
+	if errors.Is(err, syscall.EBUSY) {
+		return nil, fmt.Errorf("%w: %w", ErrDeviceBusy, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1068,6 +1090,14 @@ func (g deviceGuard) open(d blockDevice) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+func (env helperEnvironment) pause(d time.Duration) {
+	if env.sleep != nil {
+		env.sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 func deviceOpenFlags(mode operationMode) int {
@@ -1079,7 +1109,11 @@ func deviceOpenFlags(mode operationMode) int {
 	case modeInstallerSession:
 		// Not O_SYNC: the FAT builder issues many small metadata writes, and
 		// the session bounds unsynced data itself (unsyncedWriteLimit).
-		return os.O_RDWR
+		// O_EXCL claims the whole disk for the session: the kernel refuses to
+		// open it if anything holds the disk or a partition (a mount, swap,
+		// device-mapper), and refuses mounts and swapon on any of them until
+		// the descriptor closes. Full revalidation still runs as a backstop.
+		return os.O_RDWR | syscall.O_EXCL
 	case modeWrite:
 		// Keep each large stream write tied to actual device progress instead of
 		// letting Linux accept the entire image into the page cache at RAM speed.
