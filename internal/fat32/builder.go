@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,8 +24,6 @@ var (
 )
 
 const (
-	endOfChain   = 0x0fffffff
-	firstDataCl  = 3 // cluster 2 is the root directory
 	attrArchive  = 0x20
 	attrDir      = 0x10
 	attrLabel    = 0x08
@@ -33,33 +32,46 @@ const (
 	maxAliasTail = 999999
 )
 
-func isChainEnd(c uint32) bool { return c >= 0x0ffffff8 }
+// cluster is a FAT32 cluster number. It is also what each FAT entry holds: the
+// next cluster of a chain, 0 when free, or an end-of-chain marker.
+type cluster uint32
+
+const (
+	rootCluster cluster = 2
+	firstDataCl cluster = 3 // cluster 2 is the root directory
+	endOfChain  cluster = 0x0fffffff
+)
+
+// chainEnd reports whether c is an end-of-chain marker.
+func (c cluster) chainEnd() bool { return c >= 0x0ffffff8 }
 
 // Builder constructs files directly in a freshly formatted FAT32 image.  It
 // never mounts the image and is consequently independent of the host OS.
 type Builder struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	dev        Device
-	l          layout
-	fat        []uint32
-	next, free uint32
-	dirs       map[string]*directory
-	open       bool
+	mu   sync.Mutex
+	ctx  context.Context
+	dev  Device
+	l    layout
+	fat  []cluster
+	next cluster
+	free uint32
+	dirs map[dirKey]*directory
+	open bool
 }
 
 type directory struct {
-	cluster, parent uint32
+	cluster, parent cluster
 	data            []byte
-	names           map[string]bool
+	names           map[foldedName]bool
 }
 
 // dirEntry is what a caller contributes to a short directory entry; the
 // alias, timestamps, and long-name records are derived by addEntry.
 type dirEntry struct {
-	name        string
-	attr        byte
-	first, size uint32
+	name  pathComponent
+	attr  byte
+	first cluster
+	size  uint32
 }
 
 // NewBuilder formats device and returns a builder for the new, empty volume.
@@ -72,24 +84,24 @@ func NewBuilder(ctx context.Context, device Device, size uint64, label string) (
 	if err != nil {
 		return nil, err
 	}
-	b := &Builder{ctx: ctx, dev: device, l: l, fat: make([]uint32, l.clusters+2), next: firstDataCl,
-		free: uint32(l.clusters - 1), dirs: make(map[string]*directory)}
+	b := &Builder{ctx: ctx, dev: device, l: l, fat: make([]cluster, l.clusters+2), next: firstDataCl,
+		free: uint32(l.clusters - 1), dirs: make(map[dirKey]*directory)}
 	b.fat[0] = 0x0ffffff8
 	b.fat[1] = endOfChain
-	b.fat[2] = endOfChain
-	root := b.newDirectory(2, 2)
+	b.fat[rootCluster] = endOfChain
+	root := b.newDirectory(rootCluster, rootCluster)
 	copy(root.data[:11], fatLabel(label))
 	root.data[11] = attrLabel
-	b.dirs["/"] = root
+	b.dirs[rootKey] = root
 	return b, nil
 }
 
-func (b *Builder) newDirectory(cluster, parent uint32) *directory {
-	return &directory{cluster: cluster, parent: parent, data: make([]byte, b.clusterSize()), names: make(map[string]bool)}
+func (b *Builder) newDirectory(first, parent cluster) *directory {
+	return &directory{cluster: first, parent: parent, data: make([]byte, b.clusterSize()), names: make(map[foldedName]bool)}
 }
 
 func (b *Builder) clusterSize() int { return int(b.l.sectorsPerCluster * sectorSize) }
-func (b *Builder) clusterOffset(c uint32) int64 {
+func (b *Builder) clusterOffset(c cluster) int64 {
 	return int64((reserved + fatCount*b.l.fatSectors + uint64(c-2)*b.l.sectorsPerCluster) * sectorSize)
 }
 
@@ -101,13 +113,13 @@ func (b *Builder) MkdirAll(name string) error {
 	if err := b.ctx.Err(); err != nil {
 		return err
 	}
-	parts, err := cleanParts(name)
+	parts, err := slashPath(name).components()
 	if err != nil {
 		return err
 	}
-	cur, key := b.dirs["/"], "/"
+	cur, key := b.dirs[rootKey], rootKey
 	for _, part := range parts {
-		nextKey := joinKey(key, part)
+		nextKey := key.child(part)
 		if d := b.dirs[nextKey]; d != nil {
 			cur, key = d, nextKey
 			continue
@@ -122,8 +134,8 @@ func (b *Builder) MkdirAll(name string) error {
 	return nil
 }
 
-func (b *Builder) mkdir(parent *directory, name string) (*directory, error) {
-	if parent.names[fold(name)] {
+func (b *Builder) mkdir(parent *directory, name pathComponent) (*directory, error) {
+	if parent.names[name.folded()] {
 		return nil, ErrExist
 	}
 	cl, err := b.allocate(0)
@@ -131,8 +143,8 @@ func (b *Builder) mkdir(parent *directory, name string) (*directory, error) {
 		return nil, err
 	}
 	d := b.newDirectory(cl, parent.cluster)
-	writeDot(d.data[0:entrySize], ".", cl)
-	writeDot(d.data[entrySize:2*entrySize], "..", parent.cluster)
+	entrySlot(d.data[0:entrySize]).setDot(dotSelf, cl)
+	entrySlot(d.data[entrySize:2*entrySize]).setDot(dotParent, parent.cluster)
 	if err = b.addEntry(parent, dirEntry{name: name, attr: attrDir, first: cl}); err != nil {
 		b.releaseChain(cl)
 		return nil, err
@@ -148,7 +160,7 @@ func (b *Builder) Create(name string) (*File, error) {
 	if err := b.ctx.Err(); err != nil {
 		return nil, err
 	}
-	parts, err := cleanParts(name)
+	parts, err := slashPath(name).components()
 	if err != nil {
 		return nil, err
 	}
@@ -160,17 +172,17 @@ func (b *Builder) Create(name string) (*File, error) {
 		return nil, err
 	}
 	base := parts[len(parts)-1]
-	if d.names[fold(base)] {
+	if d.names[base.folded()] {
 		return nil, ErrExist
 	}
 	b.open = true
 	return &File{b: b, dir: d, name: base}, nil
 }
 
-func (b *Builder) lookupDir(parts []string) (*directory, error) {
-	key := "/"
+func (b *Builder) lookupDir(parts []pathComponent) (*directory, error) {
+	key := rootKey
 	for _, p := range parts {
-		key = joinKey(key, p)
+		key = key.child(p)
 		if b.dirs[key] == nil {
 			return nil, errors.New("fat32: parent directory does not exist")
 		}
@@ -183,8 +195,8 @@ func (b *Builder) lookupDir(parts []string) (*directory, error) {
 type File struct {
 	b           *Builder
 	dir         *directory
-	name        string
-	first, last uint32
+	name        pathComponent
+	first, last cluster
 	size        uint32
 	closed      bool
 	failed      error
@@ -334,7 +346,7 @@ func (b *Builder) encodeFAT() []byte {
 		if i*4+4 > len(fat) {
 			break
 		}
-		binary.LittleEndian.PutUint32(fat[i*4:i*4+4], v)
+		binary.LittleEndian.PutUint32(fat[i*4:i*4+4], uint32(v))
 	}
 	return fat
 }
@@ -361,7 +373,7 @@ func (b *Builder) writeDirectories() error {
 // writeDirectory scatters the directory's data across its cluster chain.
 func (b *Builder) writeDirectory(d *directory) error {
 	cs := b.clusterSize()
-	for i, c := 0, d.cluster; c >= 2 && !isChainEnd(c); i++ {
+	for i, c := 0, d.cluster; c >= 2 && !c.chainEnd(); i++ {
 		if err := writeFullAt(b.ctx, b.dev, d.data[i*cs:(i+1)*cs], b.clusterOffset(c)); err != nil {
 			return err
 		}
@@ -371,7 +383,7 @@ func (b *Builder) writeDirectory(d *directory) error {
 }
 
 func (b *Builder) writeFSInfo() error {
-	info := fsInfoValues(b.free, b.next)
+	info := b.fsInfo()
 	for _, off := range []int64{512, 7 * 512} {
 		if err := writeFullAt(b.ctx, b.dev, info, off); err != nil {
 			return err
@@ -382,7 +394,7 @@ func (b *Builder) writeFSInfo() error {
 
 // allocate claims a free cluster and, when after is non-zero, links it to
 // the end of that chain.
-func (b *Builder) allocate(after uint32) (uint32, error) {
+func (b *Builder) allocate(after cluster) (cluster, error) {
 	if b.free == 0 {
 		return 0, ErrNoSpace
 	}
@@ -400,7 +412,7 @@ func (b *Builder) allocate(after uint32) (uint32, error) {
 
 // allocateAdjacent claims the cluster directly after c and links it to c,
 // reporting false when that cluster is past the end of the volume or in use.
-func (b *Builder) allocateAdjacent(c uint32) (uint32, bool) {
+func (b *Builder) allocateAdjacent(c cluster) (cluster, bool) {
 	n := c + 1
 	if b.free == 0 || !b.isFree(n) {
 		return 0, false
@@ -415,12 +427,12 @@ func (b *Builder) allocateAdjacent(c uint32) (uint32, bool) {
 }
 
 // isFree reports whether c is inside the volume and not part of any chain.
-func (b *Builder) isFree(c uint32) bool {
+func (b *Builder) isFree(c cluster) bool {
 	return uint64(c) < uint64(len(b.fat)) && b.fat[c] == 0
 }
 
 // findFree scans forward from the next-free hint, wrapping once.
-func (b *Builder) findFree() (uint32, bool) {
+func (b *Builder) findFree() (cluster, bool) {
 	start := b.next
 	for {
 		c := b.takeNext()
@@ -433,7 +445,7 @@ func (b *Builder) findFree() (uint32, bool) {
 	}
 }
 
-func (b *Builder) takeNext() uint32 {
+func (b *Builder) takeNext() cluster {
 	if b.next < firstDataCl || uint64(b.next) >= uint64(len(b.fat)) {
 		b.next = firstDataCl
 	}
@@ -442,8 +454,8 @@ func (b *Builder) takeNext() uint32 {
 	return c
 }
 
-func (b *Builder) releaseChain(c uint32) {
-	for c >= 2 && !isChainEnd(c) {
+func (b *Builder) releaseChain(c cluster) {
+	for c >= 2 && !c.chainEnd() {
 		n := b.fat[c]
 		b.fat[c] = 0
 		b.free++
@@ -455,22 +467,22 @@ func (b *Builder) releaseChain(c uint32) {
 }
 
 func (b *Builder) addEntry(d *directory, e dirEntry) error {
-	alias := makeAlias(e.name, d.names)
+	alias := d.alias(e.name)
 	if alias == "" {
 		return ErrExist
 	}
-	lfn := lfnEntries(e.name, []byte(alias))
+	lfn := e.name.lfnEntries(alias)
 	end := d.used()
-	if err := b.growDirectory(d, end+(len(lfn)+1)*entrySize); err != nil {
+	if err := b.growDirectory(d, lfn); err != nil {
 		return err
 	}
 	for _, rec := range lfn {
 		copy(d.data[end:end+entrySize], rec)
 		end += entrySize
 	}
-	encodeShortEntry(d.data[end:end+entrySize], alias, e)
-	d.names[fold(e.name)] = true
-	d.names[fold(alias)] = true
+	entrySlot(d.data[end:end+entrySize]).setShort(alias, e)
+	d.names[e.name.folded()] = true
+	d.names[alias.folded()] = true
 	return nil
 }
 
@@ -483,9 +495,11 @@ func (d *directory) used() int {
 	return end
 }
 
-// growDirectory extends d's cluster chain until it holds at least need bytes
-// plus one trailing free slot, which marks the end of the directory.
-func (b *Builder) growDirectory(d *directory, need int) error {
+// growDirectory extends d's cluster chain until it holds records and their
+// short entry after the used slots, plus one trailing free slot, which marks
+// the end of the directory.
+func (b *Builder) growDirectory(d *directory, records []lfnRecord) error {
+	need := d.used() + (len(records)+1)*entrySize
 	for need+entrySize > len(d.data) {
 		if _, err := b.allocate(b.lastCluster(d.cluster)); err != nil {
 			return err
@@ -495,80 +509,41 @@ func (b *Builder) growDirectory(d *directory, need int) error {
 	return nil
 }
 
-func (b *Builder) lastCluster(c uint32) uint32 {
-	for !isChainEnd(b.fat[c]) {
+func (b *Builder) lastCluster(c cluster) cluster {
+	for !b.fat[c].chainEnd() {
 		c = b.fat[c]
 	}
 	return c
 }
 
-func encodeShortEntry(buf []byte, alias string, e dirEntry) {
-	copy(buf[:11], alias)
-	buf[11] = e.attr
-	setTimes(buf, time.Now())
-	binary.LittleEndian.PutUint16(buf[20:22], uint16(e.first>>16))
-	binary.LittleEndian.PutUint16(buf[26:28], uint16(e.first))
-	binary.LittleEndian.PutUint32(buf[28:32], e.size)
+// entrySlot is one 32-byte directory entry.
+type entrySlot []byte
+
+// The . and .. entries, packed like short aliases.
+const (
+	dotSelf   shortAlias = ".          "
+	dotParent shortAlias = "..         "
+)
+
+// setShort writes the short directory entry for e under alias.
+func (s entrySlot) setShort(alias shortAlias, e dirEntry) {
+	copy(s[:11], alias)
+	s[11] = e.attr
+	s.setTimes(time.Now())
+	binary.LittleEndian.PutUint16(s[20:22], uint16(e.first>>16))
+	binary.LittleEndian.PutUint16(s[26:28], uint16(e.first))
+	binary.LittleEndian.PutUint32(s[28:32], e.size)
 }
 
-func cleanParts(p string) ([]string, error) {
-	p = strings.ReplaceAll(p, "\\", "/")
-	if hasTraversal(p) {
-		return nil, errors.New("fat32: path traversal is not allowed")
-	}
-	p = path.Clean("/" + p)
-	if p == "/" {
-		return nil, nil
-	}
-	out := strings.Split(strings.TrimPrefix(p, "/"), "/")
-	for _, s := range out {
-		if !validComponent(s) {
-			return nil, errors.New("fat32: invalid path")
-		}
-	}
-	return out, nil
+// setDot writes a . or .. entry that points at c.
+func (s entrySlot) setDot(name shortAlias, c cluster) {
+	copy(s[:11], name)
+	s[11] = attrDir
+	binary.LittleEndian.PutUint16(s[20:22], uint16(c>>16))
+	binary.LittleEndian.PutUint16(s[26:28], uint16(c))
 }
 
-func hasTraversal(p string) bool {
-	for _, component := range strings.Split(p, "/") {
-		if isDotName(component) {
-			return true
-		}
-	}
-	return false
-}
-
-// isDotName reports whether s is one of the reserved "." or ".." entries.
-func isDotName(s string) bool {
-	return s == "." || s == ".."
-}
-
-func validComponent(s string) bool {
-	if s == "" || isDotName(s) {
-		return false
-	}
-	if strings.ContainsRune(s, 0) {
-		return false
-	}
-	return len(utf16.Encode([]rune(s))) <= 255
-}
-
-func joinKey(parent, name string) string {
-	if parent == "/" {
-		return "/" + fold(name)
-	}
-	return parent + "/" + fold(name)
-}
-func fold(s string) string { return strings.ToUpper(s) }
-
-func writeDot(e []byte, name string, c uint32) {
-	copy(e[:11], "           ")
-	copy(e, name)
-	e[11] = attrDir
-	binary.LittleEndian.PutUint16(e[20:22], uint16(c>>16))
-	binary.LittleEndian.PutUint16(e[26:28], uint16(c))
-}
-func setTimes(e []byte, t time.Time) {
+func (s entrySlot) setTimes(t time.Time) {
 	y, m, d := t.Date()
 	if y < 1980 {
 		y = 1980
@@ -578,110 +553,193 @@ func setTimes(e []byte, t time.Time) {
 	}
 	date := uint16(y-1980)<<9 | uint16(m)<<5 | uint16(d)
 	tm := uint16(t.Hour())<<11 | uint16(t.Minute())<<5 | uint16(t.Second()/2)
-	binary.LittleEndian.PutUint16(e[14:16], tm)
-	binary.LittleEndian.PutUint16(e[16:18], date)
-	binary.LittleEndian.PutUint16(e[18:20], date)
-	binary.LittleEndian.PutUint16(e[22:24], tm)
-	binary.LittleEndian.PutUint16(e[24:26], date)
+	binary.LittleEndian.PutUint16(s[14:16], tm)
+	binary.LittleEndian.PutUint16(s[16:18], date)
+	binary.LittleEndian.PutUint16(s[18:20], date)
+	binary.LittleEndian.PutUint16(s[22:24], tm)
+	binary.LittleEndian.PutUint16(s[24:26], date)
 }
 
-// makeAlias derives an 8.3 short name that does not collide with any name
-// already in the directory, numbering with ~N when the plain form is taken.
+// slashPath is a caller's file or directory path. Backslashes also separate
+// components.
+type slashPath string
+
+// components validates p and splits it into path components, rejecting
+// traversal and names FAT cannot store. The root yields none.
+func (p slashPath) components() ([]pathComponent, error) {
+	normalized := slashPath(strings.ReplaceAll(string(p), "\\", "/"))
+	if normalized.traversal() {
+		return nil, errors.New("fat32: path traversal is not allowed")
+	}
+	clean := path.Clean("/" + string(normalized))
+	if clean == "/" {
+		return nil, nil
+	}
+	var out []pathComponent
+	for _, s := range strings.Split(strings.TrimPrefix(clean, "/"), "/") {
+		c := pathComponent(s)
+		if !c.valid() {
+			return nil, errors.New("fat32: invalid path")
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// traversal reports whether any component of p is . or ...
+func (p slashPath) traversal() bool {
+	for _, c := range strings.Split(string(p), "/") {
+		if pathComponent(c).isDot() {
+			return true
+		}
+	}
+	return false
+}
+
+// pathComponent is one element of a slashPath, which is also the long name of
+// the entry it creates.
+type pathComponent string
+
+// isDot reports whether c is one of the reserved "." or ".." entries.
+func (c pathComponent) isDot() bool {
+	return c == "." || c == ".."
+}
+
+func (c pathComponent) valid() bool {
+	if c == "" || c.isDot() {
+		return false
+	}
+	if strings.ContainsRune(string(c), 0) {
+		return false
+	}
+	return len(utf16.Encode([]rune(string(c)))) <= 255
+}
+
+// foldedName is a name in the case-insensitive form directories compare.
+type foldedName string
+
+func (c pathComponent) folded() foldedName { return foldedName(strings.ToUpper(string(c))) }
+
+// dirKey indexes Builder.dirs by the folded path from the root.
+type dirKey string
+
+const rootKey dirKey = "/"
+
+func (k dirKey) child(name pathComponent) dirKey {
+	if k == rootKey {
+		return "/" + dirKey(name.folded())
+	}
+	return k + "/" + dirKey(name.folded())
+}
+
+// shortAlias is a packed 8.3 short name: an eight-character base and a
+// three-character extension, both space-padded.
+type shortAlias string
+
+func (a shortAlias) folded() foldedName { return foldedName(strings.ToUpper(string(a))) }
+
+// checksum is the value every long-name record of the entry repeats.
+func (a shortAlias) checksum() byte {
+	var s byte
+	for i := 0; i < 11; i++ {
+		s = ((s & 1) << 7) + (s >> 1) + a[i]
+	}
+	return s
+}
+
+// alias derives an 8.3 short name for name that does not collide with any
+// name already in d, numbering with ~N when the plain form is taken.
 // It returns "" when every numbered form is exhausted.
-func makeAlias(name string, used map[string]bool) string {
-	base, ext := splitAliasParts(name)
-	if a, ok := freeAlias(base, ext, used); ok {
+func (d *directory) alias(name pathComponent) shortAlias {
+	parts := name.aliasParts()
+	if a, ok := d.freeAlias(parts); ok {
 		return a
 	}
-	for n := 1; n <= maxAliasTail; n++ {
-		if a, ok := freeAlias(numberedBase(base, n), ext, used); ok {
+	for n := aliasTail(1); n <= maxAliasTail; n++ {
+		if a, ok := d.freeAlias(parts.numbered(n)); ok {
 			return a
 		}
 	}
 	return ""
 }
 
-// freeAlias packs base and ext into an 8.3 alias and reports whether that
-// alias fits the short-name format and is still unused in the directory.
-func freeAlias(base, ext string, used map[string]bool) (string, bool) {
-	if len(base) > 8 {
+// freeAlias packs parts into an 8.3 alias and reports whether that alias fits
+// the short-name format and is still unused in d.
+func (d *directory) freeAlias(parts aliasParts) (shortAlias, bool) {
+	if len(parts.base) > 8 {
 		return "", false
 	}
-	a := packAlias(base, ext)
-	return a, !used[fold(a)]
+	a := parts.pack()
+	return a, !d.names[a.folded()]
 }
 
-// splitAliasParts reduces name to the characters FAT permits in a short name,
-// with the extension truncated to three and an empty base replaced by FILE.
-// The results are base then ext.
-func splitAliasParts(name string) (string, string) {
+// aliasParts is the base and extension of a short name, before packing.
+type aliasParts struct{ base, ext string }
+
+// aliasParts reduces c to the characters FAT permits in a short name, with
+// the extension truncated to three and an empty base replaced by FILE.
+func (c pathComponent) aliasParts() aliasParts {
+	name := string(c)
 	base, ext := name, ""
 	if dot := strings.LastIndex(name, "."); dot > 0 {
 		base, ext = name[:dot], name[dot+1:]
 	}
-	base, ext = aliasChars(base), aliasChars(ext)
-	if base == "" {
-		base = "FILE"
+	p := aliasParts{base: aliasChars(base), ext: aliasChars(ext)}
+	if p.base == "" {
+		p.base = "FILE"
 	}
-	if len(ext) > 3 {
-		ext = ext[:3]
+	if len(p.ext) > 3 {
+		p.ext = p.ext[:3]
 	}
-	return base, ext
+	return p
 }
+
+// aliasTail is the N of a numbered ~N alias.
+type aliasTail int
+
+// numbered shortens the base so that ~n still fits in eight characters.
+func (p aliasParts) numbered(n aliasTail) aliasParts {
+	tail := "~" + strconv.Itoa(int(n))
+	if len(p.base) > 8-len(tail) {
+		p.base = p.base[:8-len(tail)]
+	}
+	p.base += tail
+	return p
+}
+
+func (p aliasParts) pack() shortAlias {
+	return shortAlias(p.base + strings.Repeat(" ", 8-len(p.base)) + p.ext + strings.Repeat(" ", 3-len(p.ext)))
+}
+
+// aliasRunes is the set of characters FAT permits in an 8.3 short name.
+const aliasRunes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$%'-_@~`!(){}^#&"
 
 func aliasChars(s string) string {
 	var z strings.Builder
 	for _, r := range strings.ToUpper(s) {
-		if isAliasRune(r) {
+		if strings.ContainsRune(aliasRunes, r) {
 			z.WriteRune(r)
 		}
 	}
 	return z.String()
 }
 
-// aliasRunes is the set of characters FAT permits in an 8.3 short name.
-const aliasRunes = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$%'-_@~`!(){}^#&"
+// lfnRecord is one long-file-name directory entry.
+type lfnRecord []byte
 
-func isAliasRune(r rune) bool {
-	return strings.ContainsRune(aliasRunes, r)
-}
-
-func numberedBase(base string, n int) string {
-	tail := "~" + itoa(n)
-	if len(base) > 8-len(tail) {
-		base = base[:8-len(tail)]
-	}
-	return base + tail
-}
-
-func packAlias(base, ext string) string {
-	return base + strings.Repeat(" ", 8-len(base)) + ext + strings.Repeat(" ", 3-len(ext))
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [10]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
-}
-func lfnEntries(name string, alias []byte) [][]byte {
-	u := utf16.Encode([]rune(name))
+// lfnEntries encodes c as long-name records, last part first, each carrying
+// the checksum of alias.
+func (c pathComponent) lfnEntries(alias shortAlias) []lfnRecord {
+	u := utf16.Encode([]rune(string(c)))
 	u = append(u, 0)
 	for len(u)%13 != 0 {
 		u = append(u, 0xffff)
 	}
 	count := len(u) / 13
-	out := make([][]byte, 0, count)
-	sum := lfnChecksum(alias)
+	out := make([]lfnRecord, 0, count)
+	sum := alias.checksum()
 	for seq := count; seq >= 1; seq-- {
-		e := make([]byte, entrySize)
+		e := make(lfnRecord, entrySize)
 		e[0] = byte(seq)
 		if seq == count {
 			e[0] |= 0x40
@@ -697,21 +755,16 @@ func lfnEntries(name string, alias []byte) [][]byte {
 	}
 	return out
 }
-func lfnChecksum(a []byte) byte {
-	var s byte
-	for i := 0; i < 11; i++ {
-		s = ((s & 1) << 7) + (s >> 1) + a[i]
-	}
-	return s
-}
-func fsInfoValues(free, next uint32) []byte {
-	b := make([]byte, 512)
-	binary.LittleEndian.PutUint32(b[0:4], 0x41615252)
-	binary.LittleEndian.PutUint32(b[484:488], 0x61417272)
-	binary.LittleEndian.PutUint32(b[488:492], free)
-	binary.LittleEndian.PutUint32(b[492:496], next)
-	binary.LittleEndian.PutUint32(b[508:512], 0xaa550000)
-	return b
+
+// fsInfo is the FSInfo sector with the current free count and next-free hint.
+func (b *Builder) fsInfo() []byte {
+	info := make([]byte, 512)
+	binary.LittleEndian.PutUint32(info[0:4], 0x41615252)
+	binary.LittleEndian.PutUint32(info[484:488], 0x61417272)
+	binary.LittleEndian.PutUint32(info[488:492], b.free)
+	binary.LittleEndian.PutUint32(info[492:496], uint32(b.next))
+	binary.LittleEndian.PutUint32(info[508:512], 0xaa550000)
+	return info
 }
 
 var _ io.WriteCloser = (*File)(nil)

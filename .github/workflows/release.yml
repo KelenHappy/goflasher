@@ -167,7 +167,7 @@ jobs:
           if [[ "${{ vars.LINUX_WINDOWS_BUILDER_READY }}" == "true" ]]; then
             packaging/legal/links-wimlib.sh dist/goflasher
           fi
-          go build -trimpath -o dist/goflasher-helper ./cmd/goflasher-helper
+          go build -trimpath -ldflags "-s -w" -o dist/goflasher-helper ./cmd/goflasher-helper
       - name: Build Debian package
         run: packaging/make-deb.sh dist/goflasher "$VERSION" dist
       - name: Build RPM package

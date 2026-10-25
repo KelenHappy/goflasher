@@ -29,12 +29,12 @@ func TestParseVolumeDiskExtents(t *testing.T) {
 	tests := []struct {
 		name string
 		data []byte
-		want []uint32
+		want []diskNumber
 		err  bool
 	}{
-		{"single extent", extentBuffer(1, 4), []uint32{4}, false},
-		{"multiple extents", extentBuffer(2, 4, 7), []uint32{4, 7}, false},
-		{"zero extents", extentBuffer(0), []uint32{}, false},
+		{"single extent", extentBuffer(1, 4), []diskNumber{4}, false},
+		{"multiple extents", extentBuffer(2, 4, 7), []diskNumber{4, 7}, false},
+		{"zero extents", extentBuffer(0), []diskNumber{}, false},
 		{"truncated header", make([]byte, 7), nil, true},
 		{"truncated entry", extentBuffer(2, 9), nil, true},
 		{"huge count", extentBuffer(^uint32(0)), nil, true},
@@ -64,17 +64,17 @@ func TestVolumeGUIDValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isGUID(tt.value); got != tt.valid {
-				t.Fatalf("isGUID(%q) = %t, want %t", tt.value, got, tt.valid)
+			if got := guidText(tt.value).valid(); got != tt.valid {
+				t.Fatalf("guidText(%q).valid() = %t, want %t", tt.value, got, tt.valid)
 			}
 		})
 	}
 
 	volume := "\\\\?\\Volume{" + guid + "}\\"
-	if got := volumeGUID(volume); got != strings.TrimSuffix(volume, "\\") {
-		t.Fatalf("volumeGUID(%q) = %q", volume, got)
+	if got := volumePath(volume).guid(); got != strings.TrimSuffix(volume, "\\") {
+		t.Fatalf("volumePath(%q).guid() = %q", volume, got)
 	}
-	if got := volumeGUID("\\\\?\\Volume{not-a-guid}\\"); got != "<unknown-volume>" {
+	if got := volumePath("\\\\?\\Volume{not-a-guid}\\").guid(); got != "<unknown-volume>" {
 		t.Fatalf("invalid volume GUID exposed as %q", got)
 	}
 }
@@ -111,7 +111,7 @@ func TestVolumeAccessDeniedPreservesSentinelAndHidesPath(t *testing.T) {
 	openVolumeHandle = func(string, uint32) (windows.Handle, error) {
 		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
 	}
-	_, err := volumeDisks(`C:\Users\private`)
+	_, err := volumePath(`C:\Users\private`).disks()
 	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
 	requireErrorContains(t, err, "volume <unknown-volume> open")
 	if strings.Contains(err.Error(), "Users") {
@@ -127,7 +127,7 @@ func TestVolumeExtentQueryErrorNamesGUIDAndOperation(t *testing.T) {
 		return 0, windows.ERROR_ACCESS_DENIED
 	}
 	guid := `\\?\Volume{12345678-1234-1234-1234-123456789abc}\`
-	_, err := volumeDisks(guid)
+	_, err := volumePath(guid).disks()
 	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
 	requireErrorContains(t, err, strings.TrimSuffix(guid, "\\"))
 	requireErrorContains(t, err, "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS")
@@ -137,13 +137,13 @@ func TestVolumesForDiskFailsOnPartialEnumeration(t *testing.T) {
 	const volOne, volTwo = `\\?\Volume{one}\`, `\\?\Volume{two}\`
 	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
 	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
-	enumerateVolumes = func() ([]string, error) { return []string{volOne, volTwo}, nil }
+	enumerateVolumes = func() ([]volumePath, error) { return []volumePath{volOne, volTwo}, nil }
 	sentinel := errors.New("extent query failed")
-	queryVolumeDisks = func(v string) ([]uint32, error) {
+	queryVolumeDisks = func(v volumePath) ([]diskNumber, error) {
 		if v == volTwo {
 			return nil, sentinel
 		}
-		return []uint32{3}, nil
+		return []diskNumber{3}, nil
 	}
 	if got, err := volumesForDisk(3); got != nil || !errors.Is(err, sentinel) {
 		t.Fatalf("volumes=%v error=%v", got, err)
@@ -153,7 +153,7 @@ func TestVolumesForDiskFailsOnPartialEnumeration(t *testing.T) {
 func TestVolumesForDiskZeroVolumeSuccess(t *testing.T) {
 	old := enumerateVolumes
 	t.Cleanup(func() { enumerateVolumes = old })
-	enumerateVolumes = func() ([]string, error) { return nil, nil }
+	enumerateVolumes = func() ([]volumePath, error) { return nil, nil }
 	got, err := volumesForDisk(3)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("volumes=%v error=%v", got, err)
@@ -161,11 +161,11 @@ func TestVolumesForDiskZeroVolumeSuccess(t *testing.T) {
 }
 
 func TestTopologyComparisonDetectsRace(t *testing.T) {
-	if !sameVolumes([]string{"a", "b"}, []string{"b", "a"}) {
+	if !sameVolumes([]volumePath{"a", "b"}, []volumePath{"b", "a"}) {
 		t.Fatal("same topology rejected because order changed")
 	}
-	for _, current := range [][]string{{"a"}, {"a", "b", "c"}, {"a", "c"}} {
-		if sameVolumes([]string{"a", "b"}, current) {
+	for _, current := range [][]volumePath{{"a"}, {"a", "b", "c"}, {"a", "c"}} {
+		if sameVolumes([]volumePath{"a", "b"}, current) {
 			t.Fatalf("topology race accepted: %v", current)
 		}
 	}
@@ -175,21 +175,21 @@ func TestDiskVolumeIndexDedupesExtentsOnSameDisk(t *testing.T) {
 	const volA, volB = `\\?\Volume{a}\`, `\\?\Volume{b}\`
 	old := enumerateVolumes
 	t.Cleanup(func() { enumerateVolumes = old })
-	enumerateVolumes = func() ([]string, error) { return []string{volA, volB, volA}, nil }
+	enumerateVolumes = func() ([]volumePath, error) { return []volumePath{volA, volB, volA}, nil }
 
 	queries := 0
-	index, err := diskVolumeIndexUsing(func(v string) ([]uint32, error) {
+	index, err := diskVolumeIndexUsing(func(v volumePath) ([]diskNumber, error) {
 		queries++
 		if v == volA {
-			return []uint32{3, 3, 5}, nil // two extents of volA land on disk 3
+			return []diskNumber{3, 3, 5}, nil // two extents of volA land on disk 3
 		}
-		return []uint32{5}, nil
+		return []diskNumber{5}, nil
 	})
 
 	requireNoError(t, err)
-	requireEqual(t, "queries", queries, 2)                       // volA enumerated twice, queried once
-	requireEqual(t, "disk 3", strings.Join(index[3], " "), volA) // duplicate extents collapse
-	requireEqual(t, "disk 5", strings.Join(index[5], " "), volA+" "+volB)
+	requireEqual(t, "queries", queries, 2)                 // volA enumerated twice, queried once
+	requireEqual(t, "disk 3", joinVolumes(index[3]), volA) // duplicate extents collapse
+	requireEqual(t, "disk 5", joinVolumes(index[5]), volA+" "+volB)
 	requireEqual(t, "disk 9", len(index[9]), 0)
 }
 
@@ -199,27 +199,27 @@ func TestDiskVolumeIndexSkipsVolumesWithoutDiskExtents(t *testing.T) {
 	const cdrom, empty, usb = `\\?\Volume{c}\`, `\\?\Volume{e}\`, `\\?\Volume{u}\`
 	old := enumerateVolumes
 	t.Cleanup(func() { enumerateVolumes = old })
-	enumerateVolumes = func() ([]string, error) { return []string{cdrom, empty, usb}, nil }
+	enumerateVolumes = func() ([]volumePath, error) { return []volumePath{cdrom, empty, usb}, nil }
 
-	index, err := diskVolumeIndexUsing(func(v string) ([]uint32, error) {
+	index, err := diskVolumeIndexUsing(func(v volumePath) ([]diskNumber, error) {
 		switch v {
 		case cdrom:
 			return nil, fmt.Errorf("volume IOCTL: %w", windows.ERROR_INVALID_FUNCTION)
 		case empty:
 			return nil, fmt.Errorf("volume open: %w", windows.ERROR_NOT_READY)
 		}
-		return []uint32{2}, nil
+		return []diskNumber{2}, nil
 	})
 
 	requireNoError(t, err)
-	requireEqual(t, "disk 2", strings.Join(index[2], " "), usb)
+	requireEqual(t, "disk 2", joinVolumes(index[2]), usb)
 }
 
 func TestDiskVolumeIndexFailsClosedOnOtherVolumeErrors(t *testing.T) {
 	old := enumerateVolumes
 	t.Cleanup(func() { enumerateVolumes = old })
-	enumerateVolumes = func() ([]string, error) { return []string{`\\?\Volume{a}\`}, nil }
-	_, err := diskVolumeIndexUsing(func(string) ([]uint32, error) { return nil, windows.ERROR_ACCESS_DENIED })
+	enumerateVolumes = func() ([]volumePath, error) { return []volumePath{`\\?\Volume{a}\`}, nil }
+	_, err := diskVolumeIndexUsing(func(volumePath) ([]diskNumber, error) { return nil, windows.ERROR_ACCESS_DENIED })
 	if !errors.Is(err, ErrVolumeTopologyUnavailable) {
 		t.Fatalf("error=%v", err)
 	}
@@ -232,17 +232,17 @@ func TestDiskVolumeIndexUsesGlobalQuery(t *testing.T) {
 	const vol = `\\?\Volume{a}\`
 	oldEnumerate, oldQuery := enumerateVolumes, queryVolumeDisks
 	t.Cleanup(func() { enumerateVolumes, queryVolumeDisks = oldEnumerate, oldQuery })
-	enumerateVolumes = func() ([]string, error) { return []string{vol}, nil }
-	queried := ""
-	queryVolumeDisks = func(v string) ([]uint32, error) { queried = v; return []uint32{7}, nil }
+	enumerateVolumes = func() ([]volumePath, error) { return []volumePath{vol}, nil }
+	var queried volumePath
+	queryVolumeDisks = func(v volumePath) ([]diskNumber, error) { queried = v; return []diskNumber{7}, nil }
 
 	index, err := diskVolumeIndex()
 	requireNoError(t, err)
 	requireEqual(t, "queried volume", queried, vol)
-	requireEqual(t, "disk 7", strings.Join(index[7], " "), vol)
+	requireEqual(t, "disk 7", joinVolumes(index[7]), vol)
 }
 
-func equalDiskNumbers(a, b []uint32) bool {
+func equalDiskNumbers(a, b []diskNumber) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -261,4 +261,13 @@ func extentBuffer(count uint32, disks ...uint32) []byte {
 		binary.LittleEndian.PutUint32(b[8+i*24:], disk)
 	}
 	return b
+}
+
+// joinVolumes renders a disk's volumes for comparison with expected paths.
+func joinVolumes(volumes []volumePath) string {
+	parts := make([]string, len(volumes))
+	for i, v := range volumes {
+		parts[i] = string(v)
+	}
+	return strings.Join(parts, " ")
 }

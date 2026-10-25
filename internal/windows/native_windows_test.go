@@ -30,7 +30,7 @@ func TestSystemDiskExtentQueryFailureIsWrapped(t *testing.T) {
 	old := querySystemDisks
 	t.Cleanup(func() { querySystemDisks = old })
 	sentinel := windows.ERROR_ACCESS_DENIED
-	querySystemDisks = func() (map[uint32]bool, error) {
+	querySystemDisks = func() (map[diskNumber]bool, error) {
 		return nil, fmt.Errorf("system volume IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: %w", sentinel)
 	}
 	api := &winAPI{}
@@ -43,9 +43,9 @@ func TestSystemDiskExtentQueryFailureIsWrapped(t *testing.T) {
 func TestPnPEnumerationFailureFailsClosed(t *testing.T) {
 	oldSystem, oldPnP := querySystemDisks, enumeratePnPDisks
 	t.Cleanup(func() { querySystemDisks, enumeratePnPDisks = oldSystem, oldPnP })
-	querySystemDisks = func() (map[uint32]bool, error) { return map[uint32]bool{0: true}, nil }
+	querySystemDisks = func() (map[diskNumber]bool, error) { return map[diskNumber]bool{0: true}, nil }
 	sentinel := errors.New("setupapi failed")
-	enumeratePnPDisks = func() (map[uint32]pnpDisk, error) { return map[uint32]pnpDisk{1: {}}, sentinel }
+	enumeratePnPDisks = func() (map[diskNumber]pnpDisk, error) { return map[diskNumber]pnpDisk{1: {}}, sentinel }
 	api := &winAPI{}
 	_, _, err := api.list(context.Background())
 	if !errors.Is(err, sentinel) || !errors.Is(err, ErrSystemTopologyUnavailable) {
@@ -56,10 +56,10 @@ func TestPnPEnumerationFailureFailsClosed(t *testing.T) {
 func TestListFailsClosedWhenVolumeTopologyUnavailable(t *testing.T) {
 	oldSystem, oldPnP, oldEnumerate := querySystemDisks, enumeratePnPDisks, enumerateVolumes
 	t.Cleanup(func() { querySystemDisks, enumeratePnPDisks, enumerateVolumes = oldSystem, oldPnP, oldEnumerate })
-	querySystemDisks = func() (map[uint32]bool, error) { return map[uint32]bool{}, nil }
-	enumeratePnPDisks = func() (map[uint32]pnpDisk, error) { return map[uint32]pnpDisk{}, nil }
+	querySystemDisks = func() (map[diskNumber]bool, error) { return map[diskNumber]bool{}, nil }
+	enumeratePnPDisks = func() (map[diskNumber]pnpDisk, error) { return map[diskNumber]pnpDisk{}, nil }
 	sentinel := errors.New("FindFirstVolumeW failed")
-	enumerateVolumes = func() ([]string, error) { return nil, sentinel }
+	enumerateVolumes = func() ([]volumePath, error) { return nil, sentinel }
 	api := &winAPI{}
 	_, _, err := api.list(context.Background())
 	if !errors.Is(err, sentinel) || !errors.Is(err, ErrVolumeTopologyUnavailable) {

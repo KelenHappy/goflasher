@@ -41,7 +41,7 @@ type fakeAPI struct {
 func (f *fakeAPI) list(context.Context) ([]diskRecord, int, error) {
 	return append([]diskRecord(nil), f.records...), f.skipped, f.listErr
 }
-func (f *fakeAPI) lockVolumes(context.Context, uint32) (volumeLocks, error) {
+func (f *fakeAPI) lockVolumes(context.Context, diskNumber) (volumeLocks, error) {
 	f.lockCalls++
 	if f.lockErr != nil {
 		return nil, f.lockErr

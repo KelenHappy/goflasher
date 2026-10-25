@@ -21,7 +21,7 @@ install -Dm755 "$binary" "$stage/usr/bin/goflasher"
 if "$root/packaging/legal/links-wimlib.sh" "$binary"; then
   "$root/packaging/legal/install-wimlib-record.sh" "$stage/usr/share/doc/goflasher/third-party/wimlib-1.14.5"
 fi
-go build -trimpath -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
+go build -trimpath -ldflags "-s -w" -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \
   "$stage/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.desktop" \
@@ -47,4 +47,6 @@ Description: Safety-first USB image writer
  removable USB flash media and can verify and eject the result.
 EOF
 
-dpkg-deb --root-owner-group --build "$stage" "$output/goflasher_${version}_${arch}.deb"
+# xz rather than dpkg's default zstd level: smaller, and every supported
+# Debian and Ubuntu release can install it.
+dpkg-deb --root-owner-group -Zxz -z9 -Sextreme --build "$stage" "$output/goflasher_${version}_${arch}.deb"

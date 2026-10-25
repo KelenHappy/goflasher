@@ -30,30 +30,48 @@ func TestBuildAndWriteGPT(t *testing.T) {
 	if err := l.WriteTo(sliceWriterAt(b)); err != nil {
 		t.Fatal(err)
 	}
-	primary, backup := b[512:1024], b[(total-1)*512:]
+	disk := writtenGPT{image: b, layout: l, primary: b[512:1024], backup: b[(total-1)*512:]}
 	t.Run("mbr", func(t *testing.T) { checkProtectiveMBR(t, b[:512]) })
-	t.Run("primary", func(t *testing.T) { checkHeader(t, primary, 1, total-1) })
-	t.Run("backup", func(t *testing.T) { checkHeader(t, backup, total-1, 1) })
-	t.Run("entries", func(t *testing.T) { checkEntryArrays(t, b, l, primary, backup) })
+	t.Run("primary", func(t *testing.T) { checkHeader(t, disk.primary, 1, total-1) })
+	t.Run("backup", func(t *testing.T) { checkHeader(t, disk.backup, total-1, 1) })
+	t.Run("entries", func(t *testing.T) { checkEntryArrays(t, disk) })
+}
+
+// writtenGPT is a disk image after Layout.WriteTo, with its two headers.
+type writtenGPT struct {
+	image           []byte
+	layout          *Layout
+	primary, backup []byte
 }
 
 func checkProtectiveMBR(t *testing.T, mbr []byte) {
 	t.Helper()
-	if mbr[446] != 0 || mbr[450] != 0xee || binary.LittleEndian.Uint32(mbr[454:458]) != 1 || mbr[510] != 0x55 || mbr[511] != 0xaa {
-		t.Fatalf("protective MBR=%x", mbr[446:462])
+	fields := []struct {
+		name string
+		ok   bool
+	}{
+		{"boot indicator", mbr[446] == 0},
+		{"partition type", mbr[450] == 0xee},
+		{"starting LBA", binary.LittleEndian.Uint32(mbr[454:458]) == 1},
+		{"boot signature", bytes.Equal(mbr[510:512], []byte{0x55, 0xaa})},
+	}
+	for _, f := range fields {
+		if !f.ok {
+			t.Fatalf("protective MBR %s wrong: %x", f.name, mbr[446:462])
+		}
 	}
 	assertZero(t, mbr[:446], "legacy bootstrap code present")
 }
 
-func checkEntryArrays(t *testing.T, b []byte, l *Layout, primary, backup []byte) {
+func checkEntryArrays(t *testing.T, disk writtenGPT) {
 	t.Helper()
 	const arrayLen = uint64(EntryCount * EntrySize)
-	pa := b[l.PrimaryEntriesLBA*512:][:arrayLen]
-	ba := b[l.BackupEntriesLBA*512:][:arrayLen]
+	pa := disk.image[disk.layout.PrimaryEntriesLBA*512:][:arrayLen]
+	ba := disk.image[disk.layout.BackupEntriesLBA*512:][:arrayLen]
 	if !bytes.Equal(pa, ba) {
 		t.Fatal("entry arrays differ")
 	}
-	if crc := crc32.ChecksumIEEE(pa); binary.LittleEndian.Uint32(primary[88:92]) != crc || binary.LittleEndian.Uint32(backup[88:92]) != crc {
+	if crc := crc32.ChecksumIEEE(pa); binary.LittleEndian.Uint32(disk.primary[88:92]) != crc || binary.LittleEndian.Uint32(disk.backup[88:92]) != crc {
 		t.Fatal("entry CRC mismatch")
 	}
 	if !bytes.Equal(pa[:16], EFITypeGUID.MarshalBinary()) {

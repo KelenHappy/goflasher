@@ -132,14 +132,14 @@ func TestParseStorageIdentifierRejectsInvalidEntryBounds(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := parseStorageIdentifier(tt.data, 0, 4); err == nil {
+			if _, _, err := (storageIdentifierEntry{descriptor: tt.data, index: 4}).parse(); err == nil {
 				t.Fatal("invalid STORAGE_IDENTIFIER accepted")
 			}
 		})
 	}
 }
 
-func TestValidateStorageIdentifierLink(t *testing.T) {
+func TestStorageIdentifierListValidateLink(t *testing.T) {
 	const hdr = storageIdentifierHeaderSize
 	tests := []struct {
 		name          string
@@ -154,9 +154,10 @@ func TestValidateStorageIdentifierLink(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateStorageIdentifierLink(tt.next, tt.parsed, tt.count)
+			list := storageIdentifierList{count: tt.count}
+			err := list.validateLink(storageIdentifierEntry{index: tt.parsed - 1}, storageIdentifierHeader{next: tt.next})
 			if (err != nil) != tt.wantError {
-				t.Fatalf("validateStorageIdentifierLink(%d, %d, %d) error = %v, want error %t",
+				t.Fatalf("validateLink(next %d, parsed %d, count %d) error = %v, want error %t",
 					tt.next, tt.parsed, tt.count, err, tt.wantError)
 			}
 		})

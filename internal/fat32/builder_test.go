@@ -164,7 +164,7 @@ func (img testImage) assertFileContents(t *testing.T, entry rawEntry, want []byt
 func (img testImage) assertFSInfo(t *testing.T, b *Builder) {
 	t.Helper()
 	info := img[512:1024]
-	if binary.LittleEndian.Uint32(info[488:492]) != b.free || binary.LittleEndian.Uint32(info[492:496]) != b.next {
+	if binary.LittleEndian.Uint32(info[488:492]) != b.free || cluster(binary.LittleEndian.Uint32(info[492:496])) != b.next {
 		t.Fatal("FSInfo was not updated")
 	}
 }
@@ -361,7 +361,7 @@ func TestBuilderSplitsRunsAroundUsedClusters(t *testing.T) {
 	image := testImage(d.b)
 	e := image.root(t).find(t, "split.bin")
 	image.assertFileContents(t, e, want)
-	for c := e.cluster(); !isChainEnd(c); c = b.fat[c] {
+	for c := cluster(e.cluster()); !c.chainEnd(); c = b.fat[c] {
 		if c == used {
 			t.Fatal("file chain took a used cluster")
 		}

@@ -68,7 +68,7 @@ type History struct {
 // reach an exported file.
 func NewHistory(limit int, homeDir string) *History {
 	r := &redactor{}
-	r.add(homeDir, homeReplacement)
+	r.add(rule{secret: homeDir, replacement: homeReplacement})
 	lines := &lineBuffer{limit: limit}
 	handler := slog.NewTextHandler(lines, &slog.HandlerOptions{Level: slog.LevelDebug, ReplaceAttr: r.attr})
 	return &History{handler: handler, lines: lines, redactor: r}
@@ -84,7 +84,7 @@ func (h *History) RedactDir(dir string) {
 	if clean := filepath.Clean(dir); dir == "" || filepath.Dir(clean) == clean {
 		return
 	}
-	h.redactor.add(dir, dirReplacement)
+	h.redactor.add(rule{secret: dir, replacement: dirReplacement})
 }
 
 // lineBuffer receives exactly one Write per record from slog.TextHandler.
@@ -118,17 +118,19 @@ type redactor struct {
 	rules []rule // longest secret first, so a folder inside home hides fully
 }
 
+// rule replaces one secret, such as a personal path, with a placeholder.
 type rule struct{ secret, replacement string }
 
-func (r *redactor) add(secret, replacement string) {
-	if secret == "" {
+// add records next, once in each slash direction.
+func (r *redactor) add(next rule) {
+	if next.secret == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, s := range []string{secret, filepath.ToSlash(secret), strings.ReplaceAll(secret, "/", `\`)} {
+	for _, s := range []string{next.secret, filepath.ToSlash(next.secret), strings.ReplaceAll(next.secret, "/", `\`)} {
 		if !slices.ContainsFunc(r.rules, func(existing rule) bool { return strings.EqualFold(existing.secret, s) }) {
-			r.rules = append(r.rules, rule{secret: s, replacement: replacement})
+			r.rules = append(r.rules, rule{secret: s, replacement: next.replacement})
 		}
 	}
 	slices.SortStableFunc(r.rules, func(a, b rule) int { return len(b.secret) - len(a.secret) })
@@ -137,8 +139,8 @@ func (r *redactor) add(secret, replacement string) {
 func (r *redactor) text(s string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, rule := range r.rules {
-		s = replaceFold(s, rule.secret, rule.replacement)
+	for _, rl := range r.rules {
+		s = rl.apply(s)
 	}
 	return s
 }
@@ -162,14 +164,15 @@ func (r *redactor) attr(_ []string, a slog.Attr) slog.Attr {
 	return a
 }
 
-// replaceFold replaces every case-insensitive occurrence of old in s.
-func replaceFold(s, old, replacement string) string {
+// apply replaces every case-insensitive occurrence of the secret in s.
+func (rl rule) apply(s string) string {
+	old := rl.secret
 	var b strings.Builder
 	last := 0
 	for i := 0; i+len(old) <= len(s); {
 		if strings.EqualFold(s[i:i+len(old)], old) {
 			b.WriteString(s[last:i])
-			b.WriteString(replacement)
+			b.WriteString(rl.replacement)
 			i += len(old)
 			last = i
 			continue

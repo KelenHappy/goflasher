@@ -24,7 +24,7 @@ install -Dm755 "$binary" "$stage/usr/bin/goflasher"
 if "$root/packaging/legal/links-wimlib.sh" "$binary"; then
   "$root/packaging/legal/install-wimlib-record.sh" "$stage/usr/share/doc/goflasher/third-party/wimlib-1.14.5"
 fi
-go build -trimpath -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
+go build -trimpath -ldflags "-s -w" -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \
   "$stage/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.desktop" \
@@ -63,5 +63,7 @@ depend = wayland
 EOF
 
 mkdir -p "$output"
-tar --zstd --sort=name --owner=0 --group=0 --numeric-owner \
+# zstd -19 instead of tar's default level; single-threaded so the archive
+# stays reproducible.
+tar --use-compress-program="zstd -19" --sort=name --owner=0 --group=0 --numeric-owner \
   -cf "$output/goflasher-${pkgver}-1-${arch}.pkg.tar.zst" -C "$stage" .

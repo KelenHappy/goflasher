@@ -131,12 +131,12 @@ func TestExecutorRequiresSplitPipelineBeforeFirstTargetWrite(t *testing.T) {
 	}
 }
 
-func TestValidateSplitPartRejectsInvalidParts(t *testing.T) {
+func TestSplitSequenceRejectsInvalidParts(t *testing.T) {
 	valid := SplitPart{Name: "install.swm", Size: 1, Data: bytes.NewReader([]byte{1})}
 	tests := []struct {
 		name  string
 		part  SplitPart
-		index int
+		index splitPartNumber
 	}{
 		{name: "too many", part: valid, index: 2},
 		{name: "wrong name", part: SplitPart{Name: "wrong.swm", Size: 1, Data: valid.Data}, index: 1},
@@ -146,7 +146,8 @@ func TestValidateSplitPartRejectsInvalidParts(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := validateSplitPart(test.part, test.index, 1, 1); !errors.Is(err, ErrVerification) {
+			parts := splitSequence{next: test.index, planned: 1, maxSize: 1}
+			if _, err := parts.accept(test.part); !errors.Is(err, ErrVerification) {
 				t.Fatalf("error = %v", err)
 			}
 		})

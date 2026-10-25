@@ -46,8 +46,14 @@ func TestHistoryKeepsNewestRecords(t *testing.T) {
 		logger.Info(message)
 	}
 	lines := history.Lines()
-	if len(lines) != 2 || !strings.Contains(lines[0], "msg=two") || !strings.Contains(lines[1], "msg=three") {
+	want := []string{"msg=two", "msg=three"}
+	if len(lines) != len(want) {
 		t.Fatalf("history = %q, want the two newest records", lines)
+	}
+	for i, message := range want {
+		if !strings.Contains(lines[i], message) {
+			t.Errorf("record %d = %q, want %s", i, lines[i], message)
+		}
 	}
 }
 

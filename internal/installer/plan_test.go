@@ -174,3 +174,28 @@ func TestBuildPlanProbesSplitSupportBeforeCompletingPreflight(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestSplitPolicyAdmitsPartWithinBothLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy splitPolicy
+		size   uint64
+		want   bool
+	}{
+		{name: "empty", policy: 100, size: 0, want: false},
+		{name: "at policy", policy: 100, size: 100, want: true},
+		{name: "over policy", policy: 100, size: 101, want: false},
+		{name: "at FAT32 limit", policy: splitPolicy(maxFATFileSize + 1), size: maxFATFileSize, want: true},
+		{name: "over FAT32 limit", policy: splitPolicy(maxFATFileSize + 1), size: maxFATFileSize + 1, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.policy.admitsPart(tt.size); got != tt.want {
+				t.Fatalf("admitsPart(%d) = %t, want %t", tt.size, got, tt.want)
+			}
+			if got := tt.policy.admits(splitPartSizes{1, tt.size}); got != tt.want {
+				t.Fatalf("admits(1, %d) = %t, want %t", tt.size, got, tt.want)
+			}
+		})
+	}
+}

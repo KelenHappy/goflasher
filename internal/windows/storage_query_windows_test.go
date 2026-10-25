@@ -72,7 +72,7 @@ func TestQueryStorageDescriptorRejectsBadHeader(t *testing.T) {
 }
 
 func TestStoragePropertyQueryLayout(t *testing.T) {
-	q := storagePropertyQuery(storageDeviceIDProperty)
+	q := storageDeviceIDProperty.request()
 	requireEqual(t, "len", len(q), storagePropertyQuerySize)
 	requireEqual(t, "PropertyId", binary.LittleEndian.Uint32(q[0:4]), uint32(storageDeviceIDProperty))
 	requireEqual(t, "QueryType", binary.LittleEndian.Uint32(q[4:8]), uint32(propertyStandardQuery))
@@ -135,7 +135,7 @@ func TestDiskRecordFromEvidence(t *testing.T) {
 	binary.LittleEndian.PutUint32(q[12:16], vendorOff)
 	binary.LittleEndian.PutUint32(q[16:20], modelOff)
 	binary.LittleEndian.PutUint32(q[24:28], serialOff)
-	binary.LittleEndian.PutUint32(q[28:32], busTypeUSB)
+	binary.LittleEndian.PutUint32(q[28:32], uint32(busTypeUSB))
 	ev := diskEvidence{
 		number:     3,
 		length:     1 << 30,

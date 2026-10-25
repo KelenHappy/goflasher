@@ -40,13 +40,13 @@ type diskRecord struct {
 	device.Device
 	identity                                 windowsIdentityEvidence
 	deviceHotplug, mediaHotplug, usbAncestor bool
-	deviceNumber                             uint32
-	devInst                                  uint32
+	deviceNumber                             diskNumber
+	devInst                                  devNode
 }
 
 type nativeAPI interface {
 	list(context.Context) ([]diskRecord, int, error)
-	lockVolumes(context.Context, uint32) (volumeLocks, error)
+	lockVolumes(context.Context, diskNumber) (volumeLocks, error)
 	openDisk(context.Context, diskRecord, bool) (nativeFile, error)
 	eject(context.Context, diskRecord) error
 	formatFAT32(context.Context, diskRecord, string, chan<- progress.Update) error

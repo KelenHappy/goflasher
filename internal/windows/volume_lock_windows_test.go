@@ -28,7 +28,7 @@ func stubLock(t *testing.T, attempts *int, errs ...error) {
 func TestLockVolumeRetriesTransientDenial(t *testing.T) {
 	attempts := 0
 	stubLock(t, &attempts, windows.ERROR_ACCESS_DENIED, windows.ERROR_SHARING_VIOLATION)
-	if _, err := lockVolume(context.Background(), "\\\\?\\Volume{a}\\"); err != nil || attempts != 3 {
+	if _, err := volumePath("\\\\?\\Volume{a}\\").lock(context.Background()); err != nil || attempts != 3 {
 		t.Fatalf("attempts=%d error=%v", attempts, err)
 	}
 }
@@ -40,7 +40,7 @@ func TestLockVolumeGivesUpAfterBoundedAttempts(t *testing.T) {
 		denials[i] = windows.ERROR_ACCESS_DENIED
 	}
 	stubLock(t, &attempts, denials...)
-	_, err := lockVolume(context.Background(), "\\\\?\\Volume{a}\\")
+	_, err := volumePath("\\\\?\\Volume{a}\\").lock(context.Background())
 	requireErrorIs(t, err, ErrVolumeLockDenied)
 	requireErrorIs(t, err, windows.ERROR_ACCESS_DENIED)
 	requireEqual(t, "attempts", attempts, lockVolumeAttempts)
@@ -49,7 +49,7 @@ func TestLockVolumeGivesUpAfterBoundedAttempts(t *testing.T) {
 func TestLockVolumeDoesNotRetryPermanentFailure(t *testing.T) {
 	attempts := 0
 	stubLock(t, &attempts, windows.ERROR_NOT_SUPPORTED)
-	_, err := lockVolume(context.Background(), "\\\\?\\Volume{a}\\")
+	_, err := volumePath("\\\\?\\Volume{a}\\").lock(context.Background())
 	if !errors.Is(err, windows.ERROR_NOT_SUPPORTED) || attempts != 1 {
 		t.Fatalf("attempts=%d error=%v", attempts, err)
 	}
@@ -67,7 +67,7 @@ func TestLockVolumeRetryHonorsCancellation(t *testing.T) {
 		cancel()
 		return windows.ERROR_ACCESS_DENIED
 	}
-	_, err := lockVolume(ctx, "\\\\?\\Volume{a}\\")
+	_, err := volumePath("\\\\?\\Volume{a}\\").lock(ctx)
 	if !errors.Is(err, context.Canceled) || attempts != 1 {
 		t.Fatalf("attempts=%d error=%v", attempts, err)
 	}

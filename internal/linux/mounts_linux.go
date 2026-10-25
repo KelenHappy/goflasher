@@ -88,7 +88,7 @@ func mountBackedBy(number devNumber, d blockDevice, topology *blockTopology) (bo
 		}
 		return false, err
 	}
-	return topology.dependsOn(mounted, d.name)
+	return topology.dependsOn(mounted, blockName(d.name))
 }
 
 func containsCriticalMount(mountPoints []string) bool {
@@ -127,10 +127,10 @@ func mountBacksDevice(number devNumber, d blockDevice, topology *blockTopology) 
 	if number == d.number {
 		return true, nil
 	}
-	return topology.dependsOn(mounted, d.name)
+	return topology.dependsOn(mounted, blockName(d.name))
 }
 
-func mountedDeviceName(number devNumber, topology *blockTopology) (string, bool, error) {
+func mountedDeviceName(number devNumber, topology *blockTopology) (blockName, bool, error) {
 	name, err := topology.nameForNumber(number)
 	if err == nil {
 		return name, true, nil
@@ -144,14 +144,14 @@ func mountedDeviceName(number devNumber, topology *blockTopology) (string, bool,
 // backs reports whether any swap device under devRoot is d or stacked on it.
 func (s swapTable) backs(d blockDevice, devRoot string, topology *blockTopology) (bool, error) {
 	for path := range s {
-		swapName, block, err := topology.nameForSwapPath(path, devRoot)
+		swapName, block, err := topology.nameForSwap(swapDevice{path: path, devRoot: devRoot})
 		if err != nil {
 			return false, err
 		}
 		if !block {
 			continue
 		}
-		backed, err := topology.dependsOn(swapName, d.name)
+		backed, err := topology.dependsOn(swapName, blockName(d.name))
 		if err != nil {
 			return false, err
 		}

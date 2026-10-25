@@ -156,7 +156,7 @@ func (p *BuildPlan) withPreparedSplitGeometry(sizes splitPartSizes) (*BuildPlan,
 	if err := p.validatePreparedSplitSizes(sizes); err != nil {
 		return nil, err
 	}
-	wimEntry, _ := plannedBySource(p, "sources/install.wim")
+	wimEntry, _ := p.installWIM()
 	estimate := installLayout{strategy: SplitWIM, installSize: wimEntry.source.Size, splitParts: p.splitParts}
 	q := p.clone()
 	q.splitParts = len(sizes)
@@ -173,7 +173,7 @@ func (p *BuildPlan) validatePreparedSplitSizes(sizes splitPartSizes) error {
 	if !p.acceptsPreparedSplit(sizes) {
 		return fmt.Errorf("%w: missing prepared split geometry", ErrVerification)
 	}
-	if _, ok := plannedBySource(p, "sources/install.wim"); !ok {
+	if _, ok := p.installWIM(); !ok {
 		return fmt.Errorf("%w: planned WIM is missing", ErrVerification)
 	}
 	if !splitPolicy(p.splitSize).admits(sizes) {
@@ -211,7 +211,7 @@ func (p *BuildPlan) adjustSplitDirectorySize(sizes splitPartSizes) {
 	oldEntryBytes := fatName("install.wim").directoryEntryBytes()
 	var actualEntryBytes uint64
 	for i := range sizes {
-		actualEntryBytes += fatName(splitPartName(i + 1)).directoryEntryBytes()
+		actualEntryBytes += fatName(splitPartNumber(i + 1).name()).directoryEntryBytes()
 	}
 	if actualEntryBytes > oldEntryBytes {
 		delta := actualEntryBytes - oldEntryBytes
@@ -288,15 +288,20 @@ type splitPolicy uint64
 
 func (s splitPolicy) valid() bool { return uint64(s) <= maxFATFileSize }
 
-// admits reports whether every part is non-empty and within both the policy
-// and the FAT32 file limit.
+// admits reports whether every part is admitted by admitsPart.
 func (s splitPolicy) admits(sizes splitPartSizes) bool {
 	for _, size := range sizes {
-		if size == 0 || size > uint64(s) || size > maxFATFileSize {
+		if !s.admitsPart(size) {
 			return false
 		}
 	}
 	return true
+}
+
+// admitsPart reports whether one part is non-empty and within both the policy
+// and the FAT32 file limit.
+func (s splitPolicy) admitsPart(size uint64) bool {
+	return size != 0 && size <= min(uint64(s), maxFATFileSize)
 }
 
 // wimLayout copies an install.wim FAT32 can hold and otherwise splits it into

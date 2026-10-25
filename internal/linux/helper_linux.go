@@ -1051,7 +1051,7 @@ func (env helperEnvironment) validateDeviceNode(d blockDevice) error {
 	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
 		return ErrDeviceChanged
 	}
-	if rdevNumber(uint64(st.Rdev)) != d.number {
+	if rdevNumber(&st) != d.number {
 		return ErrDeviceChanged
 	}
 	return nil
@@ -1150,7 +1150,7 @@ func (g deviceGuard) validateDescriptor(f *os.File) error {
 	if err := fstat(int(f.Fd()), &st); err != nil {
 		return fmt.Errorf("fstat opened device: %w", err)
 	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK || rdevNumber(uint64(st.Rdev)) != g.req.device() {
+	if st.Mode&syscall.S_IFMT != syscall.S_IFBLK || rdevNumber(&st) != g.req.device() {
 		return fmt.Errorf("%w: opened descriptor is not requested block device", ErrDeviceChanged)
 	}
 	return nil

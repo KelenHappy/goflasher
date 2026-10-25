@@ -202,7 +202,7 @@ hdiutil create \
   -quiet \
   -volname GoFlasher \
   -srcfolder "$DMG_ROOT" \
-  -format UDZO \
+  -format ULMO \
   "$DMG"
 
 #

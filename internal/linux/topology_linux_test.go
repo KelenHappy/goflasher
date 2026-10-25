@@ -168,7 +168,7 @@ func TestUnderDeviceRoot(t *testing.T) {
 		{"/tmp/fixture/swapfile", "/tmp/fixture/root/dev", false},
 		{"relative/swapfile", "/dev", false},
 	} {
-		if got := underDeviceRoot(tc.path, tc.devRoot); got != tc.want {
+		if got := (swapDevice{path: tc.path, devRoot: tc.devRoot}).underDeviceRoot(); got != tc.want {
 			t.Errorf("underDeviceRoot(%q, %q) = %t, want %t", tc.path, tc.devRoot, got, tc.want)
 		}
 	}

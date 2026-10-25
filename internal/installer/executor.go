@@ -172,8 +172,8 @@ func (r *execution) copyFiles() error {
 		if !r.shouldCopy(item) {
 			continue
 		}
-		verified, n, err := r.copyISOFile(item)
-		r.recordCopy(verified, n, err)
+		copied, err := r.copyISOFile(item)
+		r.recordCopy(copied, err)
 		if err != nil {
 			return err
 		}
@@ -205,75 +205,88 @@ func (r *execution) shouldCopy(item plannedEntry) bool {
 	if item.source.Type != installeriso.File {
 		return false
 	}
-	return r.plan.strategy != SplitWIM || !strings.EqualFold(item.source.Path, "sources/install.wim")
+	return r.plan.strategy != SplitWIM || !item.isInstallWIM()
 }
 
-func (r *execution) recordCopy(verified VerificationEntry, n uint64, err error) {
-	r.result.BytesWritten += n
+func (r *execution) recordCopy(copied copyResult, err error) {
+	r.result.BytesWritten += copied.written
 	if err != nil {
 		return
 	}
-	r.result.VerificationManifest = append(r.result.VerificationManifest, verified)
+	r.result.VerificationManifest = append(r.result.VerificationManifest, copied.entry)
 }
 
 func (r *execution) copySplitWIM() error {
 	plan := r.plan
-	wim, ok := plannedBySource(plan, "sources/install.wim")
+	wim, ok := plan.installWIM()
 	if !ok {
 		return errors.New("planned WIM is missing")
 	}
-	reader := newExtentReader(r.source, wim.source.Extents, wim.source.Size)
-	expectedWIMHash := verificationHash(plan, wim.destination, wim.source.Size)
+	reader := newExtentReader(r.source, wim.source)
+	expectedWIMHash := plan.verificationHash(wim)
 	if expectedWIMHash == "" {
 		return fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
 	}
-	nextPart := 1
+	parts := newSplitSequence(plan)
 	request := SplitRequest{Source: reader, SourceSize: wim.source.Size, ExpectedSHA256: expectedWIMHash, PartSize: plan.splitSize}
 	err := r.splitter.Split(r.ctx, request, func(part SplitPart) error {
-		name, err := validateSplitPart(part, nextPart, plan.splitParts, plan.splitSize)
+		name, err := parts.accept(part)
 		if err != nil {
 			return err
 		}
 		destination := path.Join(path.Dir(wim.destination), name)
-		verified, n, copyErr := copyReaderFile(r.ctx, r.builder, fileCopy{destination: destination, source: part.Data, expectedSize: part.Size, onCopy: r.reportCopied})
-		r.recordCopy(verified, n, copyErr)
+		copied, copyErr := copyReaderFile(r.ctx, r.builder, fileCopy{destination: destination, source: part.Data, expectedSize: part.Size, onCopy: r.reportCopied})
+		r.recordCopy(copied, copyErr)
 		if copyErr != nil {
 			return copyErr
 		}
-		nextPart++
+		parts.advance()
 		return nil
 	})
 	if err != nil {
 		return errors.Join(ErrWIMSplitFailure, err)
 	}
-	if nextPart != plan.splitParts+1 {
-		return fmt.Errorf("split pipeline produced %d of %d planned parts", nextPart-1, plan.splitParts)
-	}
-	return nil
+	return parts.complete()
 }
 
-func validateSplitPart(part SplitPart, index, plannedParts int, maxSize uint64) (string, error) {
-	if index > plannedParts {
-		return "", fmt.Errorf("%w: split pipeline produced too many parts", ErrVerification)
-	}
-	name := splitPartName(index)
-	if err := part.validate(name, maxSize); err != nil {
-		return "", err
-	}
-	return name, nil
-}
+// splitPartNumber counts SWM parts from 1.
+type splitPartNumber int
 
-// splitPartName is the canonical SWM sequence: install.swm, install2.swm, ...
-func splitPartName(index int) string {
-	if index > 1 {
-		return "install" + strconv.Itoa(index) + ".swm"
+// name is the canonical SWM sequence: install.swm, install2.swm, ...
+func (n splitPartNumber) name() string {
+	if n > 1 {
+		return "install" + strconv.Itoa(int(n)) + ".swm"
 	}
 	return "install.swm"
 }
 
-// validate reports why a part is unusable instead of collapsing every rejection
+// splitSequence checks that a split pipeline emits exactly the planned parts,
+// in canonical order and within the planned part size.
+type splitSequence struct {
+	next, planned splitPartNumber
+	maxSize       uint64
+}
+
+func newSplitSequence(plan *BuildPlan) splitSequence {
+	return splitSequence{next: 1, planned: splitPartNumber(plan.splitParts), maxSize: plan.splitSize}
+}
+
+// accept validates part as the next expected part and returns its canonical
+// name. advance moves past it once it has been copied.
+func (s *splitSequence) accept(part SplitPart) (string, error) {
+	if s.next > s.planned {
+		return "", fmt.Errorf("%w: split pipeline produced too many parts", ErrVerification)
+	}
+	if err := s.check(part); err != nil {
+		return "", err
+	}
+	return s.next.name(), nil
+}
+
+// check reports why a part is unusable instead of collapsing every rejection
 // into one message.
-func (p SplitPart) validate(name string, maxSize uint64) error {
+func (s *splitSequence) check(p SplitPart) error {
+	name := s.next.name()
 	switch {
 	case p.Name != name:
 		return fmt.Errorf("%w: split part %q, want %q", ErrVerification, p.Name, name)
@@ -281,29 +294,44 @@ func (p SplitPart) validate(name string, maxSize uint64) error {
 		return fmt.Errorf("%w: split part %q carries no data", ErrVerification, p.Name)
 	case p.Size == 0:
 		return fmt.Errorf("%w: split part %q is empty", ErrVerification, p.Name)
-	case p.Size > maxSize:
-		return fmt.Errorf("%w: split part %q is %d bytes, over the %d byte part size", ErrVerification, p.Name, p.Size, maxSize)
+	case p.Size > s.maxSize:
+		return fmt.Errorf("%w: split part %q is %d bytes, over the %d byte part size", ErrVerification, p.Name, p.Size, s.maxSize)
 	}
 	return nil
 }
 
-func plannedBySource(plan *BuildPlan, name string) (plannedEntry, bool) {
-	for _, item := range plan.planned {
-		if strings.EqualFold(item.source.Path, name) {
+func (s *splitSequence) advance() { s.next++ }
+
+// complete reports a pipeline that stopped before every planned part.
+func (s *splitSequence) complete() error {
+	if s.next != s.planned+1 {
+		return fmt.Errorf("split pipeline produced %d of %d planned parts", s.next-1, s.planned)
+	}
+	return nil
+}
+
+// installWIM returns the planned sources/install.wim entry.
+func (p *BuildPlan) installWIM() (plannedEntry, bool) {
+	for _, item := range p.planned {
+		if item.isInstallWIM() {
 			return item, true
 		}
 	}
 	return plannedEntry{}, false
 }
 
+func (e plannedEntry) isInstallWIM() bool {
+	return strings.EqualFold(e.source.Path, string(keyInstallWIM))
+}
+
 // copyISOFile copies one planned entry straight out of the ISO extents. The
 // plan, source and builder it needs are already the execution's own.
-func (r *execution) copyISOFile(item plannedEntry) (VerificationEntry, uint64, error) {
-	expected := verificationHash(r.plan, item.destination, item.source.Size)
+func (r *execution) copyISOFile(item plannedEntry) (copyResult, error) {
+	expected := r.plan.verificationHash(item)
 	if expected == "" {
-		return VerificationEntry{}, 0, fmt.Errorf("%w: no preflight hash for %s", ErrVerification, item.destination)
+		return copyResult{}, fmt.Errorf("%w: no preflight hash for %s", ErrVerification, item.destination)
 	}
-	reader := newExtentReader(r.source, item.source.Extents, item.source.Size)
+	reader := newExtentReader(r.source, item.source)
 	return copyReaderFile(r.ctx, r.builder, fileCopy{
 		destination:  item.destination,
 		source:       reader,
@@ -313,13 +341,22 @@ func (r *execution) copyISOFile(item plannedEntry) (VerificationEntry, uint64, e
 	})
 }
 
-func verificationHash(plan *BuildPlan, destination string, size uint64) string {
-	for _, verification := range plan.verification {
-		if strings.EqualFold(strings.ReplaceAll(verification.Path, "\\", "/"), destination) && verification.Size == size {
+// verificationHash is the preflight SHA-256 recorded for item, or "" when the
+// preflight recorded none at item's destination and size.
+func (p *BuildPlan) verificationHash(item plannedEntry) string {
+	for _, verification := range p.verification {
+		if strings.EqualFold(strings.ReplaceAll(verification.Path, "\\", "/"), item.destination) && verification.Size == item.source.Size {
 			return verification.SHA256
 		}
 	}
 	return ""
+}
+
+// copyResult is one copied file: the bytes that reached the filesystem, and
+// its verification entry once the copy completed and matched.
+type copyResult struct {
+	entry   VerificationEntry
+	written uint64
 }
 
 type fileCopy struct {
@@ -340,15 +377,15 @@ func (c copyCounter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func copyReaderFile(ctx context.Context, builder *fat32.Builder, file fileCopy) (VerificationEntry, uint64, error) {
+func copyReaderFile(ctx context.Context, builder *fat32.Builder, file fileCopy) (copyResult, error) {
 	if parent := path.Dir(file.destination); parent != "." {
 		if err := builder.MkdirAll(parent); err != nil {
-			return VerificationEntry{}, 0, err
+			return copyResult{}, err
 		}
 	}
 	dst, err := builder.Create(file.destination)
 	if err != nil {
-		return VerificationEntry{}, 0, err
+		return copyResult{}, err
 	}
 	h := sha256.New()
 	sinks := []io.Writer{dst, h}
@@ -359,20 +396,20 @@ func copyReaderFile(ctx context.Context, builder *fat32.Builder, file fileCopy) 
 	written, copyErr := copyContext(ctx, io.MultiWriter(sinks...), limited)
 	closeErr := dst.Close()
 	if copyErr != nil || closeErr != nil {
-		return VerificationEntry{}, uint64(written), errors.Join(copyErr, closeErr)
+		return copyResult{written: uint64(written)}, errors.Join(copyErr, closeErr)
 	}
-	actualHash := hex.EncodeToString(h.Sum(nil))
-	if !file.matches(uint64(written), actualHash) {
-		return VerificationEntry{}, uint64(written), fmt.Errorf("%w: %s: got %d bytes", ErrVerification, file.destination, written)
+	actual := VerificationEntry{Path: file.destination, Size: uint64(written), SHA256: hex.EncodeToString(h.Sum(nil))}
+	if !file.matches(actual) {
+		return copyResult{written: actual.Size}, fmt.Errorf("%w: %s: got %d bytes", ErrVerification, file.destination, written)
 	}
-	return VerificationEntry{Path: file.destination, Size: uint64(written), SHA256: actualHash}, uint64(written), nil
+	return copyResult{entry: actual, written: actual.Size}, nil
 }
 
-func (f fileCopy) matches(size uint64, hash string) bool {
-	if size != f.expectedSize {
+func (f fileCopy) matches(actual VerificationEntry) bool {
+	if actual.Size != f.expectedSize {
 		return false
 	}
-	return f.expectedHash == "" || hash == f.expectedHash
+	return f.expectedHash == "" || actual.SHA256 == f.expectedHash
 }
 
 func copyContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
@@ -421,8 +458,9 @@ func (r *measuredReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func newExtentReader(source io.ReaderAt, extents []installeriso.Extent, size uint64) io.Reader {
-	return &extentReader{source: source, extents: append([]installeriso.Extent(nil), extents...), remaining: size}
+// newExtentReader reads file's bytes straight out of the ISO extents.
+func newExtentReader(source io.ReaderAt, file installeriso.Entry) io.Reader {
+	return &extentReader{source: source, extents: append([]installeriso.Extent(nil), file.Extents...), remaining: file.Size}
 }
 
 func (r *extentReader) Read(p []byte) (int, error) {

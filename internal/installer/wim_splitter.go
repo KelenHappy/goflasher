@@ -152,16 +152,16 @@ func prepareComplete(ctx context.Context, preparer wimPreparer, request SplitReq
 // plannedSplitRequest resolves the planned install.wim entry and its
 // verification hash into a split request reading straight from the ISO.
 func plannedSplitRequest(plan *BuildPlan, source io.ReaderAt) (SplitRequest, error) {
-	entry, ok := plannedBySource(plan, "sources/install.wim")
+	entry, ok := plan.installWIM()
 	if !ok {
 		return SplitRequest{}, fmt.Errorf("%w: planned WIM is missing", ErrVerification)
 	}
-	expected := verificationHash(plan, entry.destination, entry.source.Size)
+	expected := plan.verificationHash(entry)
 	if expected == "" {
 		return SplitRequest{}, fmt.Errorf("%w: planned WIM hash is missing", ErrVerification)
 	}
 	return SplitRequest{
-		Source:         newExtentReader(source, entry.source.Extents, entry.source.Size),
+		Source:         newExtentReader(source, entry.source),
 		SourceSize:     entry.source.Size,
 		ExpectedSHA256: expected,
 		PartSize:       plan.splitSize,
@@ -349,9 +349,10 @@ func validateSplitParts(parts []wim.Part, output string, sourceSize, policy uint
 	if err != nil {
 		return fmt.Errorf("%w: invalid split output directory", ErrVerification)
 	}
+	out := splitOutput{dir: canonicalOutput, policy: policy}
 	var total uint64
 	for index, part := range parts {
-		if err := validateSplitPartFile(part, index, canonicalOutput, policy); err != nil {
+		if err := out.validatePart(part, index); err != nil {
 			return err
 		}
 		if total > math.MaxUint64-part.Size {
@@ -362,11 +363,18 @@ func validateSplitParts(parts []wim.Part, output string, sourceSize, policy uint
 	return validateSplitTotal(total, len(parts), sourceSize)
 }
 
-// validateSplitPartFile checks that one reported part is a regular file of
-// the expected name and size inside the split output directory.
-func validateSplitPartFile(part wim.Part, index int, canonicalOutput string, policy uint64) error {
+// splitOutput is the canonical split output directory and the part size
+// policy every reported part is checked against.
+type splitOutput struct {
+	dir    string
+	policy uint64
+}
+
+// validatePart checks that one reported part is a regular file of the
+// expected name and size inside the split output directory.
+func (o splitOutput) validatePart(part wim.Part, index int) error {
 	canonical, err := filepath.EvalSymlinks(part.Path)
-	if err != nil || !splitPartAccepted(part, canonical, canonicalOutput, index, policy) {
+	if err != nil || !o.accepts(part, canonical, index) {
 		return fmt.Errorf("%w: invalid split part %q", ErrVerification, part.Path)
 	}
 	info, err := os.Stat(canonical)
@@ -376,16 +384,16 @@ func validateSplitPartFile(part wim.Part, index int, canonicalOutput string, pol
 	return nil
 }
 
-func splitPartAccepted(part wim.Part, canonical, canonicalOutput string, index int, policy uint64) bool {
-	return splitPartLocated(canonical, canonicalOutput, index) && splitPartSized(part.Size, policy)
+func (o splitOutput) accepts(part wim.Part, canonical string, index int) bool {
+	return o.locates(canonical, index) && splitPartSized(part.Size, o.policy)
+}
+
+func (o splitOutput) locates(canonical string, index int) bool {
+	return filepath.Dir(canonical) == o.dir && filepath.Base(canonical) == swmPartName(index)
 }
 
 func splitPartFileMatches(info os.FileInfo, size uint64) bool {
 	return !info.IsDir() && uint64(info.Size()) == size
-}
-
-func splitPartLocated(canonical, canonicalOutput string, index int) bool {
-	return filepath.Dir(canonical) == canonicalOutput && filepath.Base(canonical) == swmPartName(index)
 }
 
 func splitPartSized(size, policy uint64) bool {

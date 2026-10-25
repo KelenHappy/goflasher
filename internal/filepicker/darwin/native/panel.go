@@ -33,26 +33,33 @@ type appKitClasses struct {
 	pool, panel, savePanel, nsString uintptr
 }
 
+// appKit pairs the bound runtime functions with the resolved classes; every
+// panel helper needs both.
+type appKit struct {
+	api     objcAPI
+	classes appKitClasses
+}
+
 // OpenImage displays a single-file NSOpenPanel.
 func OpenImage(title, acceptLabel, filterName string) (string, error) {
 	_, _ = acceptLabel, filterName // image validation remains authoritative.
-	return runModalPanel(func(api objcAPI, classes appKitClasses) (uintptr, error) {
-		return newOpenPanel(api, classes, title)
+	return runModalPanel(func(kit appKit) (uintptr, error) {
+		return newOpenPanel(kit, title)
 	})
 }
 
 // SaveLog displays an NSSavePanel with defaultName prefilled. AppKit asks
 // before replacing an existing file.
 func SaveLog(title, defaultName string) (string, error) {
-	return runModalPanel(func(api objcAPI, classes appKitClasses) (uintptr, error) {
-		return newSavePanel(api, classes, title, defaultName)
+	return runModalPanel(func(kit appKit) (uintptr, error) {
+		return newSavePanel(kit, title, defaultName)
 	})
 }
 
 // runModalPanel must create and run AppKit objects on one OS thread. Fyne
 // invokes the picker from its UI callback; LockOSThread prevents a Go
 // reschedule while the modal AppKit run loop is active.
-func runModalPanel(newPanel func(objcAPI, appKitClasses) (uintptr, error)) (string, error) {
+func runModalPanel(newPanel func(appKit) (uintptr, error)) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -72,7 +79,7 @@ func runModalPanel(newPanel func(objcAPI, appKitClasses) (uintptr, error)) (stri
 	}
 	defer api.msg0(pool, sel(api, "drain"))
 
-	panel, err := newPanel(api, classes)
+	panel, err := newPanel(appKit{api: api, classes: classes})
 	if err != nil {
 		return "", err
 	}
@@ -134,38 +141,41 @@ func lookupClasses(api objcAPI) (appKitClasses, error) {
 }
 
 // newOpenPanel creates a single-file NSOpenPanel with the optional title.
-func newOpenPanel(api objcAPI, classes appKitClasses, title string) (uintptr, error) {
-	panel := api.msg0(classes.panel, sel(api, "openPanel"))
+func newOpenPanel(kit appKit, title string) (uintptr, error) {
+	api := kit.api
+	panel := api.msg0(kit.classes.panel, sel(api, "openPanel"))
 	if panel == 0 {
 		return 0, errors.New("NSOpenPanel.openPanel returned nil")
 	}
 	api.msg1bool(panel, sel(api, "setCanChooseFiles:"), true)
 	api.msg1bool(panel, sel(api, "setCanChooseDirectories:"), false)
 	api.msg1bool(panel, sel(api, "setAllowsMultipleSelection:"), false)
-	return panel, setPanelString(api, classes, panel, "setTitle:", title)
+	return panel, setPanelString(kit, panel, "setTitle:", title)
 }
 
 // newSavePanel creates an NSSavePanel with the optional title and file name.
-func newSavePanel(api objcAPI, classes appKitClasses, title, defaultName string) (uintptr, error) {
-	panel := api.msg0(classes.savePanel, sel(api, "savePanel"))
+func newSavePanel(kit appKit, title, defaultName string) (uintptr, error) {
+	api := kit.api
+	panel := api.msg0(kit.classes.savePanel, sel(api, "savePanel"))
 	if panel == 0 {
 		return 0, errors.New("NSSavePanel.savePanel returned nil")
 	}
 	api.msg1bool(panel, sel(api, "setCanCreateDirectories:"), true)
-	if err := setPanelString(api, classes, panel, "setTitle:", title); err != nil {
+	if err := setPanelString(kit, panel, "setTitle:", title); err != nil {
 		return 0, err
 	}
-	return panel, setPanelString(api, classes, panel, "setNameFieldStringValue:", defaultName)
+	return panel, setPanelString(kit, panel, "setNameFieldStringValue:", defaultName)
 }
 
 // setPanelString sends a non-empty value to a panel's NSString setter.
-func setPanelString(api objcAPI, classes appKitClasses, panel uintptr, setter, value string) error {
+func setPanelString(kit appKit, panel uintptr, setter, value string) error {
 	if value == "" {
 		return nil
 	}
+	api := kit.api
 	// The value is Go memory: passing it as *byte rather than uintptr keeps it
 	// alive until objc_msgSend returns.
-	nsValue := api.msg1UTF8(classes.nsString, sel(api, "stringWithUTF8String:"), cString(value))
+	nsValue := api.msg1UTF8(kit.classes.nsString, sel(api, "stringWithUTF8String:"), cString(value))
 	if nsValue == 0 {
 		return fmt.Errorf("convert file panel %s value to NSString", setter)
 	}

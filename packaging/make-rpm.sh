@@ -27,7 +27,7 @@ if "$root/packaging/legal/links-wimlib.sh" "$binary"; then
   libwim_legal=/usr/share/doc/goflasher/third-party/wimlib-1.14.5
   "$root/packaging/legal/install-wimlib-record.sh" "$stage$libwim_legal"
 fi
-go build -trimpath -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
+go build -trimpath -ldflags "-s -w" -o "$stage/usr/libexec/goflasher-helper" "$root/cmd/goflasher-helper"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.policy" \
   "$stage/usr/share/polkit-1/actions/org.goflasher.usbwriter.policy"
 install -Dm644 "$root/packaging/org.goflasher.usbwriter.desktop" \
@@ -74,5 +74,7 @@ $libwim_legal
 /usr/share/icons/hicolor/scalable/apps/org.goflasher.usbwriter.svg
 EOF_SPEC
 
-rpmbuild --define "_topdir $topdir" --target "$arch" -bb "$topdir/SPECS/goflasher.spec"
+# xz level 9 payload: smaller than the distribution default and readable by
+# every supported rpm.
+rpmbuild --define "_topdir $topdir" --define "_binary_payload w9.xzdio" --target "$arch" -bb "$topdir/SPECS/goflasher.spec"
 cp "$topdir"/RPMS/*/goflasher-"$rpm_version"-1*.rpm "$output/"
