@@ -72,7 +72,7 @@ func mustChecksum(t *testing.T, r io.Reader) string {
 	return sum
 }
 
-func encodeTestImage(t *testing.T, compression Compression, payload []byte) []byte {
+func encodeTestImage(t testing.TB, compression Compression, payload []byte) []byte {
 	t.Helper()
 	var encoded bytes.Buffer
 	var writer io.WriteCloser

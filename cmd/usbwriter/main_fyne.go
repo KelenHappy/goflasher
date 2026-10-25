@@ -6,23 +6,18 @@ import (
 	"context"
 	_ "embed"
 	"errors"
-	"fmt"
-	"net/url"
-	"path/filepath"
-	"strings"
-	"time"
+	"log/slog"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	core "github.com/goflasher/goflasher/internal/app"
+	"github.com/goflasher/goflasher/internal/applog"
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/i18n"
 	"github.com/goflasher/goflasher/internal/image"
-	"github.com/goflasher/goflasher/internal/legal"
 	"github.com/goflasher/goflasher/internal/progress"
 )
 
@@ -38,7 +33,7 @@ func runApplication(tr i18n.Localizer) {
 	tr = controller.tr
 	controller.bindActions()
 	controller.view.window.SetContent(container.NewVScroll(windowContent(tr, controller.view)))
-	controller.appendLog(tr.T("log.launched"))
+	controller.logEvent(slog.LevelInfo, "log.launched")
 	controller.refresh()
 	controller.watchDevices()
 	controller.view.window.ShowAndRun()
@@ -53,8 +48,7 @@ type applicationView struct {
 	bar                                      *widget.ProgressBar
 	logs                                     *widget.Entry
 	logPanel                                 *widget.Accordion
-	start, format, choose, refresh, copyLog  *widget.Button
-	copyError                                *widget.Button
+	start, format, choose, refresh, saveLog  *widget.Button
 	settings                                 *widget.Button
 	deviceCard, imageCard, imageInfoCard     *widget.Card
 	optionsCard, progressCard                *widget.Card
@@ -70,6 +64,8 @@ type guiController struct {
 	info              image.Info
 	cancel            context.CancelFunc
 	logLines          []string
+	logger            *slog.Logger
+	history           *applog.History
 	app               fyne.App
 	operation         operation
 	formatProgress    progress.Update
@@ -112,7 +108,9 @@ func newGUIController(tr i18n.Localizer) *guiController {
 	w := a.NewWindow(tr.T("window.title"))
 	w.Resize(baseWindowSize())
 	view := newApplicationView(tr, w)
-	return &guiController{tr: tr, view: view, backend: newBackend(), machine: core.NewStateMachine(), app: a}
+	c := &guiController{tr: tr, view: view, backend: newBackend(), machine: core.NewStateMachine(), app: a}
+	c.initLogging()
+	return c
 }
 
 func newApplicationView(tr i18n.Localizer, w fyne.Window) *applicationView {
@@ -139,9 +137,7 @@ func newApplicationView(tr i18n.Localizer, w fyne.Window) *applicationView {
 	v.format.Disable()
 	v.choose = widget.NewButton(tr.T("action.choose"), nil)
 	v.refresh = widget.NewButton(tr.T("action.rescan"), nil)
-	v.copyError = widget.NewButton(tr.T("action.copy_error"), func() { w.Clipboard().SetContent(v.logs.Text) })
-	v.copyError.Hide()
-	v.copyLog = widget.NewButton(tr.T("action.copy_log"), func() { w.Clipboard().SetContent(v.logs.Text) })
+	v.saveLog = widget.NewButton(tr.T("action.save_log"), nil)
 	v.settings = widget.NewButton(tr.T("action.settings"), nil)
 	return v
 }
@@ -150,6 +146,7 @@ func (c *guiController) bindActions() {
 	c.view.refresh.OnTapped = c.refresh
 	c.view.deviceSelect.OnChanged = c.selectDevice
 	c.view.choose.OnTapped = c.chooseImage
+	c.view.saveLog.OnTapped = c.exportLog
 	c.view.format.OnTapped = c.formatDevice
 	c.view.start.OnTapped = c.startWrite
 	c.view.settings.OnTapped = c.showSettings
@@ -183,196 +180,6 @@ func (c *guiController) closeNow() {
 	}
 }
 
-// sourceCodeURL is shown in settings so users can obtain the corresponding
-// source code as required by the GPLv3.
-const sourceCodeURL = "https://github.com/KelenHappy/goflasher"
-
-// sourceCodeLink falls back to plain text if the URL cannot be parsed.
-func sourceCodeLink() fyne.CanvasObject {
-	u, err := url.Parse(sourceCodeURL)
-	if err != nil {
-		return widget.NewLabel(sourceCodeURL)
-	}
-	return widget.NewHyperlink(sourceCodeURL, u)
-}
-
-func (c *guiController) showSettings() {
-	languages := []settingChoice[i18n.Locale]{{"English", i18n.English}, {"繁體中文", i18n.TraditionalChinese}, {"简体中文", i18n.SimplifiedChinese}, {"日本語", i18n.Japanese}}
-	language := newSettingSelect(languages, c.tr.Locale(), func(locale i18n.Locale) {
-		c.app.Preferences().SetString(languagePreference, string(locale))
-		c.setLanguage(locale)
-	})
-	themes := []settingChoice[themeMode]{{c.tr.T("settings.theme.system"), themeModeSystem}, {c.tr.T("settings.theme.light"), themeModeLight}, {c.tr.T("settings.theme.dark"), themeModeDark}}
-	themeSelect := newSettingSelect(themes, loadThemeMode(c.app.Preferences()), c.setTheme)
-	scales := make([]settingChoice[float64], len(uiScaleChoices))
-	for i, choice := range uiScaleChoices {
-		scales[i] = settingChoice[float64]{uiScaleLabel(choice), choice}
-	}
-	scaleSelect := newSettingSelect(scales, loadUIScale(c.app.Preferences()), c.setUIScale)
-	content := container.NewGridWithColumns(2,
-		widget.NewLabel(c.tr.T("settings.language")), language,
-		widget.NewLabel(c.tr.T("settings.theme")), themeSelect,
-		widget.NewLabel(c.tr.T("settings.scale")), scaleSelect,
-		widget.NewLabel(c.tr.T("settings.source")), sourceCodeLink(),
-		widget.NewLabel(c.tr.T("settings.licenses")), widget.NewButton(c.tr.T("action.licenses"), c.showLicenses),
-	)
-	dialog.NewCustom(c.tr.T("settings.title"), c.tr.T("settings.close"), content, c.view.window).Show()
-}
-
-// showLicenses presents the embedded notices as a collapsed accordion. GPLv3
-// and LGPL require these texts to travel with the binary, so they are embedded
-// rather than linked; the accordion keeps the dialog usable with one entry per
-// component instead of one continuous wall of text.
-func (c *guiController) showLicenses() {
-	documents := legal.Documents()
-	items := make([]*widget.AccordionItem, 0, len(documents))
-	for _, document := range documents {
-		items = append(items, widget.NewAccordionItem(document.Title, licenseDetail(document.Body)))
-	}
-	accordion := widget.NewAccordion(items...)
-	// MultiOpen stays off so an opened entry collapses the previous one and the
-	// dialog never grows past the window.
-	panel := dialog.NewCustom(c.tr.T("licenses.title"), c.tr.T("settings.close"),
-		container.NewVScroll(accordion), c.view.window)
-	panel.Resize(licenseDialogSize(c.view.window.Canvas().Size()))
-	panel.Show()
-}
-
-// licenseDetail renders one license body at a fixed height so that opening a
-// long text scrolls within the entry rather than resizing the dialog.
-func licenseDetail(body string) fyne.CanvasObject {
-	text := widget.NewLabel(body)
-	text.Wrapping = fyne.TextWrapWord
-	text.TextStyle = fyne.TextStyle{Monospace: true}
-	detail := container.NewVScroll(text)
-	detail.SetMinSize(fyne.NewSize(0, em(licenseDetailHeightEm)))
-	return detail
-}
-
-const (
-	// licenseDetailHeightEm is the visible height of an opened license text.
-	licenseDetailHeightEm = 23
-	// licenseDialogMinWidthEm/HeightEm are the floor for windows too small to
-	// divide; licenseDialogCoverage leaves the parent visible around the dialog.
-	licenseDialogMinWidthEm  = 34
-	licenseDialogMinHeightEm = 28
-	licenseDialogCoverage    = 0.9
-)
-
-// licenseDialogSize fits the dialog to the window while leaving the parent
-// visible, and keeps a floor for windows too small to divide.
-func licenseDialogSize(canvas fyne.Size) fyne.Size {
-	width := max(canvas.Width*licenseDialogCoverage, em(licenseDialogMinWidthEm))
-	height := max(canvas.Height*licenseDialogCoverage, em(licenseDialogMinHeightEm))
-	return fyne.NewSize(width, height)
-}
-
-// settingChoice and newSettingSelect keep presentation labels separate from
-// persisted typed values. New settings can reuse this without JSON parsing or
-// allowing unvalidated configuration to reach privileged operations.
-type settingChoice[T comparable] struct {
-	label string
-	value T
-}
-
-func newSettingSelect[T comparable](choices []settingChoice[T], current T, changed func(T)) *widget.Select {
-	labels := make([]string, len(choices))
-	values := make(map[string]T, len(choices))
-	selected := ""
-	for i, choice := range choices {
-		labels[i] = choice.label
-		values[choice.label] = choice.value
-		if choice.value == current {
-			selected = choice.label
-		}
-	}
-	control := widget.NewSelect(labels, func(label string) { changed(values[label]) })
-	control.SetSelected(selected)
-	return control
-}
-
-func (c *guiController) setTheme(mode themeMode) {
-	c.app.Preferences().SetString(themePreference, string(mode))
-	c.applyTheme()
-}
-
-// setUIScale only rebuilds the theme: the ratio lives in its sizes, so every
-// open canvas re-lays out immediately while the window keeps its pixel size.
-func (c *guiController) setUIScale(scale float64) {
-	c.app.Preferences().SetFloat(scalePreference, knownUIScale(scale))
-	c.applyTheme()
-}
-
-func (c *guiController) applyTheme() {
-	preferences := c.app.Preferences()
-	c.app.Settings().SetTheme(newReadableTheme(loadThemeMode(preferences), loadUIScale(preferences)))
-}
-
-func (c *guiController) setLanguage(locale i18n.Locale) {
-	c.tr = i18n.New(string(locale))
-	configureFyneTranslations(string(locale))
-	c.translateControls()
-	c.translateSelectionDetails()
-	c.translateOperationStatus()
-	c.view.window.Content().Refresh()
-}
-
-func (c *guiController) translateControls() {
-	tr := c.tr
-	c.view.window.SetTitle(tr.T("window.title"))
-	c.view.verifyCheck.SetText(tr.T("option.verify"))
-	c.view.ejectCheck.SetText(tr.T("option.eject"))
-	c.view.start.SetText(tr.T(startActionKey(c.machine.State())))
-	c.view.format.SetText(tr.T("action.format_fat32"))
-	c.view.choose.SetText(tr.T("action.choose"))
-	c.view.refresh.SetText(tr.T("action.rescan"))
-	c.view.copyError.SetText(tr.T("action.copy_error"))
-	c.view.copyLog.SetText(tr.T("action.copy_log"))
-	c.view.settings.SetText(tr.T("action.settings"))
-	c.view.logPanel.Items[0].Title = tr.T("log.details")
-	c.view.deviceCard.SetTitle(tr.T("card.device"))
-	c.view.imageCard.SetTitle(tr.T("card.image"))
-	c.view.imageInfoCard.SetTitle(tr.T("card.image_info"))
-	c.view.optionsCard.SetTitle(tr.T("card.options"))
-	c.view.progressCard.SetTitle(tr.T("card.progress"))
-}
-
-func (c *guiController) translateSelectionDetails() {
-	tr := c.tr
-	if c.selected.Path == "" {
-		c.view.deviceDetail.SetText(tr.T("device.none"))
-	} else {
-		c.updateDeviceDetail()
-	}
-	if c.info.Path == "" {
-		c.view.imageInfo.SetText(tr.T("image.empty"))
-	} else {
-		c.view.imageInfo.SetText(tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
-	}
-}
-
-func (c *guiController) translateOperationStatus() {
-	if c.operation == operationFormatting {
-		c.translateFormatStatus()
-		return
-	}
-	if isReadyState(c.machine.State()) {
-		c.view.status.SetText(c.tr.T("status.ready"))
-		c.view.metrics.SetText(c.tr.T("metrics.empty"))
-	}
-}
-
-func (c *guiController) translateFormatStatus() {
-	status := "status.formatting"
-	metrics := c.tr.T("metrics.empty")
-	if c.formatProgress.Stage != "" {
-		status = "stage." + string(c.formatProgress.Stage)
-		metrics = c.tr.T("metrics.formatting", int(c.formatProgress.BytesProcessed))
-	}
-	c.view.status.SetText(c.tr.T(status))
-	c.view.metrics.SetText(metrics)
-}
-
 func isReadyState(state core.State) bool {
 	switch state {
 	case core.Idle, core.ImageSelected, core.DeviceSelected, core.Ready:
@@ -380,177 +187,6 @@ func isReadyState(state core.State) bool {
 	default:
 		return false
 	}
-}
-
-func (c *guiController) appendLog(message string) {
-	line := time.Now().Format("15:04:05 ") + message
-	fyne.Do(func() {
-		c.logLines = append(c.logLines, line)
-		const maxLogLines = 500
-		if len(c.logLines) > maxLogLines {
-			c.logLines = c.logLines[len(c.logLines)-maxLogLines:]
-		}
-		c.view.logs.SetText(strings.Join(c.logLines, "\n"))
-	})
-}
-
-func deviceDisplay(d device.Device) string {
-	return fmt.Sprintf("%s %s · %.1f GB · %s", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path)
-}
-
-func (c *guiController) refresh() {
-	// A generation makes the most recently requested scan authoritative; device
-	// enumeration can otherwise complete out of order.
-	c.refreshGeneration++
-	generation := c.refreshGeneration
-	if c.refreshCancel != nil {
-		c.refreshCancel()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	c.refreshCancel = cancel
-	go func() {
-		list, report, err := c.backend.ListAllowedDevices(ctx)
-		fyne.Do(func() { c.finishRefresh(generation, list, report, err) })
-	}()
-}
-
-// finishRefresh runs on the Fyne thread and drops results from a superseded scan.
-func (c *guiController) finishRefresh(generation uint64, list []device.Device, report device.ScanReport, err error) {
-	if generation != c.refreshGeneration {
-		return
-	}
-	c.refreshCancel = nil
-	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			c.view.status.SetText(c.tr.T("error.devices", err))
-		}
-		return
-	}
-	c.showDevices(list, report)
-}
-
-func (c *guiController) showDevices(list []device.Device, report device.ScanReport) {
-	c.devices = list
-	options := make([]string, len(list))
-	for i, d := range list {
-		options[i] = deviceDisplay(d)
-	}
-	c.view.deviceSelect.Options = options
-	c.view.deviceSelect.Refresh()
-	c.reconcileSelection()
-	c.appendLog(c.tr.T("log.devices", len(list)))
-	// A device that failed inspection never reaches the list, so without this
-	// line an unreadable device and an absent one look identical to the user.
-	if report.Skipped > 0 {
-		c.appendLog(c.tr.T("log.devices.skipped", report.Skipped))
-	}
-}
-
-func (c *guiController) selectDevice(value string) {
-	for _, d := range c.devices {
-		if deviceDisplay(d) != value {
-			continue
-		}
-		c.selected = d
-		c.updateDeviceDetail()
-		advanceSelection(c.machine, c.info.Path != "", core.ImageSelected, core.DeviceSelected)
-		c.view.format.Enable()
-		return
-	}
-}
-
-// reconcileSelection matches the selected device against a new scan. A device
-// that is still present is replaced by its fresh snapshot; one that is gone is
-// deselected, so the confirmation dialog never describes a removed device. An
-// active operation keeps its own copy of the target and is left alone.
-func (c *guiController) reconcileSelection() {
-	if c.selected.Path == "" || c.busy() {
-		return
-	}
-	for _, d := range c.devices {
-		if device.SameIdentity(c.selected, d) && d.Size == c.selected.Size {
-			c.selected = d
-			c.view.deviceSelect.SetSelected(deviceDisplay(d))
-			c.updateDeviceDetail()
-			return
-		}
-	}
-	c.forgetDevice()
-}
-
-func (c *guiController) forgetDevice() {
-	c.selected = device.Device{}
-	c.view.deviceSelect.ClearSelected()
-	c.view.deviceDetail.SetText(c.tr.T("device.none"))
-	c.view.format.Disable()
-	retreatSelection(c.machine, c.info.Path != "")
-	c.view.start.SetText(c.tr.T(startActionKey(c.machine.State())))
-}
-
-// retreatSelection returns an idle or finished machine to the state for "no
-// device selected", keeping the image selection when there is one.
-func retreatSelection(machine *core.StateMachine, imageSelected bool) {
-	switch machine.State() {
-	case core.Ready, core.DeviceSelected, core.Completed, core.Cancelled, core.Failed:
-		_ = machine.Transition(core.Idle)
-	default:
-		return
-	}
-	if imageSelected {
-		_ = machine.Transition(core.ImageSelected)
-	}
-}
-
-// updateDeviceDetail deliberately avoids selectDevice: changing presentation
-// must not alter the state machine or unlock formatting during an operation.
-func (c *guiController) updateDeviceDetail() {
-	d := c.selected
-	c.view.deviceDetail.SetText(c.tr.T("device.details", d.Vendor, d.Model, float64(d.Size)/1e9, d.Path, d.Serial, localBool(c.tr, d.IsCardReader), localBool(c.tr, d.Mounted), d.PartitionCount))
-}
-
-// imagePickerLabels holds the localized text shown by the image chooser.
-type imagePickerLabels struct {
-	Title   string
-	Accept  string
-	Dismiss string
-	Filter  string
-}
-
-func (c *guiController) chooseImage() {
-	c.view.choose.Disable()
-	labels := imagePickerLabels{
-		Title:   c.tr.T("picker.image.title"),
-		Accept:  c.tr.T("picker.image.accept"),
-		Dismiss: c.tr.T("action.cancel"),
-		Filter:  c.tr.T("filter.images"),
-	}
-	openImage(c.view.window, labels, func(path string, err error) {
-		c.view.choose.Enable()
-		if err != nil {
-			dialog.ShowError(err, c.view.window)
-			return
-		}
-		if path != "" {
-			c.detectImage(path)
-		}
-	})
-}
-
-func (c *guiController) detectImage(path string) {
-	go func() {
-		detected, err := image.Detect(path)
-		if err != nil {
-			fyne.Do(func() { dialog.ShowError(err, c.view.window) })
-			return
-		}
-		fyne.Do(func() {
-			c.info = detected
-			c.view.imagePath.SetText(path)
-			c.view.imageInfo.SetText(c.tr.T("image.details", c.info.Format, c.info.Compression, float64(c.info.CompressedSize)/(1<<20)))
-			advanceSelection(c.machine, c.selected.Path != "", core.DeviceSelected, core.ImageSelected)
-			c.appendLog(c.tr.T("log.image", filepath.Base(path)))
-		})
-	}()
 }
 
 func (c *guiController) lock(locked bool) {
@@ -569,372 +205,10 @@ func (c *guiController) lock(locked bool) {
 	}
 }
 
-func (c *guiController) formatDevice() {
-	formatter, ok := c.backend.(device.FAT32Formatter)
-	if !ok || c.selected.Path == "" {
-		dialog.ShowInformation(c.tr.T("dialog.not_ready.title"), c.tr.T("dialog.format.not_ready"), c.view.window)
-		return
-	}
-	body := widget.NewLabel(c.tr.T("format.confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial))
-	body.Wrapping = fyne.TextWrapWord
-	confirm := dialog.NewCustomConfirm(c.tr.T("format.confirm.title"), c.tr.T("format.confirm.accept"), c.tr.T("action.cancel"), body, func(ok bool) {
-		if ok {
-			c.runFormat(formatter, c.selected)
-		}
-	}, c.view.window)
-	confirm.SetDismissText(c.tr.T("action.cancel"))
-	confirm.Show()
-}
-
-func (c *guiController) runFormat(formatter device.FAT32Formatter, target device.Device) {
-	if c.busy() {
-		return
-	}
-	c.operation = operationFormatting
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	c.formatProgress = progress.Update{}
-	c.lock(true)
-	c.view.start.Disable()
-	c.view.status.SetText(c.tr.T("status.formatting"))
-	c.view.bar.SetValue(0)
-	c.view.bar.Show()
-	c.view.metrics.SetText(c.tr.T("metrics.empty"))
-	c.appendLog(c.tr.T("log.format.start", target.Path))
-	updates := make(chan progress.Update, 100)
-	progressDone := make(chan struct{})
-	go func() {
-		c.consumeFormatProgress(updates)
-		close(progressDone)
-	}()
-	go func() {
-		err := formatter.FormatFAT32(ctx, target, "GOFLASHER", updates)
-		close(updates)
-		<-progressDone
-		fyne.Do(func() { c.finishFormat(err) })
-	}()
-}
-
-func (c *guiController) consumeFormatProgress(updates <-chan progress.Update) {
-	for update := range updates {
-		u := update
-		fyne.Do(func() {
-			c.formatProgress = u
-			c.view.bar.SetValue(overallProgress(u, false))
-			c.view.status.SetText(c.tr.T("stage." + string(u.Stage)))
-			c.view.metrics.SetText(c.tr.T("metrics.formatting", int(u.BytesProcessed)))
-		})
-	}
-}
-
-func (c *guiController) finishFormat(err error) {
-	c.cancel = nil
-	c.operation = operationNone
-	c.formatProgress = progress.Update{}
-	c.lock(false)
-	c.view.start.Enable()
-	if c.closing {
-		c.closeNow()
-		return
-	}
-	c.view.bar.Show()
-	if err != nil {
-		c.view.status.SetText(c.tr.T("status.failed", err))
-		c.appendLog(c.tr.T("log.error", err))
-		c.view.copyError.Show()
-		dialog.ShowError(err, c.view.window)
-		return
-	}
-	c.view.status.SetText(c.tr.T("status.format.complete"))
-	c.view.bar.SetValue(1)
-	c.appendLog(c.tr.T("log.format.complete"))
-	c.refresh()
-}
-
-func (c *guiController) startWrite() {
-	if c.operation != operationNone {
-		return
-	}
-	resetFinishedState(c.machine)
-	if writingState(c.machine.State()) {
-		c.cancelWrite()
-		return
-	}
-	if c.machine.State() != core.Ready {
-		dialog.ShowInformation(c.tr.T("dialog.not_ready.title"), c.tr.T("dialog.not_ready.body"), c.view.window)
-		return
-	}
-	_ = c.machine.Transition(core.Confirming)
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	c.lock(true)
-	c.view.start.SetText(c.tr.T("action.cancel"))
-	c.view.status.SetText(c.tr.T("stage.inspecting"))
-	c.view.bar.Show()
-	c.view.bar.SetValue(0)
-	go func() {
-		preview, err := (&core.Service{Backend: c.backend}).Preview(ctx, c.info, c.selected)
-		fyne.Do(func() { c.finishPreview(preview, err) })
-	}()
-}
-
-func (c *guiController) finishPreview(preview core.PlanSummary, err error) {
-	c.cancel = nil
-	if c.closing {
-		c.closeNow()
-		return
-	}
-	if err != nil {
-		c.finishPreviewError(err)
-		return
-	}
-	c.installerRun = preview.Class == string(core.ImageWindowsISO)
-	body := widget.NewLabel(c.previewConfirmationText(preview))
-	body.Wrapping = fyne.TextWrapWord
-	confirm := dialog.NewCustomConfirm(c.tr.T("confirm.title"), c.tr.T("confirm.accept"), c.tr.T("action.cancel"), body, c.confirmWrite, c.view.window)
-	confirm.SetDismissText(c.tr.T("action.cancel"))
-	confirm.Show()
-}
-
-func (c *guiController) finishPreviewError(err error) {
-	_ = c.machine.Transition(core.Ready)
-	c.lock(false)
-	c.view.start.SetText(c.tr.T("action.start"))
-	if errors.Is(err, context.Canceled) {
-		c.view.status.SetText(c.tr.T("status.cancelled"))
-		return
-	}
-	dialog.ShowError(fmt.Errorf("%s: %w", c.tr.T(core.ErrorMessageID(err)), err), c.view.window)
-}
-
-func (c *guiController) previewConfirmationText(preview core.PlanSummary) string {
-	bodyText := c.tr.T("confirm.body", c.selected.Vendor, c.selected.Model, c.selected.Path, float64(c.selected.Size)/1e9, c.selected.Serial, filepath.Base(c.info.Path), float64(c.info.CompressedSize)/(1<<20))
-	if preview.Class == string(core.ImageWindowsISO) {
-		split, reason := c.localizedSplitPlan(preview.SplitRequired)
-		bodyText += "\n\n" + c.tr.T("plan.windows.summary", preview.PartitionTable, preview.Filesystem, preview.BootMode, split, reason, float64(preview.RequiredCapacity)/(1<<30), float64(preview.RequiredTemporarySpace)/(1<<30), float64(preview.AvailableTemporarySpace)/(1<<30))
-	}
-	return bodyText
-}
-
-func (c *guiController) localizedSplitPlan(required bool) (string, string) {
-	if required {
-		return c.tr.T("bool.true"), c.tr.T("plan.split.reason.fat32")
-	}
-	return c.tr.T("bool.false"), c.tr.T("plan.split.reason.none")
-}
-
 // busy reports whether a format or write owns the target, either still
 // starting up (operation) or already driving the state machine.
 func (c *guiController) busy() bool {
 	return c.operation != operationNone || writingState(c.machine.State())
-}
-
-func writingState(state core.State) bool {
-	switch state {
-	case core.Confirming, core.Inspecting, core.Planning, core.StagingWIM,
-		core.SplittingWIM, core.Partitioning, core.Formatting, core.Extracting,
-		core.Writing, core.Flushing, core.Verifying, core.VerifyingFilesystem,
-		core.Ejecting, core.Unmounting:
-		return true
-	default:
-		return false
-	}
-}
-
-func startActionKey(state core.State) string {
-	switch {
-	case writingState(state):
-		return "action.cancel"
-	case state == core.Completed:
-		return "action.restart"
-	case state == core.Cancelled || state == core.Failed:
-		return "action.retry"
-	default:
-		return "action.start"
-	}
-}
-
-func (c *guiController) cancelWrite() {
-	if c.cancel != nil {
-		c.cancel()
-		c.view.status.SetText(c.tr.T("status.cancelling"))
-		c.appendLog(c.tr.T("log.cancel"))
-	}
-}
-
-func (c *guiController) confirmWrite(ok bool) {
-	if !ok {
-		_ = c.machine.Transition(core.Ready)
-		c.lock(false)
-		c.view.start.SetText(c.tr.T("action.start"))
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	c.view.start.SetText(c.tr.T("action.cancel"))
-	c.view.status.SetText(c.tr.T("status.preparing"))
-	c.view.bar.Show()
-	c.view.bar.SetValue(0)
-	c.appendLog(c.tr.T("log.start"))
-	updates := make(chan progress.Update, 32)
-	progressDone := make(chan struct{})
-	go func() {
-		c.consumeWriteProgress(updates)
-		close(progressDone)
-	}()
-	go func() {
-		result, err := (&core.Service{Backend: c.backend, State: c.machine}).Run(ctx, core.RunRequest{Image: c.info, Target: c.selected, Options: core.RunOptions{Verify: c.view.verifyCheck.Checked, Eject: c.view.ejectCheck.Checked}, Updates: updates})
-		close(updates)
-		<-progressDone
-		fyne.Do(func() { c.finishWrite(result, err) })
-	}()
-}
-
-func (c *guiController) consumeWriteProgress(updates <-chan progress.Update) {
-	for update := range updates {
-		u := update
-		fyne.Do(func() {
-			c.view.status.SetText(c.tr.T("stage." + string(u.Stage)))
-			c.view.bar.SetValue(c.runProgress(u))
-			c.view.metrics.SetText(c.progressMetrics(u))
-		})
-	}
-}
-
-func (c *guiController) finishWrite(result core.RunResult, runErr error) {
-	c.cancel = nil
-	if c.closing {
-		c.closeNow()
-		return
-	}
-	if runErr != nil {
-		c.showWriteFailure(runErr)
-	} else {
-		c.showWriteSuccess(result)
-	}
-	c.lock(false)
-}
-
-func (c *guiController) showWriteFailure(runErr error) {
-	c.view.status.SetText(c.tr.T("status.failed", userError(c.tr, runErr)))
-	c.appendLog(c.tr.T("log.error", runErr))
-	c.view.copyError.Show()
-	if c.machine.State() == core.Cancelled {
-		c.view.status.SetText(c.tr.T("status.cancelled"))
-	}
-	c.view.start.SetText(c.tr.T("action.retry"))
-}
-
-func (c *guiController) showWriteSuccess(result core.RunResult) {
-	c.view.status.SetText(c.tr.T("status.complete"))
-	c.view.bar.SetValue(1)
-	if result.PlanKind == core.PlanWindowsInstaller {
-		c.appendLog(c.tr.T("log.installer.complete", result.FilesWritten, result.WIMParts, localBool(c.tr, result.SemanticVerified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
-	} else {
-		c.appendLog(c.tr.T("log.complete", result.BytesWritten, localBool(c.tr, result.Verified), localBool(c.tr, result.Ejected), result.Elapsed.Round(time.Second)))
-	}
-	c.view.metrics.SetText(c.tr.T("metrics.complete", result.AverageBytesPerSecond/(1<<20), result.Elapsed.Round(time.Second)))
-	c.view.start.SetText(c.tr.T("action.restart"))
-}
-
-func (c *guiController) runProgress(update progress.Update) float64 {
-	if c.installerRun {
-		return installerProgress(update)
-	}
-	return overallProgress(update, c.view.verifyCheck.Checked)
-}
-
-func (c *guiController) progressMetrics(update progress.Update) string {
-	switch {
-	case update.TotalBytes > 0:
-		return c.tr.T("metrics.progress", update.BytesPerSecond/(1<<20), float64(update.BytesProcessed)/(1<<20), update.ETA.Round(time.Second))
-	case update.Stage == progress.StageFlushing, update.Stage == progress.StageEjecting:
-		return c.tr.T("metrics.finalizing")
-	default:
-		return c.tr.T("metrics.empty")
-	}
-}
-
-// installerProgress maps the Windows installer stages onto one bar. The
-// installer always verifies its filesystem, independent of the raw-write
-// verify option. Staging, splitting, extraction and verification report bytes.
-func installerProgress(update progress.Update) float64 {
-	ratio := progressRatio(update)
-	switch update.Stage {
-	case progress.StageStagingWIM:
-		return 0.06 + ratio*0.05
-	case progress.StageSplittingWIM:
-		return 0.11 + ratio*0.04
-	case progress.StageExtracting:
-		return 0.20 + ratio*0.60
-	case progress.StageVerifyingFilesystem:
-		return 0.82 + ratio*0.13
-	default:
-		return installerStageProgress[update.Stage]
-	}
-}
-
-var installerStageProgress = map[progress.Stage]float64{
-	progress.StageInspecting:   0.02,
-	progress.StagePlanning:     0.05,
-	progress.StagePartitioning: 0.16,
-	progress.StageFormatting:   0.18,
-	progress.StageFlushing:     0.80,
-	progress.StageEjecting:     0.97,
-}
-
-func overallProgress(update progress.Update, verify bool) float64 {
-	ratio := progressRatio(update)
-	if verify {
-		return verifyProgress(update.Stage, ratio)
-	}
-	return writeProgress(update.Stage, ratio)
-}
-
-func progressRatio(update progress.Update) float64 {
-	if update.TotalBytes == 0 {
-		return 0
-	}
-	return min(float64(update.BytesProcessed)/float64(update.TotalBytes), 1)
-}
-
-func verifyProgress(stage progress.Stage, ratio float64) float64 {
-	switch stage {
-	case progress.StageWriting, progress.StageDecompressWriting:
-		return ratio * 0.45
-	case progress.StageFlushing:
-		return 0.45
-	case progress.StageVerifying:
-		return 0.45 + ratio*0.50
-	case progress.StageEjecting:
-		return 0.95
-	default:
-		return 0
-	}
-}
-
-func writeProgress(stage progress.Stage, ratio float64) float64 {
-	switch stage {
-	case progress.StageFormatting:
-		return ratio
-	case progress.StageExtracting:
-		return 0.30 + ratio*0.60
-	case progress.StageWriting, progress.StageDecompressWriting:
-		return ratio * 0.90
-	default:
-		return writeStageProgress[stage]
-	}
-}
-
-var writeStageProgress = map[progress.Stage]float64{
-	progress.StageInspecting:          0.02,
-	progress.StagePlanning:            0.05,
-	progress.StageStagingWIM:          0.10,
-	progress.StageSplittingWIM:        0.10,
-	progress.StagePartitioning:        0.15,
-	progress.StageFlushing:            0.90,
-	progress.StageVerifyingFilesystem: 0.94,
-	progress.StageEjecting:            0.95,
 }
 
 func advanceSelection(machine *core.StateMachine, counterpartSelected bool, waitingState, selectedState core.State) {
@@ -962,7 +236,7 @@ func windowContent(tr i18n.Localizer, v *applicationView) *fyne.Container {
 	v.imageInfoCard = widget.NewCard(tr.T("card.image_info"), "", v.imageInfo)
 	v.optionsCard = widget.NewCard(tr.T("card.options"), "", container.NewVBox(v.verifyCheck, v.ejectCheck))
 	v.progressCard = widget.NewCard(tr.T("card.progress"), "", container.NewVBox(v.status, v.bar, v.metrics))
-	actions := container.NewBorder(nil, nil, container.NewHBox(v.copyLog, v.copyError), v.start, v.logPanel)
+	actions := container.NewBorder(nil, nil, v.saveLog, v.start, v.logPanel)
 	return container.NewVBox(container.NewHBox(v.settings), v.deviceCard, v.imageCard, v.imageInfoCard, v.optionsCard, v.progressCard, actions)
 }
 

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -29,10 +30,10 @@ func (c *guiController) watchDevices() {
 	c.hotplug = &debouncer{delay: hotplugSettle, fn: func() { fyne.Do(c.hotplugRescan) }}
 	settle := c.hotplug
 	go func() {
-		err := watcher.WatchDevices(ctx, settle.trigger)
+		err := c.runRecovered("device watch", func() error { return watcher.WatchDevices(ctx, settle.trigger) })
 		settle.stop()
 		if err != nil {
-			fyne.Do(func() { c.appendLog(c.tr.T("log.hotplug.unavailable", err)) })
+			fyne.Do(func() { c.logEvent(slog.LevelWarn, "log.hotplug.unavailable", err) })
 		}
 	}()
 }

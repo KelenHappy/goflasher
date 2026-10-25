@@ -30,14 +30,29 @@ type objcAPI struct {
 
 // appKitClasses holds the Objective-C classes the picker needs.
 type appKitClasses struct {
-	pool, panel, nsString uintptr
+	pool, panel, savePanel, nsString uintptr
 }
 
-// OpenImage must create and run AppKit objects on one OS thread. Fyne invokes
-// the picker from its UI callback; LockOSThread prevents a Go reschedule while
-// the modal AppKit run loop is active.
+// OpenImage displays a single-file NSOpenPanel.
 func OpenImage(title, acceptLabel, filterName string) (string, error) {
 	_, _ = acceptLabel, filterName // image validation remains authoritative.
+	return runModalPanel(func(api objcAPI, classes appKitClasses) (uintptr, error) {
+		return newOpenPanel(api, classes, title)
+	})
+}
+
+// SaveLog displays an NSSavePanel with defaultName prefilled. AppKit asks
+// before replacing an existing file.
+func SaveLog(title, defaultName string) (string, error) {
+	return runModalPanel(func(api objcAPI, classes appKitClasses) (uintptr, error) {
+		return newSavePanel(api, classes, title, defaultName)
+	})
+}
+
+// runModalPanel must create and run AppKit objects on one OS thread. Fyne
+// invokes the picker from its UI callback; LockOSThread prevents a Go
+// reschedule while the modal AppKit run loop is active.
+func runModalPanel(newPanel func(objcAPI, appKitClasses) (uintptr, error)) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -57,7 +72,7 @@ func OpenImage(title, acceptLabel, filterName string) (string, error) {
 	}
 	defer api.msg0(pool, sel(api, "drain"))
 
-	panel, err := newOpenPanel(api, classes, title)
+	panel, err := newPanel(api, classes)
 	if err != nil {
 		return "", err
 	}
@@ -106,6 +121,7 @@ func lookupClasses(api objcAPI) (appKitClasses, error) {
 	}{
 		{"NSAutoreleasePool", &classes.pool},
 		{"NSOpenPanel", &classes.panel},
+		{"NSSavePanel", &classes.savePanel},
 		{"NSString", &classes.nsString},
 	}
 	for _, class := range required {
@@ -126,28 +142,46 @@ func newOpenPanel(api objcAPI, classes appKitClasses, title string) (uintptr, er
 	api.msg1bool(panel, sel(api, "setCanChooseFiles:"), true)
 	api.msg1bool(panel, sel(api, "setCanChooseDirectories:"), false)
 	api.msg1bool(panel, sel(api, "setAllowsMultipleSelection:"), false)
-	if title == "" {
-		return panel, nil
+	return panel, setPanelString(api, classes, panel, "setTitle:", title)
+}
+
+// newSavePanel creates an NSSavePanel with the optional title and file name.
+func newSavePanel(api objcAPI, classes appKitClasses, title, defaultName string) (uintptr, error) {
+	panel := api.msg0(classes.savePanel, sel(api, "savePanel"))
+	if panel == 0 {
+		return 0, errors.New("NSSavePanel.savePanel returned nil")
 	}
-	// The title is Go memory: passing it as *byte rather than uintptr keeps it
+	api.msg1bool(panel, sel(api, "setCanCreateDirectories:"), true)
+	if err := setPanelString(api, classes, panel, "setTitle:", title); err != nil {
+		return 0, err
+	}
+	return panel, setPanelString(api, classes, panel, "setNameFieldStringValue:", defaultName)
+}
+
+// setPanelString sends a non-empty value to a panel's NSString setter.
+func setPanelString(api objcAPI, classes appKitClasses, panel uintptr, setter, value string) error {
+	if value == "" {
+		return nil
+	}
+	// The value is Go memory: passing it as *byte rather than uintptr keeps it
 	// alive until objc_msgSend returns.
-	nsTitle := api.msg1UTF8(classes.nsString, sel(api, "stringWithUTF8String:"), cString(title))
-	if nsTitle == 0 {
-		return 0, errors.New("convert file picker title to NSString")
+	nsValue := api.msg1UTF8(classes.nsString, sel(api, "stringWithUTF8String:"), cString(value))
+	if nsValue == 0 {
+		return fmt.Errorf("convert file panel %s value to NSString", setter)
 	}
-	api.msg1ptr(panel, sel(api, "setTitle:"), nsTitle)
-	return panel, nil
+	api.msg1ptr(panel, sel(api, setter), nsValue)
+	return nil
 }
 
 // selectedPath copies the panel's chosen file system path into Go memory.
 func selectedPath(api objcAPI, panel uintptr) (string, error) {
 	url := api.msg0(panel, sel(api, "URL"))
 	if url == 0 {
-		return "", errors.New("NSOpenPanel returned no selected URL")
+		return "", errors.New("file panel returned no selected URL")
 	}
 	path := api.msg0(url, sel(api, "path"))
 	if path == 0 {
-		return "", errors.New("NSOpenPanel returned no selected URL")
+		return "", errors.New("file panel returned no selected URL")
 	}
 	z := api.msgUTF8(path, sel(api, "UTF8String"))
 	if z == nil {

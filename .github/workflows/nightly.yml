@@ -54,6 +54,39 @@ jobs:
             -fuzz FuzzSessionProtocolDecoder \
             -fuzztime 10s
 
+      # internal/image has several fuzz targets, so each -fuzz is anchored.
+      - name: Fuzz image classifier
+        run: |
+          go test \
+            ./internal/image \
+            -run '^$' \
+            -fuzz '^FuzzClassifyReader$' \
+            -fuzztime 10s
+
+      - name: Fuzz hybrid MBR scan
+        run: |
+          go test \
+            ./internal/image \
+            -run '^$' \
+            -fuzz '^FuzzHybridMBR$' \
+            -fuzztime 10s
+
+      - name: Fuzz gzip and xz decoding
+        run: |
+          go test \
+            ./internal/image \
+            -run '^$' \
+            -fuzz '^FuzzDecodedReader$' \
+            -fuzztime 10s
+
+      - name: Fuzz image name parser
+        run: |
+          go test \
+            ./internal/image \
+            -run '^$' \
+            -fuzz '^FuzzFormatFromName$' \
+            -fuzztime 10s
+
   vulnerabilities:
     name: Vulnerability scan
     runs-on: ubuntu-24.04

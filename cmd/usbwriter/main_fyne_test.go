@@ -216,7 +216,9 @@ func newTestController(t *testing.T) *guiController {
 	tr := i18n.New("en")
 	v := newApplicationView(tr, w)
 	w.SetContent(windowContent(tr, v))
-	return &guiController{tr: tr, view: v, machine: core.NewStateMachine(), app: a}
+	c := &guiController{tr: tr, view: v, machine: core.NewStateMachine(), app: a}
+	c.initLogging()
+	return c
 }
 
 func TestThemeSelectionIsPersisted(t *testing.T) {

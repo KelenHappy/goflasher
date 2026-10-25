@@ -9,3 +9,10 @@ import "github.com/goflasher/goflasher/internal/filepicker/darwin/native"
 func OpenImage(title, acceptLabel, filterName string) (string, error) {
 	return native.OpenImage(title, acceptLabel, filterName)
 }
+
+// SaveLog displays an AppKit NSSavePanel. AppKit owns the filter UI, so
+// filterName is intentionally unused on this platform.
+func SaveLog(title, defaultName, filterName string) (string, error) {
+	_ = filterName
+	return native.SaveLog(title, defaultName)
+}

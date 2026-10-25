@@ -10,3 +10,6 @@ var ErrUnsupported = errors.New("native image chooser is not implemented on this
 // OpenImage keeps the UI-facing API portable on platforms without a native
 // implementation, without importing Linux or Windows dependencies.
 func OpenImage(_, _, _ string) (string, error) { return "", ErrUnsupported }
+
+// SaveLog mirrors OpenImage on platforms without a native save dialog.
+func SaveLog(_, _, _ string) (string, error) { return "", ErrUnsupported }

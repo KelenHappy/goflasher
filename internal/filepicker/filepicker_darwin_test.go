@@ -9,4 +9,8 @@ func TestDarwinPickerHasStableSignature(t *testing.T) {
 	if picker == nil {
 		t.Fatal("OpenImage is nil")
 	}
+	var saver func(string, string, string) (string, error) = SaveLog
+	if saver == nil {
+		t.Fatal("SaveLog is nil")
+	}
 }

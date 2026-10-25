@@ -32,7 +32,10 @@ on Linux, Windows, and macOS.**
   choosers on Windows and macOS.
 - Display the interface in English, Traditional Chinese, Simplified Chinese, or
   Japanese.
-- Keep a copyable, bounded activity log in the application.
+- Keep a bounded activity log in the application that can be saved on request
+  as a `.log` file with extra diagnostics. Saved logs redact device serial
+  numbers, the home directory, and the folders of chosen images and saved logs,
+  keeping only file names. No log file is written automatically.
 - Restrict targets to removable USB flash media or card readers. On Linux,
   generic `usb-storage` media up to 128 GB is accepted when udev omits its
   flash-drive classification.
