@@ -88,6 +88,28 @@ func (m *darwinManager) List(ctx context.Context) ([]Disk, int, error) {
 	return out, skipped, nil
 }
 
+// diskWatcher is implemented by probes that follow Disk Arbitration's
+// appeared and disappeared notifications.
+type diskWatcher interface {
+	WatchDisks(context.Context, func()) error
+}
+
+var _ Watcher = (*darwinManager)(nil)
+
+// Watch follows Disk Arbitration until ctx is done. Every appeared or
+// disappeared disk, partition and volume is reported, including the disks
+// already present when watching starts.
+func (m *darwinManager) Watch(ctx context.Context, changed func()) error {
+	w, ok := m.probe.(diskWatcher)
+	if m.openErr != nil || !ok {
+		return fmt.Errorf("watch native Darwin disks: %w", errors.Join(ErrUnsupported, m.openErr))
+	}
+	if err := w.WatchDisks(ctx, changed); err != nil {
+		return fmt.Errorf("watch native Darwin disks: %w", err)
+	}
+	return nil
+}
+
 func (m *darwinManager) Refresh(ctx context.Context, id string) (Disk, error) {
 	all, _, err := m.List(ctx)
 	if err != nil {

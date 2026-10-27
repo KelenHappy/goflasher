@@ -49,12 +49,16 @@ func loadLibraries() (libraries, error) {
 // symbolValue reads the pointer stored at an exported symbol, which is how the
 // framework constants (CFStringRef globals such as kDADiskDescriptionMediaSize)
 // are fetched. The address comes from dlsym and points into the mapped dylib,
-// never into Go memory, so the Go collector neither moves nor frees it; go vet
-// still reports the uintptr conversion because it cannot see that provenance.
+// never into Go memory, so the Go collector neither moves nor frees it. It is
+// reinterpreted through the variable holding it rather than converted from
+// uintptr, a conversion go vet cannot prove safe without that provenance.
 func symbolValue(lib uintptr, name string) (uintptr, error) {
 	p, e := purego.Dlsym(lib, name)
 	if e != nil {
 		return 0, e
 	}
-	return *(*uintptr)(unsafe.Pointer(p)), nil
+	if p == 0 {
+		return 0, fmt.Errorf("symbol %s has no address", name)
+	}
+	return **(**uintptr)(unsafe.Pointer(&p)), nil
 }

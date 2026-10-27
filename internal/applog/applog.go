@@ -128,7 +128,7 @@ func (r *redactor) add(next rule) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, s := range []string{next.secret, filepath.ToSlash(next.secret), strings.ReplaceAll(next.secret, "/", `\`)} {
+	for _, s := range []string{next.secret, strings.ReplaceAll(next.secret, `\`, "/"), strings.ReplaceAll(next.secret, "/", `\`)} {
 		if !slices.ContainsFunc(r.rules, func(existing rule) bool { return strings.EqualFold(existing.secret, s) }) {
 			r.rules = append(r.rules, rule{secret: s, replacement: next.replacement})
 		}

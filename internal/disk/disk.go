@@ -91,3 +91,12 @@ type Manager interface {
 	Unmount(context.Context, Disk) error
 	Eject(context.Context, Disk) error
 }
+
+// Watcher is implemented by managers that can tell when disks may have been
+// attached or detached.
+type Watcher interface {
+	// Watch calls changed, possibly from several goroutines at once, whenever
+	// the set of disks may have changed. It returns nil once ctx is done, or
+	// an error if watching cannot start or stops.
+	Watch(ctx context.Context, changed func()) error
+}

@@ -114,6 +114,21 @@ else
 fi
 
 #
+# Application icon. Finder and the Dock read CFBundleIconFile; the window icon
+# Fyne embeds does not reach either on macOS.
+#
+
+ICONSET=$(mktemp -d "${TMPDIR:-/tmp}/goflasher-icon.XXXXXX")/AppIcon.iconset
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$ROOT/cmd/usbwriter/Icon.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  double=$((size * 2))
+  sips -z "$double" "$double" "$ROOT/cmd/usbwriter/Icon.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
+rm -rf "$(dirname "$ICONSET")"
+
+#
 # Application metadata.
 #
 
@@ -130,6 +145,9 @@ cat >"$CONTENTS/Info.plist" <<PLIST
 
   <key>CFBundleName</key>
   <string>GoFlasher</string>
+
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
 
   <key>CFBundlePackageType</key>
   <string>APPL</string>

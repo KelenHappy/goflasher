@@ -11,8 +11,7 @@ import (
 // openImage ignores labels.Dismiss because the operating system owns the
 // native cancel label.
 func openImage(_ fyne.Window, labels imagePickerLabels, done func(string, error)) {
-	go func() {
-		path, err := filepicker.OpenImage(labels.Title, labels.Accept, labels.Filter)
-		fyne.Do(func() { done(path, err) })
-	}()
+	runNativeDialog(func() (string, error) {
+		return filepicker.OpenImage(labels.Title, labels.Accept, labels.Filter)
+	}, done)
 }

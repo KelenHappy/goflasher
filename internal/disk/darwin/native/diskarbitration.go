@@ -21,6 +21,7 @@ type daAPI struct {
 	diskCopyDescription func(uintptr) uintptr
 	diskGetBSDName      func(uintptr) *byte
 	registerAppeared    func(uintptr, uintptr, uintptr, uintptr)
+	registerDisappeared func(uintptr, uintptr, uintptr, uintptr)
 	unregisterCallback  func(uintptr, uintptr, uintptr)
 	scheduleRunLoop     func(uintptr, uintptr, uintptr)
 	unscheduleRunLoop   func(uintptr, uintptr, uintptr)
@@ -40,6 +41,7 @@ func bindDA(lib uintptr) (daBindings, error) {
 	purego.RegisterLibFunc(&d.api.diskCopyDescription, lib, "DADiskCopyDescription")
 	purego.RegisterLibFunc(&d.api.diskGetBSDName, lib, "DADiskGetBSDName")
 	purego.RegisterLibFunc(&d.api.registerAppeared, lib, "DARegisterDiskAppearedCallback")
+	purego.RegisterLibFunc(&d.api.registerDisappeared, lib, "DARegisterDiskDisappearedCallback")
 	purego.RegisterLibFunc(&d.api.unregisterCallback, lib, "DAUnregisterCallback")
 	purego.RegisterLibFunc(&d.api.scheduleRunLoop, lib, "DASessionScheduleWithRunLoop")
 	purego.RegisterLibFunc(&d.api.unscheduleRunLoop, lib, "DASessionUnscheduleFromRunLoop")

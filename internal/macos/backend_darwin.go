@@ -14,7 +14,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
+	"github.com/goflasher/goflasher/internal/blockio"
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/disk"
 	"github.com/goflasher/goflasher/internal/fat32"
@@ -26,6 +28,9 @@ var (
 	ErrSystemDisk        = disk.ErrSystemDisk
 	ErrDeviceChanged     = disk.ErrChanged
 	ErrUnmountFailed     = disk.ErrUnmountFailed
+	// ErrUnsupportedSectorSize reports a raw disk whose logical sector size
+	// the installer builder cannot lay out.
+	ErrUnsupportedSectorSize = errors.New("unsupported logical sector size")
 )
 
 const formatTimeout = 10 * time.Minute
@@ -41,11 +46,13 @@ type backend struct {
 	openFormat func(string) (formatTarget, error)
 	fstat      func(int, *syscall.Stat_t) error
 	stat       func(string, *syscall.Stat_t) error
+	blockSize  func(uintptr) (uint32, error)
 }
 
 var (
 	_ device.Backend                 = (*backend)(nil)
 	_ device.WindowsInstallerBackend = (*backend)(nil)
+	_ device.HotplugBackend          = (*backend)(nil)
 )
 
 func NewBackend() *backend { return NewBackendWithManager(disk.NewManager()) }
@@ -123,6 +130,16 @@ func (b *backend) diskSnapshot(ctx context.Context, selected device.Device) (dis
 		return disk.Disk{}, ErrDeviceChanged
 	}
 	return d, nil
+}
+
+// WatchDevices follows Disk Arbitration through the disk manager, which owns
+// every native handle. A manager that cannot watch reports disk.ErrUnsupported.
+func (b *backend) WatchDevices(ctx context.Context, changed func()) error {
+	w, ok := b.manager.(disk.Watcher)
+	if !ok {
+		return fmt.Errorf("watch devices: %w", disk.ErrUnsupported)
+	}
+	return w.Watch(ctx, changed)
 }
 func (b *backend) Unmount(ctx context.Context, selected device.Device) error {
 	d, err := b.diskSnapshot(ctx, selected)
@@ -231,18 +248,79 @@ func (b *backend) OpenReader(ctx context.Context, d device.Device) (io.ReadClose
 	return b.open(ctx, d, os.O_RDONLY)
 }
 
-// OpenInstallerTarget returns the same identity-bound, exclusively opened raw
+// OpenInstallerTarget opens the same identity-bound, exclusively locked raw
 // descriptor used by the ordinary writer. The installer executor subsequently
 // narrows this whole-device session with gpt.NewPartitionWriterAt; no mounted
 // filesystem or command-line formatting tool participates in the build.
 func (b *backend) OpenInstallerTarget(ctx context.Context, d device.Device) (device.InstallerTarget, error) {
-	return b.open(ctx, d, os.O_RDWR)
+	return b.openInstallerSession(ctx, d, os.O_RDWR)
 }
 
 // OpenInstallerReader re-runs Disk Arbitration/IOKit identity validation and
 // opens an independent descriptor for semantic read-back verification.
 func (b *backend) OpenInstallerReader(ctx context.Context, d device.Device) (device.InstallerReader, error) {
-	return b.open(ctx, d, os.O_RDONLY)
+	return b.openInstallerSession(ctx, d, os.O_RDONLY)
+}
+
+// installerSectorSize is the only logical sector size the installer's GPT
+// layout is computed for; any other geometry fails closed.
+const installerSectorSize = 512
+
+// dkiocGetBlockSize is DKIOCGETBLOCKSIZE, _IOR('d', 24, uint32_t) in
+// <sys/disk.h>: the logical sector size of a disk device.
+const dkiocGetBlockSize = 0x40046418
+
+// installerSession is a raw disk descriptor narrowed for the installer
+// builder. /dev/rdisk* accepts only whole-sector requests at sector-aligned
+// offsets, while the FAT32 builder and verifier address individual bytes, so
+// all I/O passes through a read-modify-write adapter bounded by the validated
+// disk size.
+type installerSession struct {
+	*blockio.Aligned
+	file *os.File
+}
+
+func (s *installerSession) Sync() error  { return s.file.Sync() }
+func (s *installerSession) Close() error { return s.file.Close() }
+
+func (b *backend) openInstallerSession(ctx context.Context, d device.Device, flag int) (*installerSession, error) {
+	f, err := b.open(ctx, d, flag)
+	if err != nil {
+		return nil, err
+	}
+	session, err := b.newInstallerSession(f, d.Size)
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	return session, nil
+}
+
+func (b *backend) newInstallerSession(f *os.File, size uint64) (*installerSession, error) {
+	blockSize := b.blockSize
+	if blockSize == nil {
+		blockSize = deviceBlockSize
+	}
+	sector, err := blockSize(f.Fd())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSectorSize, err)
+	}
+	if sector != installerSectorSize {
+		return nil, fmt.Errorf("%w: %d bytes", ErrUnsupportedSectorSize, sector)
+	}
+	disk, err := blockio.NewAligned(f, sector, size)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSectorSize, err)
+	}
+	return &installerSession{Aligned: disk, file: f}, nil
+}
+
+// deviceBlockSize asks the disk driver behind fd for its logical sector size.
+func deviceBlockSize(fd uintptr) (uint32, error) {
+	var size uint32
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, dkiocGetBlockSize, uintptr(unsafe.Pointer(&size))); errno != 0 {
+		return 0, fmt.Errorf("DKIOCGETBLOCKSIZE: %w", errno)
+	}
+	return size, nil
 }
 func (b *backend) Flush(ctx context.Context, d device.Device) error {
 	f, err := b.open(ctx, d, os.O_WRONLY)

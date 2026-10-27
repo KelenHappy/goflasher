@@ -56,9 +56,10 @@ func SaveLog(title, defaultName string) (string, error) {
 	})
 }
 
-// runModalPanel must create and run AppKit objects on one OS thread. Fyne
-// invokes the picker from its UI callback; LockOSThread prevents a Go
-// reschedule while the modal AppKit run loop is active.
+// runModalPanel must be called on the main thread: AppKit aborts the process
+// when a panel is created anywhere else. LockOSThread nests with the caller's
+// own lock and keeps the goroutine on that thread while the modal AppKit run
+// loop is active.
 func runModalPanel(newPanel func(appKit) (uintptr, error)) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

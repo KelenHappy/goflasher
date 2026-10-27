@@ -309,6 +309,7 @@ jobs:
           trap 'hdiutil detach "$mount"' EXIT
           test -x "$mount/GoFlasher.app/Contents/MacOS/GoFlasher"
           test -x "$mount/GoFlasher.app/Contents/Library/HelperTools/org.goflasher.helper"
+          test -s "$mount/GoFlasher.app/Contents/Resources/AppIcon.icns"
           packaging/legal/verify-release.sh "$mount/GoFlasher.app"
           plutil -lint "$mount/GoFlasher.app/Contents/Info.plist"
       - name: Generate checksum

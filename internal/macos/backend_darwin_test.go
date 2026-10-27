@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/goflasher/goflasher/internal/blockio"
 	"github.com/goflasher/goflasher/internal/device"
 	"github.com/goflasher/goflasher/internal/disk"
 )
@@ -187,7 +188,49 @@ func installerSessionTestBackend(t *testing.T) (*backend, device.Device, *[]int)
 	}
 	b.fstat = func(_ int, st *syscall.Stat_t) error { st.Mode, st.Rdev = syscall.S_IFCHR, 7; return nil }
 	b.stat = func(_ string, st *syscall.Stat_t) error { st.Mode, st.Rdev = syscall.S_IFCHR, 7; return nil }
+	b.blockSize = func(uintptr) (uint32, error) { return installerSectorSize, nil }
 	return b, selected, &flags
+}
+
+// The installer builder writes individual bytes, which /dev/rdisk* rejects
+// unless whole sectors are addressed; the session must patch around them.
+func TestInstallerTargetPreservesBytesAroundUnalignedWrite(t *testing.T) {
+	b, selected, _ := installerSessionTestBackend(t)
+	target, err := b.OpenInstallerTarget(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	if _, err := target.WriteAt([]byte("abc"), 510); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := b.OpenInstallerReader(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	got := make([]byte, 5)
+	if _, err := reader.ReadAt(got, 509); err != nil {
+		t.Fatal(err)
+	}
+	if want := "\x00abc\x00"; string(got) != want {
+		t.Fatalf("bytes 509..513 = %q, want %q", got, want)
+	}
+	if _, err := target.WriteAt([]byte("x"), int64(selected.Size)); !errors.Is(err, blockio.ErrOutOfRange) {
+		t.Fatalf("write past the disk: %v, want %v", err, blockio.ErrOutOfRange)
+	}
+}
+
+func TestInstallerSessionRejectsUnsupportedSectorSize(t *testing.T) {
+	b, selected, _ := installerSessionTestBackend(t)
+	b.blockSize = func(uintptr) (uint32, error) { return 4096, nil }
+	if _, err := b.OpenInstallerTarget(context.Background(), selected); !errors.Is(err, ErrUnsupportedSectorSize) {
+		t.Fatalf("4K-native disk: %v, want %v", err, ErrUnsupportedSectorSize)
+	}
+	b.blockSize = func(uintptr) (uint32, error) { return 0, syscall.ENOTTY }
+	if _, err := b.OpenInstallerReader(context.Background(), selected); !errors.Is(err, ErrUnsupportedSectorSize) {
+		t.Fatalf("geometry unavailable: %v, want %v", err, ErrUnsupportedSectorSize)
+	}
 }
 
 func requireAccessModes(t *testing.T, flags []int, expected ...int) {
@@ -213,5 +256,12 @@ func TestSkippedDisksReachScanReport(t *testing.T) {
 	}
 	if report.Skipped != 3 {
 		t.Fatalf("report.Skipped = %d, want 3", report.Skipped)
+	}
+}
+
+func TestWatchDevicesNeedsWatchingManager(t *testing.T) {
+	b := NewBackendWithManager(&fakeManager{current: safeDisk()})
+	if err := b.WatchDevices(context.Background(), func() {}); !errors.Is(err, disk.ErrUnsupported) {
+		t.Fatalf("WatchDevices = %v, want %v", err, disk.ErrUnsupported)
 	}
 }

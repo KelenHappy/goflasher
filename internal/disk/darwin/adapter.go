@@ -141,3 +141,14 @@ func (a *NativeAdapter) Eject(ctx context.Context, bsd string) error {
 	defer s.Close()
 	return s.Eject(ctx, bsd)
 }
+
+// WatchDisks calls changed whenever a disk may have appeared or disappeared,
+// until ctx is done, on an arbitration session of its own.
+func (a *NativeAdapter) WatchDisks(ctx context.Context, changed func()) error {
+	s, e := a.frameworks.NewSession()
+	if e != nil {
+		return e
+	}
+	defer s.Close()
+	return s.WatchDisks(ctx, changed)
+}

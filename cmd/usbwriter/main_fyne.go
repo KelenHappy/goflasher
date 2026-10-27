@@ -16,6 +16,7 @@ import (
 	core "github.com/goflasher/goflasher/internal/app"
 	"github.com/goflasher/goflasher/internal/applog"
 	"github.com/goflasher/goflasher/internal/device"
+	"github.com/goflasher/goflasher/internal/dockicon"
 	"github.com/goflasher/goflasher/internal/i18n"
 	"github.com/goflasher/goflasher/internal/image"
 	"github.com/goflasher/goflasher/internal/progress"
@@ -92,7 +93,8 @@ const (
 const languagePreference = "language"
 
 // appIcon is rendered from packaging/org.goflasher.usbwriter.svg. Plain
-// go build does not apply FyneApp.toml, so the window icon is set explicitly.
+// go build does not apply FyneApp.toml, so the window icon is set explicitly,
+// and on macOS the Dock icon too, which GLFW leaves to the application.
 //
 //go:embed Icon.png
 var appIcon []byte
@@ -100,6 +102,11 @@ var appIcon []byte
 func newGUIController(tr i18n.Localizer) *guiController {
 	a := app.NewWithID("org.goflasher.usbwriter")
 	a.SetIcon(fyne.NewStaticResource("Icon.png", appIcon))
+	a.Lifecycle().SetOnStarted(func() {
+		if err := dockicon.Set(appIcon); err != nil {
+			fyne.LogError("Could not set the Dock icon", err)
+		}
+	})
 	a.Settings().SetTheme(newReadableTheme(loadThemeMode(a.Preferences()), loadUIScale(a.Preferences())))
 	if saved := a.Preferences().String(languagePreference); saved != "" {
 		tr = i18n.New(saved)

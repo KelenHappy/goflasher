@@ -73,3 +73,37 @@ func TestDarwinProbeFailsClosed(t *testing.T) {
 		t.Fatal("missing operation identity was accepted")
 	}
 }
+
+type watchingDarwinProbe struct {
+	fakeDarwinProbe
+	watchErr error
+}
+
+func (w *watchingDarwinProbe) WatchDisks(_ context.Context, changed func()) error {
+	changed()
+	return w.watchErr
+}
+
+func TestDarwinManagerWatchForwardsToProbe(t *testing.T) {
+	calls := 0
+	m := &darwinManager{probe: &watchingDarwinProbe{}}
+	if err := m.Watch(context.Background(), func() { calls++ }); err != nil || calls != 1 {
+		t.Fatalf("Watch = %v with %d calls, want nil and 1", err, calls)
+	}
+	failure := errors.New("session failed")
+	m = &darwinManager{probe: &watchingDarwinProbe{watchErr: failure}}
+	if err := m.Watch(context.Background(), func() {}); !errors.Is(err, failure) {
+		t.Fatalf("Watch = %v, want %v", err, failure)
+	}
+}
+
+func TestDarwinManagerWatchWithoutNativeSupport(t *testing.T) {
+	for _, m := range []*darwinManager{
+		{probe: &fakeDarwinProbe{}},
+		{probe: &watchingDarwinProbe{}, openErr: errors.New("frameworks unavailable")},
+	} {
+		if err := m.Watch(context.Background(), func() {}); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("Watch = %v, want %v", err, ErrUnsupported)
+		}
+	}
+}
