@@ -4,6 +4,7 @@ package main
 
 import (
 	"net/url"
+	"runtime/debug"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -27,6 +28,14 @@ func sourceCodeLink() fyne.CanvasObject {
 	return widget.NewHyperlink(sourceCodeURL, u)
 }
 
+// versionLabel shows the same build string as the saved log header, and is
+// selectable so users can paste it into a report.
+func versionLabel() fyne.CanvasObject {
+	label := widget.NewLabel(buildDescription(debug.ReadBuildInfo()))
+	label.Selectable = true
+	return label
+}
+
 func (c *guiController) showSettings() {
 	languages := []settingChoice[i18n.Locale]{{"English", i18n.English}, {"繁體中文", i18n.TraditionalChinese}, {"简体中文", i18n.SimplifiedChinese}, {"日本語", i18n.Japanese}}
 	language := newSettingSelect(languages, c.tr.Locale(), func(locale i18n.Locale) {
@@ -44,6 +53,7 @@ func (c *guiController) showSettings() {
 		widget.NewLabel(c.tr.T("settings.language")), language,
 		widget.NewLabel(c.tr.T("settings.theme")), themeSelect,
 		widget.NewLabel(c.tr.T("settings.scale")), scaleSelect,
+		widget.NewLabel(c.tr.T("settings.version")), versionLabel(),
 		widget.NewLabel(c.tr.T("settings.source")), sourceCodeLink(),
 		widget.NewLabel(c.tr.T("settings.licenses")), widget.NewButton(c.tr.T("action.licenses"), c.showLicenses),
 	)

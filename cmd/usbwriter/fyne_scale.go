@@ -13,6 +13,10 @@ import (
 const (
 	scalePreference = "ui.scale"
 	defaultUIScale  = 1.0
+	// uiScaleBaseline is what 100% means relative to Fyne's default sizes:
+	// the stock theme reads oversized next to other desktop applications, so
+	// every offered ratio is applied on top of this smaller baseline.
+	uiScaleBaseline = 0.8
 	// The window is measured in em of the unscaled body text so its pixel
 	// footprint stays put when the ratio changes; only the content zooms.
 	windowWidthEm  = 52
@@ -20,8 +24,8 @@ const (
 )
 
 // uiScaleChoices are the ratios offered in settings. The ratio is applied by
-// the theme on top of the desktop's own DPI factor, so 100% matches other
-// applications on the same screen and rendering stays at native resolution.
+// the theme on top of the desktop's own DPI factor and uiScaleBaseline, so
+// rendering stays at native resolution.
 var uiScaleChoices = []float64{0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0}
 
 func loadUIScale(preferences fyne.Preferences) float64 {
@@ -39,10 +43,11 @@ func knownUIScale(value float64) float64 {
 	return defaultUIScale
 }
 
-// scaledSize applies the ratio to one theme size. Text sizes are rounded up to
-// a whole pixel so glyphs never land on a fractional size such as 16.8.
+// scaledSize applies the ratio and the baseline to one theme size. Text sizes
+// are rounded up to a whole pixel so glyphs never land on a fractional size
+// such as 11.2.
 func scaledSize(base float32, scale float64, text bool) float32 {
-	size := float64(base) * scale
+	size := float64(base) * scale * uiScaleBaseline
 	if text {
 		size = math.Ceil(size)
 	}

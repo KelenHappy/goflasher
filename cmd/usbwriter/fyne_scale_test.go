@@ -30,14 +30,14 @@ func TestThemeRoundsTextSizesUp(t *testing.T) {
 		for _, name := range textSizes {
 			base := float64(theme.DefaultTheme().Size(name))
 			got := float64(scaled.Size(name))
-			if got != math.Ceil(base*scale) {
-				t.Errorf("scale %v %s = %v, want %v", scale, name, got, math.Ceil(base*scale))
+			if want := math.Ceil(base * scale * uiScaleBaseline); got != want {
+				t.Errorf("scale %v %s = %v, want %v", scale, name, got, want)
 			}
 		}
 	}
-	// 14 x 1.2 = 16.8 is the case that motivated rounding up.
-	if got := newReadableTheme(themeModeSystem, 1.2).Size(theme.SizeNameText); got != 17 {
-		t.Errorf("120%% text size = %v, want 17", got)
+	// 14 x 0.8 = 11.2 is the case that motivated rounding up.
+	if got := newReadableTheme(themeModeSystem, 1.0).Size(theme.SizeNameText); got != 12 {
+		t.Errorf("100%% text size = %v, want 12", got)
 	}
 }
 
@@ -45,7 +45,7 @@ func TestThemeScalesNonTextSizesProportionally(t *testing.T) {
 	scaled := newReadableTheme(themeModeSystem, 2.0)
 	base := theme.DefaultTheme()
 	for _, name := range []fyne.ThemeSizeName{theme.SizeNamePadding, theme.SizeNameInlineIcon, theme.SizeNameModalBlurRadius} {
-		if got, want := scaled.Size(name), base.Size(name)*2; got != want {
+		if got, want := scaled.Size(name), float32(float64(base.Size(name))*2*uiScaleBaseline); got != want {
 			t.Errorf("200%% %s = %v, want %v", name, got, want)
 		}
 	}

@@ -131,7 +131,7 @@ var catalogs = map[Locale]map[string]string{
 		"log.format.start": "Formatting %s as FAT32", "log.format.complete": "FAT32 format complete",
 		"action.settings": "Settings", "settings.title": "Settings", "settings.language": "Language", "settings.close": "Close",
 		"settings.theme": "Theme", "settings.theme.system": "System", "settings.theme.light": "Light", "settings.theme.dark": "Dark",
-		"settings.scale": "Interface scale", "settings.source": "Source code (GPLv3)",
+		"settings.scale": "Interface scale", "settings.source": "Source code (GPLv3)", "settings.version": "Version",
 		"settings.licenses": "Licenses", "action.licenses": "View licenses", "licenses.title": "Licenses and third-party notices",
 	},
 	TraditionalChinese: {
@@ -169,7 +169,7 @@ var catalogs = map[Locale]map[string]string{
 		"log.format.start": "正在將 %s 格式化為 FAT32", "log.format.complete": "FAT32 格式化完成",
 		"action.settings": "設定", "settings.title": "設定", "settings.language": "語言", "settings.close": "關閉",
 		"settings.theme": "主題", "settings.theme.system": "跟隨系統", "settings.theme.light": "淺色", "settings.theme.dark": "深色",
-		"settings.scale": "介面縮放", "settings.source": "原始碼（GPLv3）",
+		"settings.scale": "介面縮放", "settings.source": "原始碼（GPLv3）", "settings.version": "版本",
 		"settings.licenses": "授權", "action.licenses": "檢視授權", "licenses.title": "授權與第三方元件聲明",
 	},
 	SimplifiedChinese: {
@@ -194,7 +194,7 @@ var catalogs = map[Locale]map[string]string{
 		"status.formatting":   "正在格式化为 FAT32…", "status.format.complete": "FAT32 格式化完成", "log.format.start": "正在将 %s 格式化为 FAT32", "log.format.complete": "FAT32 格式化完成",
 		"action.settings": "设置", "settings.title": "设置", "settings.language": "语言", "settings.close": "关闭",
 		"settings.theme": "主题", "settings.theme.system": "跟随系统", "settings.theme.light": "浅色", "settings.theme.dark": "深色",
-		"settings.scale": "界面缩放", "settings.source": "源代码（GPLv3）",
+		"settings.scale": "界面缩放", "settings.source": "源代码（GPLv3）", "settings.version": "版本",
 		"settings.licenses": "许可", "action.licenses": "查看许可", "licenses.title": "许可与第三方组件声明",
 	},
 	Japanese: {
@@ -218,7 +218,7 @@ var catalogs = map[Locale]map[string]string{
 		"status.formatting":   "FAT32 でフォーマット中…", "status.format.complete": "FAT32 フォーマット完了", "log.format.start": "%s を FAT32 でフォーマット中", "log.format.complete": "FAT32 フォーマット完了",
 		"action.settings": "設定", "settings.title": "設定", "settings.language": "言語", "settings.close": "閉じる",
 		"settings.theme": "テーマ", "settings.theme.system": "システム", "settings.theme.light": "ライト", "settings.theme.dark": "ダーク",
-		"settings.scale": "画面の拡大率", "settings.source": "ソースコード（GPLv3）",
+		"settings.scale": "画面の拡大率", "settings.source": "ソースコード（GPLv3）", "settings.version": "バージョン",
 		"settings.licenses": "ライセンス", "action.licenses": "ライセンスを表示", "licenses.title": "ライセンスおよび第三者コンポーネントの告知",
 	},
 }
