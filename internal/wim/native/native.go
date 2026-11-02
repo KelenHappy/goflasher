@@ -121,6 +121,11 @@ const (
 	splitPartWrite splitEventKind = 3
 )
 
+// writeFlagFSync is WIMLIB_WRITE_FLAG_FSYNC: wimlib fsyncs each part before
+// closing it, so a write error surfaces from the split instead of being lost
+// in the page cache. link_wimlib.go checks the value against wimlib.h.
+const writeFlagFSync int32 = 0x00000020
+
 // splitCall holds the arguments of one wimlib_split call.
 type splitCall struct {
 	wim      uintptr
@@ -184,7 +189,7 @@ func (i *Image) Split(output string, partSize uint64, progress SplitProgress) er
 	if progress != nil {
 		events = (&splitTracker{report: progress}).handle
 	}
-	if code := i.lib.fn.split(splitCall{wim: i.handle, output: output, partSize: partSize, progress: events}); code != 0 {
+	if code := i.lib.fn.split(splitCall{wim: i.handle, output: output, partSize: partSize, flags: writeFlagFSync, progress: events}); code != 0 {
 		return i.lib.nativeError("wimlib_split", code)
 	}
 	return nil

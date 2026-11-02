@@ -13,6 +13,11 @@ package native
 #error "GoFlasher links only the reviewed wimlib 1.14.5"
 #endif
 
+// native.go passes this flag to wimlib_split as writeFlagFSync.
+#if WIMLIB_WRITE_FLAG_FSYNC != 0x00000020
+#error "WIMLIB_WRITE_FLAG_FSYNC differs from native.go's writeFlagFSync"
+#endif
+
 // Splitting needs no privileges, and on Windows wimlib would otherwise enable
 // backup, restore and other privileges on the whole process token.
 #ifdef _WIN32

@@ -78,7 +78,7 @@ all builder and verifier I/O passes through `internal/blockio`, which completes
 partial sectors with read-modify-write inside the validated disk size. Disks
 whose logical sector size is not 512 bytes are refused. No command runs while
 building media: an `install.wim` larger than the FAT32 file limit is split in
-process with the system's WIMGAPI (see "WIM splitting" below).
+process by the statically linked wimlib (see "WIM splitting" below).
 
 ### macOS Windows-installer builder boundary
 
@@ -101,12 +101,8 @@ approved, signed releases remain raw-writer-only.
 
 ### WIM splitting
 
-Windows splits `install.wim` with WIMGAPI, the Win32 imaging API in
-`System32\wimgapi.dll` that DISM itself uses (`internal/wim/backend_windows.go`).
-The Windows build links no wimlib and needs no build tag or C toolchain for it.
-
-Linux and macOS split with wimlib 1.14.5, linked statically into the GUI
-executable through cgo when it is built with the `wimlib` build tag
+Every platform splits `install.wim` with wimlib 1.14.5, linked statically into
+the GUI executable through cgo when it is built with the `wimlib` build tag
 (`internal/wim/native/link_wimlib.go`). The application never loads a libwim
 file at run time. Without the tag, `internal/wim/native` compiles a stub and the
 installer builder reports itself unavailable, so `go test ./...` and ordinary

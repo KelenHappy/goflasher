@@ -72,6 +72,18 @@ func TestSplitPartSizeUsesBundledUint64ABI(t *testing.T) {
 	}
 }
 
+func TestSplitFsyncsEachPart(t *testing.T) {
+	var got int32
+	library := &Library{fn: functions{split: func(call splitCall) int32 { got = call.flags; return 0 }}}
+	image := &Image{lib: library, handle: 42}
+	if err := image.Split("/tmp/install.swm", 1<<30, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got != writeFlagFSync {
+		t.Fatalf("split flags=%#x, want WIMLIB_WRITE_FLAG_FSYNC (%#x)", got, writeFlagFSync)
+	}
+}
+
 func TestSplitProgressIsMonotonicAcrossParts(t *testing.T) {
 	const total = 1000
 	events := []splitEvent{
