@@ -209,9 +209,16 @@ fi
 case "$host_os" in
   Windows)
     cc=gcc
-    compiler_src=$(cygpath -m "$src")
-    toolchain_root=$(cygpath -m "$(cd "$(dirname "$(command -v gcc)")/.." && pwd)")
+    # GitHub's Windows runners set TMP to an 8.3 short path (RUNNER~1), but
+    # gcc records the long form (runneradmin) in the debug info, so map the
+    # long form and keep the short form mapped as well.
+    compiler_src=$(cygpath -m -l "$src")
+    compiler_src_short=$(cygpath -m "$src")
+    toolchain_root=$(cygpath -m -l "$(cd "$(dirname "$(command -v gcc)")/.." && pwd)")
     toolchain_map=" -ffile-prefix-map=$toolchain_root=winlibs"
+    if [[ "$compiler_src_short" != "$compiler_src" ]]; then
+      toolchain_map+=" -ffile-prefix-map=$compiler_src_short=wimlib-$WIMLIB_VERSION"
+    fi
     make_cmd=(mingw32-make "LIBTOOL=sh ./libtool")
     export AR_FLAGS=crD RANLIB="ranlib -D"
     exe=.exe
