@@ -52,8 +52,8 @@ process 執行。Windows 不設 privileged helper、service 或跨程序 IPC，b
 回讀並進行semantic verification。Raw disk handle只接受完整sector的請求，因此
 builder與verifier的所有I/O都會經過`internal/blockio`，在已驗證的磁碟大小內以
 read-modify-write補齊不完整的sector。Logical sector size不是512 bytes的磁碟會被
-拒絕。建立媒體時不執行任何指令：超過FAT32單檔上限的`install.wim`由靜態連結的
-wimlib在程式內分割（見下方「WIM分割」）。
+拒絕。建立媒體時不執行任何指令：超過FAT32單檔上限的`install.wim`由系統的
+WIMGAPI在程式內分割（見下方「WIM分割」）。
 
 ### macOS Windows installer builder邊界
 
@@ -93,7 +93,11 @@ sudo install -m 0644 packaging/org.goflasher.usbwriter.policy \
 
 ### WIM分割
 
-所有平台都以wimlib 1.14.5分割`install.wim`。GUI以`wimlib` build tag編譯時，
+Windows以WIMGAPI分割`install.wim`，也就是DISM本身使用的Win32 imaging API
+（`System32\wimgapi.dll`，見`internal/wim/backend_windows.go`）。Windows建置不連結
+wimlib，也不需要額外的build tag或C toolchain。
+
+Linux與macOS以wimlib 1.14.5分割。GUI以`wimlib` build tag編譯時，
 wimlib會透過cgo靜態連結進執行檔（`internal/wim/native/link_wimlib.go`），執行時
 不載入任何libwim檔案。沒有這個tag時，`internal/wim/native`改編stub，installer
 builder回報無法使用，因此`go test ./...`與一般開發建置都不需要wimlib。
@@ -111,9 +115,9 @@ CGO_CFLAGS=-I/tmp/wimlib/include CGO_LDFLAGS=-L/tmp/wimlib/lib \
   go build -trimpath -tags fyne,no_emoji,wimlib -o dist/goflasher ./cmd/usbwriter
 ```
 
-Release workflow只在`LINUX_WINDOWS_BUILDER_READY`、`MACOS_WINDOWS_BUILDER_READY`或
-`WINDOWS_BUILDER_READY`為true時這樣做，並要求repository variable
-`WIMLIB_COMPLIANCE_RECORD_PATH`（checkout內的路徑；紀錄位於`docs/legal/wimlib-1.14.5`）；`libwim.a`的SHA-256不在該紀錄的`artifact.sha256`中就拒絕連結，並把紀錄
+Linux與Windows的release job一律這樣做；macOS job只在`MACOS_WINDOWS_BUILDER_READY`
+為true時這樣做。Compliance record由repository variable
+`WIMLIB_COMPLIANCE_RECORD_PATH`指定（checkout內的路徑，預設為`docs/legal/wimlib-1.14.5`）；`libwim.a`的SHA-256不在該紀錄的`artifact.sha256`中就拒絕連結，並把紀錄
 安裝到應用程式旁。打包腳本以`packaging/legal/links-wimlib.sh`偵測執行檔是否連結
 wimlib，沒有紀錄就拒絕打包（Windows portable ZIP放在`legal/wimlib-1.14.5`），release
 也會附上wimlib原始碼archive。

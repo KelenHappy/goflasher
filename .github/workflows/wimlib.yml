@@ -7,7 +7,6 @@ on:
       - 'internal/wim/**'
       - 'cmd/wim-smoke/**'
       - 'packaging/legal/links-wimlib.sh'
-      - '.github/actions/setup-winlibs/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/wimlib.yml'
@@ -41,10 +40,6 @@ jobs:
             os: macos
             arch: arm64
 
-          - runner: windows-latest
-            os: windows
-            arch: amd64
-
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -69,10 +64,6 @@ jobs:
 
           xcodebuild -version
           clang --version
-
-      - name: Install pinned Windows toolchain
-        if: runner.os == 'Windows'
-        uses: ./.github/actions/setup-winlibs
 
       - name: Fetch pinned wimlib source
         shell: bash
@@ -119,3 +110,40 @@ jobs:
             ${{ runner.temp }}/wimlib-out/lib/libwim.a
             ${{ runner.temp }}/wimlib-out/SHA256SUMS
           if-no-files-found: error
+
+  # Windows links no wimlib: internal/wim/backend_windows.go splits with the
+  # system's WIMGAPI, so this exercises that path on a real Windows host.
+  wimgapi:
+    name: WIMGAPI (windows-amd64)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test WIM package
+        run: go test ./internal/wim/...
+
+      - name: Split a captured WIM with WIMGAPI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'smoke-root'
+          New-Item -ItemType Directory -Force $root | Out-Null
+          # Eight incompressible 1 MiB files: WIMGAPI splits only between
+          # resources, so wim-smoke's 4 MiB parts yield several .swm files.
+          $random = New-Object Random 1
+          foreach ($i in 1..8) {
+            $bytes = New-Object byte[] (1MB)
+            $random.NextBytes($bytes)
+            [IO.File]::WriteAllBytes((Join-Path $root "data$i.bin"), $bytes)
+          }
+          $wim = Join-Path $env:RUNNER_TEMP 'smoke.wim'
+          dism /Capture-Image /ImageFile:$wim /CaptureDir:$root /Name:smoke /Compress:none
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go run ./cmd/wim-smoke $wim
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

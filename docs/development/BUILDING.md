@@ -78,7 +78,7 @@ all builder and verifier I/O passes through `internal/blockio`, which completes
 partial sectors with read-modify-write inside the validated disk size. Disks
 whose logical sector size is not 512 bytes are refused. No command runs while
 building media: an `install.wim` larger than the FAT32 file limit is split in
-process by the statically linked wimlib (see "WIM splitting" below).
+process with the system's WIMGAPI (see "WIM splitting" below).
 
 ### macOS Windows-installer builder boundary
 
@@ -101,8 +101,12 @@ approved, signed releases remain raw-writer-only.
 
 ### WIM splitting
 
-Every platform splits `install.wim` with wimlib 1.14.5, linked statically into
-the GUI executable through cgo when it is built with the `wimlib` build tag
+Windows splits `install.wim` with WIMGAPI, the Win32 imaging API in
+`System32\wimgapi.dll` that DISM itself uses (`internal/wim/backend_windows.go`).
+The Windows build links no wimlib and needs no build tag or C toolchain for it.
+
+Linux and macOS split with wimlib 1.14.5, linked statically into the GUI
+executable through cgo when it is built with the `wimlib` build tag
 (`internal/wim/native/link_wimlib.go`). The application never loads a libwim
 file at run time. Without the tag, `internal/wim/native` compiles a stub and the
 installer builder reports itself unavailable, so `go test ./...` and ordinary
@@ -130,10 +134,10 @@ CGO_CFLAGS=-I/tmp/wimlib/include CGO_LDFLAGS=-L/tmp/wimlib/lib \
   go build -trimpath -tags fyne,no_emoji,wimlib -o dist/goflasher ./cmd/usbwriter
 ```
 
-Release workflows do this only when `LINUX_WINDOWS_BUILDER_READY`,
-`MACOS_WINDOWS_BUILDER_READY` or `WINDOWS_BUILDER_READY` is true. They then
-require the repository variable `WIMLIB_COMPLIANCE_RECORD_PATH` (a path inside
-the checkout; the record is `docs/legal/wimlib-1.14.5`),
+The Linux and Windows release jobs always do this; the macOS job does it only
+when `MACOS_WINDOWS_BUILDER_READY` is true. They read the compliance record from
+the repository variable `WIMLIB_COMPLIANCE_RECORD_PATH` (a path inside the
+checkout, defaulting to `docs/legal/wimlib-1.14.5`),
 refuse an archive whose SHA-256 is not listed in that record's
 `artifact.sha256`, and install the record next to the application. The packaging
 scripts detect a wimlib-linked executable with

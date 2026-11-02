@@ -1,5 +1,6 @@
-// Package wim splits Windows images with the wimlib statically linked into
-// GoFlasher, on every platform.
+// Package wim splits Windows images: with WIMGAPI (System32\wimgapi.dll) on
+// Windows, and with the wimlib statically linked into GoFlasher on Linux and
+// macOS.
 package wim
 
 import (
@@ -80,7 +81,8 @@ func canonicalAbsolute(name string) (string, error) {
 // install.swm, install2.swm, ... parts of one split.
 type partDir string
 
-// firstPart is the name wimlib is given; it numbers the later parts itself.
+// firstPart is the name the backend is given; it numbers the later parts
+// itself (install2.swm, install3.swm, ...).
 func (d partDir) firstPart() string { return filepath.Join(string(d), "install.swm") }
 
 func (d partDir) rejectExisting() error {
