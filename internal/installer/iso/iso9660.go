@@ -48,6 +48,26 @@ func (r *Reader) readISODescriptor(sec lba) ([]Entry, descriptorKind, error) {
 	return entries, kind, err
 }
 
+// VolumeLabel returns the primary volume descriptor's volume identifier
+// without its padding, or "" when the image has none (a UDF-only image). It is
+// unvalidated text from the image, fit only for display.
+func (r *Reader) VolumeLabel() string {
+	for sec := lba(16); sec < 256; sec++ {
+		b, err := r.sector(sec)
+		if err != nil {
+			return ""
+		}
+		d := volumeDescriptor(b)
+		switch d.kind() {
+		case descriptorTerminator:
+			return ""
+		case descriptorPrimary:
+			return strings.TrimRight(string(d[40:72]), " \x00")
+		}
+	}
+	return ""
+}
+
 // descriptorKind is the role a volume descriptor plays in the set.
 type descriptorKind int
 

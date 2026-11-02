@@ -47,6 +47,9 @@ type Reader struct {
 	size     imageSize
 	retained io.Closer
 	manifest Manifest
+	// inspection relaxes the checks only FAT32 copying needs; see
+	// NewForInspection.
+	inspection bool
 }
 
 // imageSize is the byte length of the source image; every extent the reader
@@ -79,11 +82,24 @@ func invalid(format string, args ...any) error {
 // New completely parses and validates the immutable manifest before returning.
 // retained pins the caller's source object for both parsing and later extraction.
 func New(source io.ReaderAt, size int64, retained io.Closer) (*Reader, error) {
+	return newReader(source, size, retained, false)
+}
+
+// NewForInspection parses an image only to read it, never to copy it to
+// FAT32. It accepts paths that differ only in case and files that share
+// bytes, which case-sensitive Linux media legitimately carry, but keeps every
+// bounds, depth, entry-count and traversal check. Its manifest must not be
+// handed to the installer.
+func NewForInspection(source io.ReaderAt, size int64, retained io.Closer) (*Reader, error) {
+	return newReader(source, size, retained, true)
+}
+
+func newReader(source io.ReaderAt, size int64, retained io.Closer, inspection bool) (*Reader, error) {
 	n, err := sourceSize(source, size, retained)
 	if err != nil {
 		return nil, err
 	}
-	r := &Reader{source: source, size: n, retained: retained}
+	r := &Reader{source: source, size: n, retained: retained, inspection: inspection}
 	entries, err := r.parse()
 	if err != nil {
 		_ = retained.Close()
@@ -139,6 +155,78 @@ func (r *Reader) Manifest() Manifest {
 	return out
 }
 func (r *Reader) ReadAt(p []byte, off int64) (int, error) { return r.source.ReadAt(p, off) }
+
+// FileReader gives random access to a regular file's bytes, stitched together
+// from its extents. Reads past the file's size return io.EOF.
+func (r *Reader) FileReader(e Entry) (*io.SectionReader, error) {
+	if e.Type != File {
+		return nil, invalid("not a regular file")
+	}
+	var total uint64
+	for _, x := range e.Extents {
+		if !r.size.contains(x) {
+			return nil, invalid("extent out of bounds")
+		}
+		total += x.Length
+	}
+	if total < e.Size || e.Size > uint64(1<<63-1) {
+		return nil, invalid("file extents shorter than its size")
+	}
+	return io.NewSectionReader(fileExtents{source: r.source, extents: e.Extents}, 0, int64(e.Size)), nil
+}
+
+// ReadFile returns the whole contents of a regular file no larger than limit
+// bytes.
+func (r *Reader) ReadFile(e Entry, limit uint64) ([]byte, error) {
+	if e.Size > limit || e.Size > maxRead {
+		return nil, invalid("file too large to read")
+	}
+	f, err := r.FileReader(e)
+	if err != nil {
+		return nil, err
+	}
+	b := make([]byte, e.Size)
+	if _, err := io.ReadFull(f, b); err != nil {
+		return nil, invalid("truncated file: %v", err)
+	}
+	return b, nil
+}
+
+// fileExtents maps file offsets onto the image through a file's extents.
+type fileExtents struct {
+	source  io.ReaderAt
+	extents []Extent
+}
+
+func (f fileExtents) ReadAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, invalid("negative file offset")
+	}
+	pos := uint64(off)
+	for _, x := range f.extents {
+		if len(p) == 0 {
+			return n, nil
+		}
+		if pos >= x.Length {
+			pos -= x.Length
+			continue
+		}
+		chunk := min(uint64(len(p)), x.Length-pos)
+		m, err := f.source.ReadAt(p[:chunk], int64(x.Offset+pos))
+		n, p = n+m, p[m:]
+		if uint64(m) < chunk {
+			if err == nil {
+				err = io.ErrUnexpectedEOF
+			}
+			return n, err
+		}
+		pos = 0
+	}
+	if len(p) != 0 {
+		return n, io.EOF
+	}
+	return n, nil
+}
 
 func (r *Reader) bytes(x Extent) ([]byte, error) {
 	if !r.validRead(x) {
@@ -258,14 +346,19 @@ type validator struct {
 	paths map[entryPath]bool
 	fold  map[string]entryPath
 	spans []extentSpan
+	// inspection skips the case-folding and shared-extent checks.
+	inspection bool
 }
 
 func (r *Reader) validate(es []Entry) error {
-	v := &validator{size: r.size, paths: map[entryPath]bool{}, fold: map[string]entryPath{}}
+	v := &validator{size: r.size, paths: map[entryPath]bool{}, fold: map[string]entryPath{}, inspection: r.inspection}
 	for _, e := range es {
 		if err := v.checkEntry(e); err != nil {
 			return err
 		}
+	}
+	if v.inspection {
+		return nil
 	}
 	return v.checkSpans()
 }
@@ -294,6 +387,9 @@ func (v *validator) checkPath(p entryPath) error {
 		return invalid("duplicate path")
 	}
 	v.paths[p] = true
+	if v.inspection {
+		return nil
+	}
 	k := p.foldKey()
 	if old, ok := v.fold[k]; ok && old != p {
 		return invalid("case or Unicode collision")

@@ -87,6 +87,14 @@ jobs:
             -fuzz '^FuzzFormatFromName$' \
             -fuzztime 10s
 
+      - name: Fuzz operating system identification
+        run: |
+          go test \
+            ./internal/osinfo \
+            -run '^$' \
+            -fuzz FuzzIdentify \
+            -fuzztime 10s
+
   vulnerabilities:
     name: Vulnerability scan
     runs-on: ubuntu-24.04

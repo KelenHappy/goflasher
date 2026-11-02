@@ -25,6 +25,11 @@ on Linux, Windows, and macOS.**
   `.swm` parts, and a file-by-file read-back verification. Packages offer the
   builder only when they are built with the pinned wimlib linked in, and
   otherwise refuse before touching the disk.
+- Name the operating system on an ISO when it is selected: the Linux
+  distribution, version and architecture (Fedora, Ubuntu, Debian, Rocky, Arch
+  and others), or the Windows release, build, language and the editions inside
+  `install.wim`. The name is read from the image for display only and never
+  changes how the image is written.
 - Show writing and verification progress, throughput, and estimated time.
 - Cancel an active operation.
 - Optionally power off the USB device after a successful write.
