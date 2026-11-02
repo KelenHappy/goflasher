@@ -94,42 +94,56 @@ type nopCloser struct{}
 
 func (nopCloser) Close() error { return nil }
 
-// source is the view of an image the detectors need. Paths are lower case,
-// slash-separated and relative to the image root.
+// imagePath is a path inside the image: relative to its root, slash-separated
+// and lower case, so lookups ignore the case a mastering tool chose.
+type imagePath string
+
+func pathOf(entryPath string) imagePath { return imagePath(strings.ToLower(entryPath)) }
+
+// volumeLabel is an ISO volume label made safe for display by clean.
+type volumeLabel string
+
+func labelOf(raw string) volumeLabel { return volumeLabel(clean(raw)) }
+
+// words splits the label at the separators labels use between fields.
+func (l volumeLabel) words() []string { return tokens(string(l)) }
+
+// source is the view of an image the detectors need.
 type source interface {
+	// label returns the raw, unvalidated volume label.
 	label() string
-	has(path string) bool
-	hasDir(path string) bool
-	readFile(path string, limit uint64) ([]byte, error)
-	open(path string) (io.ReaderAt, int64, error)
+	has(path imagePath) bool
+	hasDir(path imagePath) bool
+	readFile(path imagePath, limit uint64) ([]byte, error)
+	open(path imagePath) (io.ReaderAt, int64, error)
 }
 
 type isoSource struct {
 	fs      *installeriso.Reader
-	entries map[string]installeriso.Entry
+	entries map[imagePath]installeriso.Entry
 }
 
 func newISOSource(fs *installeriso.Reader) isoSource {
-	entries := map[string]installeriso.Entry{}
+	entries := map[imagePath]installeriso.Entry{}
 	for _, e := range fs.Manifest().Entries {
-		entries[strings.ToLower(e.Path)] = e
+		entries[pathOf(e.Path)] = e
 	}
 	return isoSource{fs: fs, entries: entries}
 }
 
 func (s isoSource) label() string { return s.fs.VolumeLabel() }
 
-func (s isoSource) has(path string) bool {
+func (s isoSource) has(path imagePath) bool {
 	e, ok := s.entries[path]
 	return ok && e.Type == installeriso.File
 }
 
-func (s isoSource) hasDir(path string) bool {
+func (s isoSource) hasDir(path imagePath) bool {
 	e, ok := s.entries[path]
 	return ok && e.Type == installeriso.Directory
 }
 
-func (s isoSource) readFile(path string, limit uint64) ([]byte, error) {
+func (s isoSource) readFile(path imagePath, limit uint64) ([]byte, error) {
 	e, ok := s.entries[path]
 	if !ok {
 		return nil, os.ErrNotExist
@@ -137,7 +151,7 @@ func (s isoSource) readFile(path string, limit uint64) ([]byte, error) {
 	return s.fs.ReadFile(e, limit)
 }
 
-func (s isoSource) open(path string) (io.ReaderAt, int64, error) {
+func (s isoSource) open(path imagePath) (io.ReaderAt, int64, error) {
 	e, ok := s.entries[path]
 	if !ok {
 		return nil, 0, os.ErrNotExist
@@ -151,14 +165,14 @@ func (s isoSource) open(path string) (io.ReaderAt, int64, error) {
 
 // identify runs the detectors from the most to the least specific evidence.
 func identify(src source) System {
-	label := clean(src.label())
-	for _, detect := range []func(source, string) (System, bool){detectWindows, detectLinux} {
+	label := labelOf(src.label())
+	for _, detect := range []func(source, volumeLabel) (System, bool){detectWindows, detectLinux} {
 		if s, ok := detect(src, label); ok {
-			s.Label = label
+			s.Label = string(label)
 			return s
 		}
 	}
-	return System{Label: label}
+	return System{Label: string(label)}
 }
 
 // maxText bounds every string taken from the image.

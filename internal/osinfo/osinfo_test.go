@@ -17,18 +17,18 @@ type fakeSource struct {
 	dirs   []string
 }
 
-func (f fakeSource) label() string           { return f.volume }
-func (f fakeSource) has(path string) bool    { _, ok := f.files[path]; return ok }
-func (f fakeSource) hasDir(path string) bool { return slices.Contains(f.dirs, path) }
-func (f fakeSource) readFile(path string, limit uint64) ([]byte, error) {
-	b, ok := f.files[path]
+func (f fakeSource) label() string              { return f.volume }
+func (f fakeSource) has(path imagePath) bool    { _, ok := f.files[string(path)]; return ok }
+func (f fakeSource) hasDir(path imagePath) bool { return slices.Contains(f.dirs, string(path)) }
+func (f fakeSource) readFile(path imagePath, limit uint64) ([]byte, error) {
+	b, ok := f.files[string(path)]
 	if !ok || uint64(len(b)) > limit {
 		return nil, os.ErrNotExist
 	}
 	return b, nil
 }
-func (f fakeSource) open(path string) (io.ReaderAt, int64, error) {
-	b, ok := f.files[path]
+func (f fakeSource) open(path imagePath) (io.ReaderAt, int64, error) {
+	b, ok := f.files[string(path)]
 	if !ok {
 		return nil, 0, os.ErrNotExist
 	}
@@ -81,21 +81,24 @@ func TestIdentifyWindowsESDWithDeclaration(t *testing.T) {
 	xml := `<?xml version="1.0" encoding="UTF-16"?><WIM><IMAGE INDEX="1"><NAME>Windows 10 Pro</NAME>` +
 		`<WINDOWS><ARCH>0</ARCH><VERSION><MAJOR>10</MAJOR><MINOR>0</MINOR><BUILD>19045</BUILD></VERSION></WINDOWS></IMAGE></WIM>`
 	got := identify(fakeSource{files: map[string][]byte{"sources/install.esd": testWIM(xml, 0)}})
-	if got.Name != "Windows 10" || got.Version != "22H2" || got.Build != "19045" || got.Arch != "x86" {
-		t.Fatalf("got %+v", got)
+	want := System{Family: Windows, Name: "Windows 10", Version: "22H2", Build: "19045", Arch: "x86", Editions: []string{"Windows 10 Pro"}}
+	if !equalSystem(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
 }
 
 func TestIdentifyWindowsFallsBackToLabel(t *testing.T) {
+	const label = "CCCOMA_A64FRE_EN-US_DV9"
+	want := System{Family: Windows, Name: "Windows", Arch: "arm64", Language: "en-US", Label: label}
 	for name, wim := range map[string][]byte{
 		"compressed xml": testWIM(win11XML, reshdrCompressed),
 		"bad magic":      append([]byte("NOTAWIM!"), testWIM(win11XML, 0)[8:]...),
 		"truncated":      testWIM(win11XML, 0)[:300],
 		"empty":          {},
 	} {
-		got := identify(fakeSource{volume: "CCCOMA_A64FRE_EN-US_DV9", files: map[string][]byte{"sources/install.wim": wim}})
-		if got.Family != Windows || got.Name != "Windows" || got.Arch != "arm64" || got.Language != "en-US" || got.Build != "" {
-			t.Errorf("%s: got %+v", name, got)
+		got := identify(fakeSource{volume: label, files: map[string][]byte{"sources/install.wim": wim}})
+		if !equalSystem(got, want) {
+			t.Errorf("%s: got  %+v\nwant %+v", name, got, want)
 		}
 	}
 }
@@ -153,6 +156,16 @@ func TestIdentifyLinux(t *testing.T) {
 			System{Family: Linux, Name: "Rocky Linux KDE", Version: "10.2", Label: "Rocky-10-2-KDE"}},
 		{"ubuntu label without disk info", fakeSource{volume: "Ubuntu 24.04.1 LTS amd64", dirs: []string{"casper"}},
 			System{Family: Linux, Name: "Ubuntu", Version: "24.04.1 LTS", Arch: "x86_64", Label: "Ubuntu 24.04.1 LTS amd64"}},
+		{"respin number after variant is dropped", fakeSource{volume: "Rocky-10-2-KDE-1", dirs: []string{"liveos"}},
+			System{Family: Linux, Name: "Rocky Linux KDE", Version: "10.2", Label: "Rocky-10-2-KDE-1"}},
+		{"lts without version is a variant word", fakeSource{volume: "Ubuntu-LTS-Desktop", dirs: []string{"casper"}},
+			System{Family: Linux, Name: "Ubuntu LTS Desktop", Label: "Ubuntu-LTS-Desktop"}},
+		{"numeric discinfo release falls back to markers", fakeSource{volume: "F40", dirs: []string{"isolinux"}, files: map[string][]byte{".discinfo": []byte("1715000000.0\n40\nx86_64\n")}},
+			System{Family: Linux, Name: "F40", Label: "F40"}},
+		{"treeinfo variant already in name", fakeSource{files: map[string][]byte{".treeinfo": []byte("[release]\nname = Fedora Server\nversion = 44\n[general]\nvariant = Server\n")}},
+			System{Family: Linux, Name: "Fedora Server", Version: "44"}},
+		{"treeinfo everything variant", fakeSource{files: map[string][]byte{".treeinfo": []byte("[release]\nname = Fedora\nversion = 44\n[general]\nvariant = Everything\n")}},
+			System{Family: Linux, Name: "Fedora", Version: "44"}},
 		{"distro label needs boot markers", fakeSource{volume: "Rocky-10-2-KDE"},
 			System{Label: "Rocky-10-2-KDE"}},
 		{"opensuse label", fakeSource{volume: "openSUSE-Tumbleweed-DVD-x86_64", dirs: []string{"boot/grub2"}},

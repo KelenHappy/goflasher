@@ -6,40 +6,59 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf16"
 )
 
-var windowsInstallImages = []string{"sources/install.wim", "sources/install.esd", "sources/install.swm"}
+var (
+	windowsInstallImages = []imagePath{"sources/install.wim", "sources/install.esd", "sources/install.swm"}
+	// windowsSignals are files only Windows installer media carry.
+	windowsSignals = append([]imagePath{"sources/boot.wim", "bootmgr"}, windowsInstallImages...)
+)
 
-func detectWindows(src source, label string) (System, bool) {
-	if !src.has("sources/boot.wim") && !src.has("bootmgr") && !hasAnyFile(src, windowsInstallImages) {
+func detectWindows(src source, label volumeLabel) (System, bool) {
+	if !hasAnyFile(src, windowsSignals) {
 		return System{}, false
 	}
 	s := System{Family: Windows, Name: "Windows"}
-	for _, p := range windowsInstallImages {
-		if !src.has(p) {
-			continue
-		}
-		if r, size, err := src.open(p); err == nil {
-			if images, err := readWIMImages(r, size); err == nil && len(images) != 0 {
-				applyWIMImages(&s, images)
-				return s, true
-			}
-		}
+	if images := installImages(src); len(images) != 0 {
+		applyWIMImages(&s, images)
+	} else {
+		applyWindowsLabel(&s, label)
 	}
-	applyWindowsLabel(&s, label)
 	return s, true
 }
 
-func hasAnyFile(src source, paths []string) bool {
-	for _, p := range paths {
-		if src.has(p) {
-			return true
+func hasAnyFile(src source, paths []imagePath) bool {
+	return slices.ContainsFunc(paths, src.has)
+}
+
+// installImages returns the image descriptions of the first install image
+// whose XML description can be read, or nil.
+func installImages(src source) []wimImage {
+	for _, p := range windowsInstallImages {
+		if images := wimImagesAt(src, p); len(images) != 0 {
+			return images
 		}
 	}
-	return false
+	return nil
+}
+
+func wimImagesAt(src source, path imagePath) []wimImage {
+	if !src.has(path) {
+		return nil
+	}
+	r, size, err := src.open(path)
+	if err != nil {
+		return nil
+	}
+	images, err := readWIMImages(r, size)
+	if err != nil {
+		return nil
+	}
+	return images
 }
 
 // WIM header layout (WIMHEADER_V1_PACKED): the magic, the header size, and at
@@ -66,42 +85,75 @@ func readWIMImages(r io.ReaderAt, size int64) ([]wimImage, error) {
 	if _, err := r.ReadAt(h, 0); err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(h[:8], wimMagic) || binary.LittleEndian.Uint32(h[8:12]) != wimHeaderSize {
+	if !validWIMHeader(h) {
 		return nil, errNotWIM
 	}
-	res := h[wimXMLReshdr : wimXMLReshdr+24]
-	var sizeBytes [8]byte
-	copy(sizeBytes[:7], res[:7])
-	length := binary.LittleEndian.Uint64(sizeBytes[:])
-	flags := res[7]
-	offset := binary.LittleEndian.Uint64(res[8:16])
-	if flags&(reshdrCompressed|reshdrSolid) != 0 || length == 0 || length > maxWIMXML ||
-		offset > uint64(size) || length > uint64(size)-offset {
+	xmlRes := parseResourceHeader(h[wimXMLReshdr : wimXMLReshdr+24])
+	if !xmlRes.readableXML(uint64(size)) {
 		return nil, errWIMXMLRange
 	}
-	data := make([]byte, length)
-	if _, err := r.ReadAt(data, int64(offset)); err != nil {
+	data := make([]byte, xmlRes.length)
+	if _, err := r.ReadAt(data, int64(xmlRes.offset)); err != nil {
 		return nil, err
 	}
 	return parseWIMXML(data)
 }
 
+func validWIMHeader(h []byte) bool {
+	return bytes.Equal(h[:8], wimMagic) && binary.LittleEndian.Uint32(h[8:12]) == wimHeaderSize
+}
+
+// resourceHeader is a WIM RESHDR_DISK_SHORT: a 56-bit stored size, a flags
+// byte, and the resource's offset in the file.
+type resourceHeader struct {
+	length, offset uint64
+	flags          byte
+}
+
+func parseResourceHeader(b []byte) resourceHeader {
+	var length [8]byte
+	copy(length[:7], b[:7])
+	return resourceHeader{length: binary.LittleEndian.Uint64(length[:]), flags: b[7], offset: binary.LittleEndian.Uint64(b[8:16])}
+}
+
+// packed reports a compressed or solid resource, which this reader cannot
+// decode.
+func (h resourceHeader) packed() bool { return h.flags&(reshdrCompressed|reshdrSolid) != 0 }
+
+// within reports whether the resource lies inside a file of size bytes.
+func (h resourceHeader) within(size uint64) bool {
+	return h.offset <= size && h.length <= size-h.offset
+}
+
+// readableXML reports an uncompressed, bounded XML description inside the
+// file.
+func (h resourceHeader) readableXML(size uint64) bool {
+	if h.packed() || !h.within(size) {
+		return false
+	}
+	return h.length > 0 && h.length <= maxWIMXML
+}
+
 type wimImage struct {
-	Name        string `xml:"NAME"`
-	DisplayName string `xml:"DISPLAYNAME"`
-	Windows     struct {
-		Arch             string `xml:"ARCH"`
-		InstallationType string `xml:"INSTALLATIONTYPE"`
-		Languages        struct {
-			Default string `xml:"DEFAULT"`
-		} `xml:"LANGUAGES"`
-		Version struct {
-			Major   string `xml:"MAJOR"`
-			Minor   string `xml:"MINOR"`
-			Build   string `xml:"BUILD"`
-			SPBuild string `xml:"SPBUILD"`
-		} `xml:"VERSION"`
-	} `xml:"WINDOWS"`
+	Name        string     `xml:"NAME"`
+	DisplayName string     `xml:"DISPLAYNAME"`
+	Windows     wimWindows `xml:"WINDOWS"`
+}
+
+type wimWindows struct {
+	Arch             string `xml:"ARCH"`
+	InstallationType string `xml:"INSTALLATIONTYPE"`
+	Languages        struct {
+		Default string `xml:"DEFAULT"`
+	} `xml:"LANGUAGES"`
+	Version wimVersion `xml:"VERSION"`
+}
+
+type wimVersion struct {
+	Major   string `xml:"MAJOR"`
+	Minor   string `xml:"MINOR"`
+	Build   string `xml:"BUILD"`
+	SPBuild string `xml:"SPBUILD"`
 }
 
 // maxWIMImages bounds the editions kept from one image.
@@ -129,30 +181,48 @@ func parseWIMXML(data []byte) ([]wimImage, error) {
 	return doc.Images, nil
 }
 
+// applyWIMImages describes the release from the first image, which every
+// edition on the media shares, and lists the editions.
 func applyWIMImages(s *System, images []wimImage) {
-	first := images[0].Windows
-	major, minor, build := atoi(first.Version.Major), atoi(first.Version.Minor), atoi(first.Version.Build)
-	server := strings.Contains(first.InstallationType, "Server")
-	s.Name, s.Version = windowsRelease(major, minor, build, server)
-	if build > 0 {
-		s.Build = strconv.Itoa(build)
-		if sp := atoi(first.Version.SPBuild); sp > 0 {
-			s.Build += "." + strconv.Itoa(sp)
-		}
+	w := images[0].Windows
+	v := w.Version
+	s.Name, s.Version = windowsRelease(atoi(v.Major), atoi(v.Minor), atoi(v.Build), strings.Contains(w.InstallationType, "Server"))
+	s.Build = v.build()
+	s.Arch = wimArch(w.Arch)
+	s.Language = clean(w.Languages.Default)
+	s.Editions = editionNames(images)
+}
+
+// build is the build number with its servicing revision, such as
+// 26100.1742, or "" when the image records none.
+func (v wimVersion) build() string {
+	build := atoi(v.Build)
+	if build == 0 {
+		return ""
 	}
-	s.Arch = wimArch(first.Arch)
-	s.Language = clean(first.Languages.Default)
-	seen := map[string]bool{}
+	text := strconv.Itoa(build)
+	if sp := atoi(v.SPBuild); sp > 0 {
+		text += "." + strconv.Itoa(sp)
+	}
+	return text
+}
+
+// editionNames lists each image's name once, in image order.
+func editionNames(images []wimImage) []string {
+	var names []string
 	for _, img := range images {
-		name := clean(img.Name)
-		if name == "" {
-			name = clean(img.DisplayName)
-		}
-		if name != "" && !seen[name] {
-			seen[name] = true
-			s.Editions = append(s.Editions, name)
+		if name := img.editionName(); name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
 		}
 	}
+	return names
+}
+
+func (img wimImage) editionName() string {
+	if name := clean(img.Name); name != "" {
+		return name
+	}
+	return clean(img.DisplayName)
 }
 
 func atoi(s string) int {
@@ -165,70 +235,85 @@ func atoi(s string) int {
 
 // wimArch maps the PROCESSOR_ARCHITECTURE value WIM XML records.
 func wimArch(s string) string {
-	switch strings.TrimSpace(s) {
-	case "0":
-		return "x86"
-	case "5":
-		return "arm"
-	case "9":
-		return "x86_64"
-	case "12":
-		return "arm64"
-	}
-	return ""
+	return map[string]string{"0": "x86", "5": "arm", "9": "x86_64", "12": "arm64"}[strings.TrimSpace(s)]
+}
+
+// serverReleases are the Windows Server releases by first build, newest first.
+var serverReleases = []struct {
+	build int
+	name  string
+}{
+	{26100, "Windows Server 2025"}, {20348, "Windows Server 2022"},
+	{17763, "Windows Server 2019"}, {14393, "Windows Server 2016"},
+}
+
+// legacyClients are the client releases before Windows 10, by major.minor.
+var legacyClients = map[[2]int]string{{6, 3}: "Windows 8.1", {6, 2}: "Windows 8", {6, 1}: "Windows 7"}
+
+// featureUpdates name the feature update a Windows 10 or 11 build shipped
+// as. Builds missing from the table are reported by number only.
+var featureUpdates = map[int]string{
+	19041: "2004", 19042: "20H2", 19043: "21H1", 19044: "21H2", 19045: "22H2",
+	22000: "21H2", 22621: "22H2", 22631: "23H2", 26100: "24H2", 26200: "25H2",
 }
 
 // windowsRelease names the release a Windows version number belongs to.
 func windowsRelease(major, minor, build int, server bool) (name, version string) {
 	if server {
-		switch {
-		case build >= 26100:
-			return "Windows Server 2025", ""
-		case build >= 20348:
-			return "Windows Server 2022", ""
-		case build >= 17763:
-			return "Windows Server 2019", ""
-		case build >= 14393:
-			return "Windows Server 2016", ""
-		}
-		return "Windows Server", ""
+		return serverRelease(build), ""
 	}
-	switch {
-	case major == 10 && build >= 22000:
-		return "Windows 11", featureUpdate(build)
-	case major == 10:
-		return "Windows 10", featureUpdate(build)
-	case major == 6 && minor == 3:
-		return "Windows 8.1", ""
-	case major == 6 && minor == 2:
-		return "Windows 8", ""
-	case major == 6 && minor == 1:
-		return "Windows 7", ""
+	if major == 10 {
+		return clientRelease(build), featureUpdates[build]
+	}
+	if name, ok := legacyClients[[2]int{major, minor}]; ok {
+		return name, ""
 	}
 	return "Windows", ""
 }
 
-// featureUpdate names the feature update a Windows 10 or 11 build shipped as.
-// Builds missing from the table are reported by number only.
-func featureUpdate(build int) string {
-	return map[int]string{
-		19041: "2004", 19042: "20H2", 19043: "21H1", 19044: "21H2", 19045: "22H2",
-		22000: "21H2", 22621: "22H2", 22631: "23H2", 26100: "24H2", 26200: "25H2",
-	}[build]
+func serverRelease(build int) string {
+	for _, r := range serverReleases {
+		if build >= r.build {
+			return r.name
+		}
+	}
+	return "Windows Server"
+}
+
+// clientRelease tells Windows 11 from Windows 10, which share version 10.0.
+func clientRelease(build int) string {
+	if build >= 22000 {
+		return "Windows 11"
+	}
+	return "Windows 10"
 }
 
 // applyWindowsLabel reads what a Microsoft volume label such as
-// CCCOMA_X64FRE_ZH-TW_DV9 says about architecture and language.
-func applyWindowsLabel(s *System, label string) {
-	parts := strings.Split(strings.ToUpper(label), "_")
-	for i, p := range parts {
-		if !strings.HasSuffix(p, "FRE") && !strings.HasSuffix(p, "CHK") {
-			continue
-		}
-		s.Arch = normArch(strings.TrimSuffix(strings.TrimSuffix(p, "FRE"), "CHK"))
-		if i+1 < len(parts) && len(parts[i+1]) == 5 && parts[i+1][2] == '-' {
-			s.Language = strings.ToLower(parts[i+1][:2]) + "-" + parts[i+1][3:]
-		}
+// CCCOMA_X64FRE_ZH-TW_DV9 says about architecture and language: the part
+// ending in FRE or CHK names the architecture, and the next part the language.
+func applyWindowsLabel(s *System, label volumeLabel) {
+	parts := strings.Split(strings.ToUpper(string(label)), "_")
+	i := slices.IndexFunc(parts, isBuildFlavor)
+	if i < 0 {
 		return
 	}
+	s.Arch = normArch(parts[i][:len(parts[i])-3])
+	if i+1 < len(parts) {
+		s.Language = labelLanguage(parts[i+1])
+	}
+}
+
+// isBuildFlavor reports a label part such as X64FRE: an architecture followed
+// by a free or checked build marker.
+func isBuildFlavor(part string) bool {
+	return strings.HasSuffix(part, "FRE") || strings.HasSuffix(part, "CHK")
+}
+
+// labelLanguage turns a label part such as ZH-TW into zh-TW, and anything that
+// is not a language-region pair into "".
+func labelLanguage(part string) string {
+	if len(part) != 5 || part[2] != '-' {
+		return ""
+	}
+	return strings.ToLower(part[:2]) + "-" + part[3:]
 }

@@ -1,13 +1,16 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/goflasher/goflasher/internal/disk"
+	"github.com/goflasher/goflasher/internal/image"
 	"github.com/goflasher/goflasher/internal/installer"
 	"github.com/goflasher/goflasher/internal/verify"
 	"github.com/goflasher/goflasher/internal/wim/native"
+	"github.com/goflasher/goflasher/internal/writer"
 )
 
 func TestInstallerErrorsRemainUserVisibleAndDistinct(t *testing.T) {
@@ -31,5 +34,25 @@ func TestInstallerErrorsRemainUserVisibleAndDistinct(t *testing.T) {
 			t.Errorf("duplicate user-visible category %q", got)
 		}
 		seen[got] = true
+	}
+}
+
+func TestErrorMessageIDPrecedenceAndFallback(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"cancel beats any cause":       {errors.Join(installer.ErrWIMSplitFailure, context.Canceled), "error.cancelled"},
+		"ABI mismatch beats available": {errors.Join(ErrInstallerBuilderUnavailable, native.ErrABIMismatch), "error.libwim_abi"},
+		"builder unavailable":          {ErrInstallerBuilderUnavailable, "error.libwim_unavailable"},
+		"raw target too small":         {writer.ErrTargetTooSmall, "error.target_small"},
+		"unsafe classification":        {image.ErrUnsafeClassification, "error.iso_unsupported"},
+		"unsupported installer":        {installer.ErrUnsupported, "error.iso_unsupported"},
+		"uncategorized":                {errors.New("boom"), "error.operation"},
+		"nil":                          {nil, "error.operation"},
+	} {
+		if got := ErrorMessageID(tc.err); got != tc.want {
+			t.Errorf("%s: got %q, want %q", name, got, tc.want)
+		}
 	}
 }
