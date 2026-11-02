@@ -40,10 +40,12 @@ if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
   exit 65
 fi
 
+# Hash stdin: given a path with a backslash (Windows $RUNNER_TEMP), GNU
+# sha256sum escapes the name and prefixes the line with "\".
 if command -v sha256sum >/dev/null 2>&1; then
-  actual=$(sha256sum "$archive" | awk '{print $1}')
+  actual=$(sha256sum <"$archive" | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then
-  actual=$(shasum -a 256 "$archive" | awk '{print $1}')
+  actual=$(shasum -a 256 <"$archive" | awk '{print $1}')
 else
   echo "no SHA-256 utility available" >&2
   exit 69
